@@ -559,6 +559,7 @@ class MarketAnalysis(BaseModel):
     anomaly     : Anomaly report from Spider-Man (optional)
     """
 
+    schema_version: int = Field(default=1, description="Schema version for migration safety")
     chart: MarketData = Field(..., description="Required: technical analysis data")
     sentiment: Optional[SentimentData] = None
     onchain: Optional[OnchainData] = None

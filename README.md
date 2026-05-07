@@ -4,7 +4,7 @@
 
 [![Status](https://img.shields.io/badge/status-paper--only-yellow)]()
 [![Node](https://img.shields.io/badge/node-%E2%89%A520-green)]()
-[![Python](https://img.shields.io/badge/python-3.12-blue)]()
+[![Python](https://img.shields.io/badge/python-3.13--recommended-blue)]()
 [![License](https://img.shields.io/badge/license-private-lightgrey)]()
 
 ---
@@ -76,11 +76,17 @@ A documentação detalhada vive em [`docs/obsidian/`](./docs/obsidian/) — segu
 ## Stack
 
 - **Runtime principal**: Node.js ≥ 20, TypeScript 5.7
-- **Componentes auxiliares**: Python 3.12 (pytest, asyncio)
+- **Componentes auxiliares**: Python 3.13 recomendado (pytest, asyncio)
 - **Exchange**: Hyperliquid (mock-only)
 - **Notificações**: Telegram
 - **News/sentiment**: CryptoPanic
 - **LLM**: OpenAI
+
+> **Python 3.14 caveat:** o pytest passa em 3.14 graças a lazy imports
+> em Superman/Vision/Iron Man, mas o runtime real do Superman exige
+> `pandas-ta` que tem `numba` como dep transitiva. `numba` ainda não
+> compila em 3.14. Para `python run.py --once` funcionar end-to-end,
+> use Python 3.13. Veja `requirements.txt` para os 3 workarounds.
 
 ## Setup local
 

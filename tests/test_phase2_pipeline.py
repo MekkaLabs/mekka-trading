@@ -494,6 +494,7 @@ async def test_nick_fury_full_paper_cycle(monkeypatch):
     fury._professor.close = AsyncMock()
     fury._vision.run = AsyncMock(return_value=signal)
     fury._vision.close = AsyncMock()
+    fury._daily_pnl.record_cycle = AsyncMock()  # Story 027 wiring
     # Batman stays REAL — exercises the deterministic gate.
     # Iron Man stays REAL — exercises the paper path (no SDK required).
 

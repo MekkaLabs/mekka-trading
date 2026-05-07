@@ -45,6 +45,7 @@ class ExecutionResult(BaseModel):
     metadata      : Extra context
     """
 
+    schema_version: int = Field(default=1, description="Schema version for migration safety")
     timestamp: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )

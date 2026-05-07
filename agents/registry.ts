@@ -19,4 +19,5 @@ export const AGENT_REGISTRY: AgentProfile[] = [
   { codename: 'Vision', role: 'Predictive Analyst', mission: 'Synthesize predictive features and directional confidence.' },
   { codename: 'Thor', role: 'Volatility Engine', mission: 'Measure and contextualize volatility spikes.' },
   { codename: 'Deadpool', role: 'Chaos Simulator', mission: 'Inject stress scenarios for resilience tests.' },
+  { codename: 'Portfolio Manager', role: 'Read-only equity & open-positions snapshot', mission: 'Poll Hyperliquid clearinghouseState read-only and feed Nick Fury equity + Batman open_positions; paper fallback when credentials missing.' },
 ];

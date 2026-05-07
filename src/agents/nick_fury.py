@@ -23,8 +23,10 @@ Two loops are exposed:
     `settings.monitor_interval_seconds`, default 5m). Currently logs
     open positions; a richer monitor will land in a follow-up story.
 
-Equity is currently sourced from a constant default — the wiring to a
-real account-state fetch is a separate task (Portfolio Manager).
+Equity and open-positions are sourced from Portfolio Manager every
+cycle (Story 026). The optional `equity_usd` argument on
+`run_main_cycle` overrides Portfolio Manager when provided (used by the
+CLI `--equity` flag and by tests).
 """
 
 from __future__ import annotations
@@ -38,46 +40,32 @@ from loguru import logger
 from src.agents.base import AgentError, BaseAgent
 from src.agents.batman import Batman, is_kill_switch_active
 from src.agents.iron_man import IronMan
+from src.agents.portfolio_manager import PortfolioManager
 from src.agents.professor_x import ProfessorX
 from src.agents.vision import Vision
 from src.config.settings import settings
 from src.models.execution import ExecutionResult, ExecutionStatus
+from src.models.orchestration import CycleReport  # re-exported below for back-compat
+from src.models.portfolio import EquitySnapshot, EquitySource
 from src.models.risk import RiskApproval, RiskVerdict
 from src.models.signal import TradingSignal
 from src.persistence.repository import MekkaRepository
+from src.services.daily_pnl_writer import DailyPnLWriter
 
 
 # ---------------------------------------------------------------------------
-# Default starting equity (USD) — overridden by portfolio manager later
+# Default starting equity (USD) — used only when both Portfolio Manager and
+# the CLI `--equity` override are unavailable. Kept for backward-compatibility
+# with code that called `run_main_cycle()` with the old default.
 # ---------------------------------------------------------------------------
 _DEFAULT_EQUITY_USD = 10_000.0
 
 
-class CycleReport:
-    """Lightweight container for a per-symbol cycle outcome."""
-
-    def __init__(
-        self,
-        symbol: str,
-        signal: Optional[TradingSignal] = None,
-        approval: Optional[RiskApproval] = None,
-        execution: Optional[ExecutionResult] = None,
-        error: Optional[str] = None,
-    ) -> None:
-        self.symbol = symbol
-        self.signal = signal
-        self.approval = approval
-        self.execution = execution
-        self.error = error
-
-    def is_executed(self) -> bool:
-        if self.execution is None:
-            return False
-        return self.execution.status in (
-            ExecutionStatus.FILLED,
-            ExecutionStatus.PARTIAL,
-            ExecutionStatus.PAPER,
-        )
+# `CycleReport` is now a Pydantic model living in
+# `src/models/orchestration.py`. It is imported above and re-exported
+# here so any existing `from src.agents.nick_fury import CycleReport`
+# continues to work without changes.
+__all__ = ["NickFury", "CycleReport", "run_forever"]
 
 
 class NickFury(BaseAgent[list[CycleReport]]):
@@ -92,6 +80,8 @@ class NickFury(BaseAgent[list[CycleReport]]):
         self._vision = Vision()
         self._batman = Batman()
         self._ironman = IronMan()
+        self._portfolio = PortfolioManager()
+        self._daily_pnl = DailyPnLWriter()
 
     # ------------------------------------------------------------------
     # Public API
@@ -127,7 +117,7 @@ class NickFury(BaseAgent[list[CycleReport]]):
 
     async def _run(  # type: ignore[override]
         self,
-        equity_usd: float = _DEFAULT_EQUITY_USD,
+        equity_usd: Optional[float] = None,
     ) -> list[CycleReport]:
         """One full pass across all configured assets."""
         return await self.run_main_cycle(equity_usd=equity_usd)
@@ -138,8 +128,14 @@ class NickFury(BaseAgent[list[CycleReport]]):
 
     async def run_main_cycle(
         self,
-        equity_usd: float = _DEFAULT_EQUITY_USD,
+        equity_usd: Optional[float] = None,
     ) -> list[CycleReport]:
+        """
+        Run one full pass across all configured assets.
+
+        Equity is sourced from Portfolio Manager every cycle. Pass
+        `equity_usd` to override (used by CLI `--equity` and by tests).
+        """
         if is_kill_switch_active():
             self._log.warning("[NickFury] Kill switch ACTIVE — main cycle skipped")
             await MekkaRepository.log_event(
@@ -154,18 +150,43 @@ class NickFury(BaseAgent[list[CycleReport]]):
         drawdown = await MekkaRepository.get_today_drawdown_pct()
         trades_today = await MekkaRepository.count_trades_today()
 
+        # Snapshot account equity + open positions once per cycle
+        snapshot: EquitySnapshot = await self._portfolio.run()
+        await MekkaRepository.log_event(
+            agent="PortfolioManager",
+            event=f"SNAPSHOT_{snapshot.source.value}",
+            severity="INFO" if not snapshot.is_degraded else "WARNING",
+            message=snapshot.summary(),
+            payload={
+                "equity_usd": snapshot.equity_usd,
+                "open_positions": snapshot.open_positions_count,
+                "is_paper": snapshot.is_paper,
+                "error": snapshot.error,
+            },
+        )
+
+        # CLI override wins over Portfolio Manager. Otherwise use snapshot.
+        effective_equity = (
+            equity_usd if equity_usd is not None else snapshot.equity_usd
+        )
+        open_positions = snapshot.open_positions_count
+
         reports: list[CycleReport] = []
         for symbol in settings.trading_assets:
             try:
                 report = await self._cycle_for_symbol(
                     symbol=symbol,
-                    equity_usd=equity_usd,
+                    equity_usd=effective_equity,
                     current_drawdown_pct=drawdown,
                     trades_today=trades_today,
+                    open_positions=open_positions,
                 )
                 reports.append(report)
                 if report.is_executed():
                     trades_today += 1
+                    # A new paper/live position increases the count for the
+                    # remainder of this cycle so Batman sees the running total.
+                    open_positions += 1
             except Exception as exc:  # noqa: BLE001
                 self._log.exception(f"[NickFury] {symbol} cycle crashed: {exc}")
                 reports.append(CycleReport(symbol=symbol, error=str(exc)))
@@ -177,6 +198,20 @@ class NickFury(BaseAgent[list[CycleReport]]):
                     message=str(exc),
                 )
 
+        # End-of-cycle Daily PnL upsert. Uses the *effective* equity
+        # (CLI override wins over snapshot, same hierarchy used for
+        # Iron Man sizing) and `trades_today` count after this cycle so
+        # Batman's next read of get_today_drawdown_pct sees fresh data.
+        try:
+            await self._daily_pnl.record_cycle(
+                equity_usd=effective_equity,
+                trades_count_today=trades_today,
+                snapshot=snapshot,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Persistence failure must not break the main cycle return value.
+            self._log.error(f"[NickFury] daily_pnl record_cycle failed: {exc}")
+
         return reports
 
     async def _cycle_for_symbol(
@@ -185,6 +220,7 @@ class NickFury(BaseAgent[list[CycleReport]]):
         equity_usd: float,
         current_drawdown_pct: float,
         trades_today: int,
+        open_positions: int = 0,
     ) -> CycleReport:
         # 1. Analysis fan-out
         try:
@@ -202,7 +238,7 @@ class NickFury(BaseAgent[list[CycleReport]]):
             volatility=analysis.volatility,
             liquidity=analysis.liquidity,
             current_drawdown_pct=current_drawdown_pct,
-            open_positions=0,  # TODO: portfolio manager will fill this
+            open_positions=open_positions,
             trades_today=trades_today,
         )
 
@@ -274,12 +310,16 @@ class NickFury(BaseAgent[list[CycleReport]]):
 # ---------------------------------------------------------------------------
 
 
-async def run_forever(equity_usd: float = _DEFAULT_EQUITY_USD) -> None:
+async def run_forever(equity_usd: Optional[float] = None) -> None:
     """
     Run main + monitor cycles forever using settings intervals.
 
     Wakes up every monitor_interval_seconds; runs main cycle every
     main_loop_interval_seconds (rounded to monitor ticks).
+
+    `equity_usd` is an optional override (CLI `--equity`). When None,
+    Portfolio Manager sources equity from Hyperliquid (or from the
+    paper-fallback when credentials are missing).
     """
     fury = NickFury()
     await fury.initialize()

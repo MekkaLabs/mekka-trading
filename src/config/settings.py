@@ -201,6 +201,20 @@ class Settings(BaseSettings):
         description="Path to the SQLite database file",
     )
 
+    # --------------------------------------------------------------------------
+    # Portfolio Manager (Story 026)
+    # --------------------------------------------------------------------------
+    paper_equity_usd: float = Field(
+        default=10_000.0,
+        gt=0.0,
+        description=(
+            "Synthetic equity used when paper_trading=True and the live "
+            "Hyperliquid clearinghouseState is unavailable. Portfolio Manager "
+            "falls back to this value to keep Batman validating against a "
+            "non-zero number."
+        ),
+    )
+
     # ==========================================================================
     # Validators
     # ==========================================================================

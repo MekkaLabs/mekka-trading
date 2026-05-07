@@ -27,8 +27,20 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from openai import AsyncOpenAI
-from openai import APIError, APITimeoutError, RateLimitError
+# `openai` is a runtime dependency, but we wrap the import so the rest of the
+# package can be loaded for unit tests / type-checking even when openai is
+# not installed. Tests mock `src.agents.vision.AsyncOpenAI` directly, which
+# still works because the name is defined at module level.
+try:
+    from openai import AsyncOpenAI
+    from openai import APIError, APITimeoutError, RateLimitError
+except ModuleNotFoundError:  # pragma: no cover - tested via mocks
+    AsyncOpenAI = None  # type: ignore[assignment]
+
+    class _OpenAIPlaceholder(Exception):
+        """Stand-in for OpenAI exceptions when the SDK isn't installed."""
+
+    APIError = APITimeoutError = RateLimitError = _OpenAIPlaceholder  # type: ignore[misc,assignment]
 
 from src.agents.base import BaseAgent
 from src.config.settings import settings

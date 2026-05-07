@@ -77,6 +77,7 @@ class TradingSignal(BaseModel):
     metadata            : Optional extra data (e.g. model name, tokens used)
     """
 
+    schema_version: int = Field(default=1, description="Schema version for migration safety")
     timestamp: datetime = Field(default_factory=lambda: __import__("datetime").datetime.now(__import__("datetime").timezone.utc))
     symbol: str = Field(..., description="Asset symbol, e.g. 'BTC'")
     action: TradeAction = Field(..., description="Trade direction or HOLD")

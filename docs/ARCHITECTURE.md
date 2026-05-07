@@ -98,18 +98,24 @@ normalização de erros.
 
 ### Layer 4 — Command & Control
 
-| Agente    | Input             | Output Pydantic       | Deps externas |
-| --------- | ----------------- | --------------------- | ------------- |
-| Nick Fury | `equity_usd?`     | `list[CycleReport]`   | (orquestra L1–L3) |
+| Agente            | Input                          | Output Pydantic       | Deps externas              |
+| ----------------- | ------------------------------ | --------------------- | -------------------------- |
+| Nick Fury         | `equity_usd?: Optional[float]` | `list[CycleReport]`   | (orquestra L1–L3 + L4 PM + DailyPnLWriter)  |
+| Portfolio Manager | (none — reads settings)        | `EquitySnapshot`      | aiohttp → Hyperliquid /info (read-only) |
 
-### Heróis pendentes (Story 026+)
+### Services (não-agente)
+
+| Service            | Input                                     | Output Pydantic/dataclass | Deps externas |
+| ------------------ | ----------------------------------------- | ------------------------- | ------------- |
+| `DailyPnLWriter`   | `equity_usd, trades_count_today, snapshot?` | `DailyPnLSnapshot`        | `Repository.upsert_daily_pnl` |
+
+### Heróis pendentes (Story 027+)
 
 | Agente    | Input planejado                  | Output planejado    | Status |
 | --------- | -------------------------------- | ------------------- | ------ |
 | Wolverine | (positions snapshot + market)    | RecoveryPlan        | pendente |
 | Flash     | `MarketData + tick stream`       | `MomentumSignal`    | pendente |
 | Deadpool  | `historical signals + trades`    | BacktestReport      | pendente |
-| Portfolio Manager | (exchange account state) | EquitySnapshot      | pendente |
 
 ## 5. Models Pydantic — contratos de dados
 
@@ -128,6 +134,8 @@ normalização de erros.
 | `MarketRegime`      | `models/signal.py`            | Professor X (futuro) | Batman (futuro)     |
 | `RiskApproval`      | `models/risk.py`              | Batman            | Iron Man, audit_log    |
 | `ExecutionResult`   | `models/execution.py`         | Iron Man          | Repository, audit_log  |
+| `PositionSummary`   | `models/portfolio.py`         | Portfolio Manager | (consumed in EquitySnapshot) |
+| `EquitySnapshot`    | `models/portfolio.py`         | Portfolio Manager | Nick Fury, Batman, audit_log |
 
 **Convenções:**
 
@@ -147,8 +155,8 @@ inicialização (`MekkaRepository.initialize()`).
 | ------------ | ----------------------- | ---------------------------------- |
 | `signals`    | Nick Fury (após Vision) | Repository.list_recent_signals     |
 | `trades`     | Nick Fury (após Iron Man) | Repository.count_trades_today    |
-| `daily_pnl`  | (futuro Wolverine/PM)   | Repository.get_today_drawdown_pct  |
-| `audit_log`  | qualquer agente via NF  | (futuro Deadpool/inspeção CLI)     |
+| `daily_pnl`  | DailyPnLWriter (fim de cycle) | Batman → Repository.get_today_drawdown_pct |
+| `audit_log`  | qualquer agente via NF  | Dashboard, futuro Deadpool         |
 
 ## 7. Ponte TypeScript ↔ Python
 
@@ -238,6 +246,7 @@ observability/
 | `MONITOR_INTERVAL_SECONDS`   | `300`          | Nick Fury (run_forever)          |
 | `MEKKA_KILL_SWITCH`          | (vazio)        | Batman.is_kill_switch_active     |
 | `SQLITE_DB_PATH`             | `data/mekka_trading.db` | Persistence              |
+| `PAPER_EQUITY_USD`           | `10000.0`      | Portfolio Manager (paper fallback) |
 | `TELEGRAM_BOT_TOKEN`         | (vazio)        | (futuro)                         |
 | `TELEGRAM_CHAT_ID`           | (vazio)        | (futuro)                         |
 | `CRYPTOPANIC_API_KEY`        | (vazio)        | Doctor Strange (opcional)        |

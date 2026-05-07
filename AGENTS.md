@@ -4,7 +4,7 @@
 
 Establish an autonomous, modular, and observable trading operating system foundation with strict paper-trading safety controls. Every identity in this project is a super-hero — there are no other naming conventions.
 
-## Roster (14 heroes across 4 layers)
+## Roster (15 heroes across 4 layers)
 
 ### Layer 1 — Market Analysis (run in parallel)
 - **Superman** — Chief Market Overseer. Multi-timeframe technical analysis (RSI, EMA-20/50, Bollinger, MACD, ATR) over Hyperliquid OHLCV via CCXT, with Binance/Bybit fallback. Classifies trend BULLISH / BEARISH / NEUTRAL with strength.
@@ -23,9 +23,10 @@ Establish an autonomous, modular, and observable trading operating system founda
 - **Iron Man** — Hyperliquid Execution Engineer. Paper-first; live mode uses `hyperliquid-python-sdk` + `eth-account`, IOC entry + reduce-only SL/TP brackets, retentado via tenacity (3 attempts, exponential backoff).
 
 ### Layer 4 — Command & Control
-- **Nick Fury** — Mission Commander. Top-level orchestrator. `run_main_cycle()` (default 4h) executa Análise → Vision → Batman → Iron Man → SQLite por símbolo. `run_monitor_cycle()` (default 5min) heartbeat. `run_forever()` agenda ambos.
+- **Nick Fury** — Mission Commander. Top-level orchestrator. `run_main_cycle()` (default 4h) executa Portfolio → Análise → Vision → Batman → Iron Man → SQLite por símbolo. `run_monitor_cycle()` (default 5min) heartbeat. `run_forever()` agenda ambos.
+- **Portfolio Manager** — Read-only equity & open-positions snapshot. Polla Hyperliquid `clearinghouseState` no início de cada cycle, retorna `EquitySnapshot` com fallback paper quando credenciais ausentes ou rede indisponível. Nunca envia ordens.
 
-### Pending heroes (Story 026+)
+### Pending heroes (Story 027+)
 - **Wolverine** — Recovery Agent. Position monitor expandido, gestão dinâmica de SL/TP, recovery plan pós-drawdown.
 - **Flash** — Momentum Scalper. Sub-loop intra-candle para entradas táticas.
 - **Deadpool** — Chaos Simulator. Backtest e stress test sobre histórico persistido.

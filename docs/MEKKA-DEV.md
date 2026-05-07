@@ -88,10 +88,13 @@ minutos, ela é grande demais. Quebre em duas stories.
 - **Classe de agente**: PascalCase sem espaço (`IronMan`,
   `DoctorStrange`, `NickFury`).
 - **Story file**: `docs/stories/story-NNN-slug-curto.md`, NNN com 3
-  dígitos zero-padded.
+  dígitos zero-padded. Index agrupado por milestone em
+  `docs/stories/INDEX.md`.
 - **Pydantic model**: PascalCase, vive em `src/models/` (signal.py,
-  market_data.py, risk.py, execution.py).
+  market_data.py, risk.py, execution.py, portfolio.py).
 - **Squad folder**: `squads/<dominio>-squad/` ou `squads/<dominio>/`.
+- **Dashboard**: read-only por princípio. Detalhes em
+  `docs/DASHBOARD.md`. Não escrever no SQLite a partir do dashboard.
 
 ## 7. TS vs Python — quem é dono de quê
 
@@ -107,13 +110,35 @@ minutos, ela é grande demais. Quebre em duas stories.
 | LLM decision (Vision)                       | Python   | `src/agents/vision.py`                          |
 | Risk gate (Batman, deterministic)           | Python   | `src/agents/batman.py`                          |
 | Hyperliquid execution (Iron Man)            | Python   | `src/agents/iron_man.py`                        |
+| Portfolio Manager (read-only account state) | Python   | `src/agents/portfolio_manager.py`               |
 | SQLite persistence                          | Python   | `src/persistence/`, `data/mekka_trading.db`     |
-| CLI Python                                  | Python   | `run.py`                                        |
+| Dashboard web (aiohttp + WebSocket)         | Python   | `src/dashboard/server.py`, `src/dashboard/static/` |
+| CLI Python                                  | Python   | `run.py` (`--once`, `--dashboard`, `--dashboard-only`) |
 | CLI TypeScript                              | TS       | `cli/main.ts`, `dist/cli/*.js`                  |
 
 **Regra de não-duplicação:** se um conceito existe dos dois lados (ex:
 audit log), um lado é fonte de verdade e o outro é mirror. Hoje os dois
 lados coexistem sem decisão formal — não introduza um terceiro caminho.
+
+**Catálogo de heróis:** `AGENTS.md` é a fonte humana; `agents/registry.ts`
+é a fonte de código TS. Use `python3 scripts/check_roster_consistency.py`
+antes de commitar quando tocar em qualquer um dos dois.
+
+**Convenções de contrato (Story 028):**
+- Codename canônico: importe `HeroName` de `src/models/heroes.py`
+  em vez de string literal quando criar agente novo.
+- Event code para audit log: importe `AgentEvent` de
+  `src/models/events.py`. Strings ainda funcionam mas estão em
+  modo de adoção progressiva.
+- Erros estruturados: emita `AgentErrorReport` (de
+  `src/models/errors.py`) em paths defensivos, em vez de dict
+  livre.
+- Timestamp UTC: use `utc_now()` de `src/utils/time.py`.
+- Todo model novo herda `BaseModel` e ganha `schema_version: int = 1`.
+- Todo model que vai para LLM implementa `to_prompt_section() -> str`
+  (Protocol `Promptable`).
+- Todo model que vai para `audit_log.payload` implementa
+  `to_audit_payload() -> dict` (Protocol `AuditPayloadable`).
 
 ## 8. Settings — comportamento mora aqui
 

@@ -20,7 +20,8 @@ Layer 3 — Risk & Execution:
   IronMan        → Hyperliquid Execution Engineer
 
 Layer 4 — Command & Control:
-  NickFury       → Mission Commander (top-level orchestrator)
+  NickFury         → Mission Commander (top-level orchestrator)
+  PortfolioManager → Read-only equity & open-positions snapshot
 
 Imports are lazy to keep optional dependencies (ccxt, openai,
 hyperliquid-python-sdk) from being pulled at package import time.
@@ -46,6 +47,7 @@ __all__ = [
     "IronMan",
     # Layer 4 — Command & Control
     "NickFury",
+    "PortfolioManager",
 ]
 
 
@@ -90,4 +92,7 @@ def __getattr__(name: str):  # noqa: N807 — module-level __getattr__
     if name == "NickFury":
         from src.agents.nick_fury import NickFury
         return NickFury
+    if name == "PortfolioManager":
+        from src.agents.portfolio_manager import PortfolioManager
+        return PortfolioManager
     raise AttributeError(f"module 'src.agents' has no attribute {name!r}")
