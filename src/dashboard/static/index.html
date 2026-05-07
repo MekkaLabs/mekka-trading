@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mekka Trading Command Center</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="bg-grid"></div>
+    <header class="topbar">
+      <div>
+        <h1>Mekka Trading Command Center</h1>
+        <p>Nick Fury Operations • Wall Street Marvel Office</p>
+      </div>
+      <div id="status-pill" class="pill">Conectando...</div>
+    </header>
+
+    <main class="layout">
+      <section class="panel metrics">
+        <h2>Mission Metrics</h2>
+        <div class="cards" id="metrics"></div>
+      </section>
+
+      <section class="panel scene">
+        <h2>Pixel 3D Office</h2>
+        <canvas id="office-canvas" width="900" height="520"></canvas>
+      </section>
+
+      <section class="panel">
+        <h2>Vision Signals</h2>
+        <table>
+          <thead><tr><th>Time</th><th>Symbol</th><th>Action</th><th>Conf.</th></tr></thead>
+          <tbody id="signals-body"></tbody>
+        </table>
+      </section>
+
+      <section class="panel">
+        <h2>Iron Man Executions</h2>
+        <table>
+          <thead><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Notional</th></tr></thead>
+          <tbody id="trades-body"></tbody>
+        </table>
+      </section>
+
+      <section class="panel full">
+        <h2>Hero Audit Stream</h2>
+        <div class="log" id="audit-log"></div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

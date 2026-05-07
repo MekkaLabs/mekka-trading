@@ -1,0 +1,1 @@
+{"failedAt":"2026-05-07T18:09:13.699Z","dispatcher":"always-fail","error":"permanent failure","message":{"channel":"webhook","severity":"critical","subject":"[Mekka:CRITICAL] Mission m-critical-dlq","body":"Mission m-critical-dlq health status=critical. reason=tampered","missionId":"m-critical-dlq"}}
