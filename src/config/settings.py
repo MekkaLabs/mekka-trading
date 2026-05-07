@@ -17,7 +17,7 @@ Usage
 from __future__ import annotations
 
 from functools import cached_property
-from typing import Annotated, List, Literal
+from typing import Annotated, List, Literal, Optional
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -212,6 +212,43 @@ class Settings(BaseSettings):
             "Hyperliquid clearinghouseState is unavailable. Portfolio Manager "
             "falls back to this value to keep Batman validating against a "
             "non-zero number."
+        ),
+    )
+
+    # --------------------------------------------------------------------------
+    # Safety Net (Story 029a)
+    # --------------------------------------------------------------------------
+    max_total_capital_pct: Annotated[float, Field(gt=0.0, le=1.0)] = Field(
+        default=0.10,
+        description=(
+            "Maximum total notional deployed across all open positions, as a "
+            "fraction of equity. Batman blocks any new entry that would push "
+            "running notional above this cap."
+        ),
+    )
+    max_total_notional_usd: Optional[float] = Field(
+        default=None,
+        description=(
+            "Optional absolute cap (USD) on total notional. When set, takes "
+            "precedence over max_total_capital_pct. Use as belt-and-suspenders "
+            "during the first weeks on testnet."
+        ),
+    )
+    max_consecutive_exec_errors: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Engage kill switch after this many consecutive ExecutionStatus.ERROR "
+            "outcomes from Iron Man. Counter resets on any non-error execution."
+        ),
+    )
+    max_consecutive_vision_fallbacks: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Engage kill switch after this many consecutive Vision fallback "
+            "HOLDs (signal.metadata.fallback=True). Counter resets on any "
+            "non-fallback signal."
         ),
     )
 

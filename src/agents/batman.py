@@ -106,6 +106,8 @@ class Batman(BaseAgent[RiskApproval]):
         current_drawdown_pct: float = 0.0,
         open_positions: int = 0,
         trades_today: int = 0,
+        running_notional_usd: float = 0.0,
+        equity_usd: float = 0.0,
     ) -> RiskApproval:
         symbol = signal.symbol
         reasons: list[str] = []
@@ -183,6 +185,48 @@ class Batman(BaseAgent[RiskApproval]):
                 reasons=reasons,
                 breached_limits=breached,
             )
+
+        # ---------------------------------------------------------------
+        # 3b. Total capital cap (Story 029a — Safety Net)
+        # ---------------------------------------------------------------
+        # Compute the notional this signal would add (size_pct * leverage * equity).
+        # We check BEFORE size adjustments so the cap is on Vision's intent,
+        # not on the post-Thor-multiplier value. If the intent itself blows
+        # the cap, we reject regardless of how much Thor would have shrunk it.
+        if equity_usd > 0:
+            new_notional = equity_usd * signal.size_pct * signal.leverage
+            projected_total = running_notional_usd + new_notional
+
+            # Absolute cap takes precedence when set
+            if settings.max_total_notional_usd is not None:
+                if projected_total > settings.max_total_notional_usd:
+                    reasons.append(
+                        f"Projected total notional ${projected_total:,.2f} would "
+                        f"exceed absolute cap ${settings.max_total_notional_usd:,.2f}"
+                    )
+                    breached.append("max_total_notional_usd")
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        breached_limits=breached,
+                    )
+
+            # Percentage cap (always evaluated when equity > 0)
+            cap_pct = settings.max_total_capital_pct
+            cap_usd = equity_usd * cap_pct
+            if projected_total > cap_usd:
+                reasons.append(
+                    f"Projected total notional ${projected_total:,.2f} would "
+                    f"exceed {cap_pct:.1%} of equity (${cap_usd:,.2f})"
+                )
+                breached.append("max_total_capital_pct")
+                return RiskApproval(
+                    symbol=symbol,
+                    verdict=RiskVerdict.REJECTED,
+                    reasons=reasons,
+                    breached_limits=breached,
+                )
 
         # ---------------------------------------------------------------
         # 4. Confidence and R:R quality gates

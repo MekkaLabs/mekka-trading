@@ -11,11 +11,14 @@ DailyPnLWriter introduced in Story 027.
 
 from __future__ import annotations
 
-__all__ = ["DailyPnLWriter"]
+__all__ = ["DailyPnLWriter", "ConsecutiveBreaker"]
 
 
 def __getattr__(name: str):  # noqa: N807
     if name == "DailyPnLWriter":
         from src.services.daily_pnl_writer import DailyPnLWriter
         return DailyPnLWriter
+    if name == "ConsecutiveBreaker":
+        from src.services.breakers import ConsecutiveBreaker
+        return ConsecutiveBreaker
     raise AttributeError(f"module 'src.services' has no attribute {name!r}")

@@ -38,7 +38,7 @@ from typing import Optional
 from loguru import logger
 
 from src.agents.base import AgentError, BaseAgent
-from src.agents.batman import Batman, is_kill_switch_active
+from src.agents.batman import Batman, engage_kill_switch, is_kill_switch_active
 from src.agents.iron_man import IronMan
 from src.agents.portfolio_manager import PortfolioManager
 from src.agents.professor_x import ProfessorX
@@ -48,8 +48,9 @@ from src.models.execution import ExecutionResult, ExecutionStatus
 from src.models.orchestration import CycleReport  # re-exported below for back-compat
 from src.models.portfolio import EquitySnapshot, EquitySource
 from src.models.risk import RiskApproval, RiskVerdict
-from src.models.signal import TradingSignal
+from src.models.signal import TradeAction, TradingSignal
 from src.persistence.repository import MekkaRepository
+from src.services.breakers import ConsecutiveBreaker
 from src.services.daily_pnl_writer import DailyPnLWriter
 
 
@@ -82,6 +83,15 @@ class NickFury(BaseAgent[list[CycleReport]]):
         self._ironman = IronMan()
         self._portfolio = PortfolioManager()
         self._daily_pnl = DailyPnLWriter()
+        # Story 029a — Safety Net breakers
+        self._exec_error_breaker = ConsecutiveBreaker(
+            name="exec_error",
+            threshold=settings.max_consecutive_exec_errors,
+        )
+        self._vision_fallback_breaker = ConsecutiveBreaker(
+            name="vision_fallback",
+            threshold=settings.max_consecutive_vision_fallbacks,
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -171,6 +181,12 @@ class NickFury(BaseAgent[list[CycleReport]]):
         )
         open_positions = snapshot.open_positions_count
 
+        # Story 029a — start running notional from existing positions in
+        # the snapshot. Each new paper/live execution this cycle adds to it.
+        running_notional_usd = sum(
+            p.size * p.entry_price for p in (snapshot.positions or [])
+        )
+
         reports: list[CycleReport] = []
         for symbol in settings.trading_assets:
             try:
@@ -180,6 +196,7 @@ class NickFury(BaseAgent[list[CycleReport]]):
                     current_drawdown_pct=drawdown,
                     trades_today=trades_today,
                     open_positions=open_positions,
+                    running_notional_usd=running_notional_usd,
                 )
                 reports.append(report)
                 if report.is_executed():
@@ -187,6 +204,11 @@ class NickFury(BaseAgent[list[CycleReport]]):
                     # A new paper/live position increases the count for the
                     # remainder of this cycle so Batman sees the running total.
                     open_positions += 1
+                    if report.execution is not None:
+                        running_notional_usd += report.execution.notional_usd
+
+                # Story 029a — observe safety-net breakers per cycle outcome
+                await self._check_breakers(report=report)
             except Exception as exc:  # noqa: BLE001
                 self._log.exception(f"[NickFury] {symbol} cycle crashed: {exc}")
                 reports.append(CycleReport(symbol=symbol, error=str(exc)))
@@ -221,6 +243,7 @@ class NickFury(BaseAgent[list[CycleReport]]):
         current_drawdown_pct: float,
         trades_today: int,
         open_positions: int = 0,
+        running_notional_usd: float = 0.0,
     ) -> CycleReport:
         # 1. Analysis fan-out
         try:
@@ -240,6 +263,8 @@ class NickFury(BaseAgent[list[CycleReport]]):
             current_drawdown_pct=current_drawdown_pct,
             open_positions=open_positions,
             trades_today=trades_today,
+            running_notional_usd=running_notional_usd,
+            equity_usd=equity_usd,
         )
 
         await MekkaRepository.log_event(
@@ -284,6 +309,56 @@ class NickFury(BaseAgent[list[CycleReport]]):
             approval=approval,
             execution=execution,
         )
+
+    # ------------------------------------------------------------------
+    # Safety net (Story 029a)
+    # ------------------------------------------------------------------
+
+    async def _check_breakers(self, report: CycleReport) -> None:
+        """
+        Feed cycle outcome to the safety-net breakers and engage the kill
+        switch if either trips. Called once per symbol after the cycle.
+        """
+        # 1. Iron Man consecutive ERROR breaker
+        is_exec_error = (
+            report.execution is not None
+            and report.execution.status == ExecutionStatus.ERROR
+        )
+        if self._exec_error_breaker.observe(is_exec_error):
+            reason = (
+                f"{self._exec_error_breaker.threshold} consecutive Iron Man "
+                f"ERROR executions — kill switch engaged"
+            )
+            engage_kill_switch(reason)
+            await MekkaRepository.log_event(
+                agent="NickFury",
+                event="RISK_KILL_SWITCH",
+                severity="ERROR",
+                symbol=report.symbol,
+                message=reason,
+                payload={"breaker": "exec_error", "trips_lifetime": self._exec_error_breaker.trip_count},
+            )
+
+        # 2. Vision consecutive HOLD-fallback breaker
+        is_vision_fallback = (
+            report.signal is not None
+            and report.signal.action == TradeAction.HOLD
+            and bool((report.signal.metadata or {}).get("fallback", False))
+        )
+        if self._vision_fallback_breaker.observe(is_vision_fallback):
+            reason = (
+                f"{self._vision_fallback_breaker.threshold} consecutive Vision "
+                f"HOLD-fallbacks — LLM degraded, kill switch engaged"
+            )
+            engage_kill_switch(reason)
+            await MekkaRepository.log_event(
+                agent="NickFury",
+                event="RISK_KILL_SWITCH",
+                severity="ERROR",
+                symbol=report.symbol,
+                message=reason,
+                payload={"breaker": "vision_fallback", "trips_lifetime": self._vision_fallback_breaker.trip_count},
+            )
 
     # ------------------------------------------------------------------
     # Monitor cycle
