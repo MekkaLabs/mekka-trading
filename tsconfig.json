@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2022"],
+    "rootDir": ".",
+    "outDir": "dist",
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "types": ["node"]
+  },
+  "include": [
+    "index.ts",
+    "agents/**/*.ts",
+    "squads/**/*.ts",
+    "workflows/**/*.ts",
+    "exchanges/**/*.ts",
+    "market-data/**/*.ts",
+    "risk-engine/**/*.ts",
+    "execution-engine/**/*.ts",
+    "strategy-engine/**/*.ts",
+    "observability/**/*.ts",
+    "backtesting/**/*.ts",
+    "memory/**/*.ts",
+    "prompts/**/*.ts",
+    "cli/**/*.ts",
+    "tests/**/*.ts"
+  ]
+}
