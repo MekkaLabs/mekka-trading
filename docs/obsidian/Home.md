@@ -1,15 +1,20 @@
 ---
 title: Home — Mekka Trading Second Brain
 type: dashboard
-tags: [dashboard, home]
+tags: [dashboard, home, mekka-trading]
+project: mekka-trading
 created: 2026-05-07
 updated: 2026-05-07
 ---
 
 # 🧠 Mekka Trading — Segundo Cérebro
 
-> Sistema de Trading Autônomo orquestrado por IA, baseado em AIOX Core + Hyperliquid (mock).
-> Este é o vault de conhecimento do projeto: arquitetura, decisões, agentes, runbooks e aprendizados.
+> **Projeto:** `mekka-trading` (independente de `mekkalabs-docs` e `AIOX-Docs`)
+> **Repositório:** https://github.com/labsmekka/mekka-trading
+> **Cópia espelhada no vault Obsidian:** `~/Documents/Obsidian Vault/mekka-trading/`
+
+Sistema de Trading Autônomo orquestrado por IA, baseado em AIOX Core + Hyperliquid (mock).
+Este é o vault de conhecimento do projeto: arquitetura, decisões, agentes, runbooks e aprendizados.
 
 ---
 
