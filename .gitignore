@@ -182,6 +182,7 @@ aiox-core/
 _aiox-core-clone-tmp/
 _git-broken-tmp/
 _git-broken-tmp*/
+_git-stale-tmp*/
 
 # =============================================================================
 # Outras temporários
