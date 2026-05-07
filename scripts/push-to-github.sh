@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Mekka Trading — Push to GitHub (labsmekka/mekka-trading privado)
+# Mekka Trading — Push to GitHub (MekkaLabs/mekka-trading privado)
 # Usa GitHub CLI (gh). Se nao estiver logado, abre o navegador.
+#
+# Auto-detecta o usuario logado via 'gh api user'.
+# Para forcar outro owner: REPO_OWNER=outroNome ./scripts/push-to-github.sh
 #
 # Uso:
 #   chmod +x scripts/push-to-github.sh
@@ -17,14 +20,13 @@ RED='\033[0;31m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-REPO_OWNER="labsmekka"
-REPO_NAME="mekka-trading"
-REPO_FULL="${REPO_OWNER}/${REPO_NAME}"
-REPO_VISIBILITY="--private"
+# Padrao: auto-detectar do gh login. Pode override via env var.
+REPO_OWNER="${REPO_OWNER:-}"
+REPO_NAME="${REPO_NAME:-mekka-trading}"
+REPO_VISIBILITY="${REPO_VISIBILITY:---private}"
 
 echo -e "${BLUE}════════════════════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}  Mekka Trading — Push to GitHub${NC}"
-echo -e "${BLUE}  Destino: ${REPO_FULL} (PRIVADO)${NC}"
 echo -e "${BLUE}════════════════════════════════════════════════════════════════${NC}"
 echo ""
 
@@ -54,35 +56,43 @@ echo ""
 echo -e "${YELLOW}🔐 Verificando autenticacao gh...${NC}"
 if ! gh auth status &> /dev/null; then
     echo -e "${YELLOW}   Voce nao esta logado. Iniciando login...${NC}"
-    echo -e "${YELLOW}   ATENCAO: Use a conta ${BLUE}labsmekka@gmail.com${YELLOW} no navegador!${NC}"
     echo ""
     gh auth login --web --git-protocol https
 fi
 
-# Confirmar que esta logado na conta certa
+# Auto-detectar usuario gh
 GH_USER=$(gh api user --jq .login 2>/dev/null || echo "")
-echo -e "${GREEN}   ✓ Logado como: ${GH_USER}${NC}"
-
 if [ -z "$GH_USER" ]; then
     echo -e "${RED}❌ Falha em obter usuario gh${NC}"
     exit 1
 fi
+echo -e "${GREEN}   ✓ Logado como: ${GH_USER}${NC}"
 
-# 3. Verificar se o usuário tem acesso à org labsmekka
-echo ""
-echo -e "${YELLOW}🏢 Verificando acesso a org/usuario '${REPO_OWNER}'...${NC}"
-if ! gh api "users/${REPO_OWNER}" &> /dev/null && ! gh api "orgs/${REPO_OWNER}" &> /dev/null; then
-    echo -e "${RED}❌ '${REPO_OWNER}' nao existe no GitHub.${NC}"
-    echo ""
-    echo -e "${YELLOW}Crie o usuario/org primeiro em:${NC}"
-    echo -e "   ${GREEN}https://github.com/signup${NC} (se quer criar a conta)"
-    echo -e "   ${GREEN}https://github.com/account/organizations/new${NC} (se quer criar org)"
-    echo ""
-    echo -e "${YELLOW}Ou troque para sua conta pessoal editando este script:${NC}"
-    echo -e "   REPO_OWNER=\"${GH_USER}\""
-    exit 1
+# 3. Definir REPO_OWNER se nao foi setado via env var
+if [ -z "$REPO_OWNER" ]; then
+    REPO_OWNER="$GH_USER"
 fi
-echo -e "${GREEN}   ✓ '${REPO_OWNER}' acessivel${NC}"
+REPO_FULL="${REPO_OWNER}/${REPO_NAME}"
+
+echo ""
+echo -e "${YELLOW}📍 Reposiorio destino: ${BLUE}${REPO_FULL}${YELLOW} (${REPO_VISIBILITY/--/})${NC}"
+
+# 4. Verificar acesso ao owner (so checar se for diferente do usuario logado)
+if [ "$REPO_OWNER" != "$GH_USER" ]; then
+    echo ""
+    echo -e "${YELLOW}🏢 Verificando acesso a org/usuario '${REPO_OWNER}'...${NC}"
+    if ! gh api "users/${REPO_OWNER}" &> /dev/null && ! gh api "orgs/${REPO_OWNER}" &> /dev/null; then
+        echo -e "${RED}❌ '${REPO_OWNER}' nao existe no GitHub.${NC}"
+        echo ""
+        echo -e "${YELLOW}Para usar sua conta pessoal (${GH_USER}), rode sem REPO_OWNER:${NC}"
+        echo -e "   ${GREEN}./scripts/push-to-github.sh${NC}"
+        echo ""
+        echo -e "${YELLOW}Para usar outra org existente:${NC}"
+        echo -e "   ${GREEN}REPO_OWNER=NomeDaOrg ./scripts/push-to-github.sh${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}   ✓ '${REPO_OWNER}' acessivel${NC}"
+fi
 
 # 4. Verificar se o repo já existe
 echo ""
