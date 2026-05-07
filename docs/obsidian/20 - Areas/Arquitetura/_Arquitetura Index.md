@@ -18,8 +18,10 @@ created: 2026-05-07
 - [[Execution Engine]]
 - [[Strategy Engine]]
 - [[Observability Pipeline]]
+- [[Dashboard Web (Pixel 3D)]] ✅ documentado
+- [[Persistência SQLite]]
 
-> *Crie cada nota acima conforme for documentando.*
+> *Crie cada nota acima conforme for documentando — só "Dashboard Web (Pixel 3D)" já tem nota.*
 
 ## Notas nesta área
 
