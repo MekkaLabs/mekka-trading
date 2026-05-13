@@ -1,44 +1,329 @@
 from __future__ import annotations
 
 import asyncio
-import json
-from datetime import datetime, timezone
 import csv
 import io
+import json
+import logging
+import math
+import os
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
+import aiohttp
 from aiohttp import WSMsgType, web
 
 from src.config.settings import settings
+from src.dashboard import severity as _severity_mod
+from src.dashboard import validators as _validators_mod
+from src.dashboard.payload_builders import (
+    HERO_LAYER as _HERO_LAYER_FROM_BUILDERS,
+    build_hero_sla as _build_hero_sla_pure,
+    build_layers_snapshot as _build_layers_snapshot,
+    build_risk_drilldown as _build_risk_drilldown,
+    build_risk_heatmap as _build_risk_heatmap,
+    build_spiderman_anomalies as _build_spiderman_anomalies,
+    build_symbol_timeline as _build_symbol_timeline,
+    build_timeline as _build_timeline,
+)
+from src.dashboard.replay_helpers import (
+    compare_snapshots as _compare_snapshots,
+    parse_iso_utc as _parse_iso_utc,
+    slice_snapshots as _slice_snapshots,
+)
+from src.dashboard.severity import compute_severity as _compute_severity
+from src.dashboard.severity import percentile as _percentile
+
+
+def _build_hero_sla(audits: list[Any]) -> list[dict[str, Any]]:
+    """Local wrapper that injects ``_percentile`` so call sites stay terse."""
+    return _build_hero_sla_pure(audits, _percentile)
+from src.dashboard.validators import (
+    DEFAULT_WS_ORIGINS as _DEFAULT_WS_ORIGINS,
+    EXTRA_WS_ORIGINS as _EXTRA_WS_ORIGINS,
+    BUNDLE_NAME_RE as _BUNDLE_NAME_RE,
+    SNAPSHOT_NAME_RE as _SNAPSHOT_NAME_RE,
+    is_origin_allowed as _is_origin_allowed,
+    is_valid_bundle_name as _is_valid_bundle_name,
+    is_valid_snapshot_name as _is_valid_snapshot_name,
+)
 from src.persistence.repository import MekkaRepository
 
+# Module-level sentinel — allows tests to patch via
+# patch("src.dashboard.server.Deadpool").
+# _handle_performance checks this first; if None, lazy-imports from deadpool module.
+Deadpool = None  # type: ignore[assignment]
 
+logger = logging.getLogger("mekka.dashboard")
+
+# Paths are anchored to the repository root, never to the current working
+# directory, so the dashboard works regardless of where it's launched from.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-SNAPSHOT_DIR = Path("data/dashboard_snapshots")
-HERO_LAYER = {
-    "Superman": "L1",
-    "DoctorStrange": "L1",
-    "BlackPanther": "L1",
-    "Thor": "L1",
-    "Aquaman": "L1",
-    "SpiderMan": "L1",
-    "Vision": "L2",
-    "ProfessorX": "L2",
-    "Batman": "L3",
-    "IronMan": "L3",
-    "NickFury": "L4",
-    "PortfolioManager": "L4",  # Story 028 — drift fix
-    "DailyPnLWriter": "L4",  # Story 028 — service-layer audit events
-}
+SNAPSHOT_DIR = _REPO_ROOT / "data" / "dashboard_snapshots"
+KILL_SWITCH_FILE = _REPO_ROOT / "data" / ".kill_switch"
+
+# Snapshot retention. Defaults can be overridden via env so ops can tune them
+# without code changes. Pruning runs lazily inside _persist_snapshot.
+SNAPSHOT_RETENTION_MINUTES = int(os.environ.get("MEKKA_SNAPSHOT_RETENTION_MIN", "1440"))
+INCIDENT_BUNDLE_RETENTION = int(os.environ.get("MEKKA_INCIDENT_RETENTION", "200"))
+
+# Filename + origin validators are now in `src.dashboard.validators`. We
+# re-export the names here so existing tests/imports keep working.
+# (See top-of-file `from src.dashboard.validators import ...`.)
+
+# Optional shared-secret token. When set, every mutating endpoint
+# (POST/DELETE/PUT) requires the X-Mekka-Token header. GET endpoints stay
+# open so observability tools (curl, scripts, screenshots) keep working.
+_DASHBOARD_TOKEN = os.environ.get("MEKKA_DASHBOARD_TOKEN", "").strip()
+
+# Drawdown alert thresholds (fractions, not percentages).
+_DRAWDOWN_WARN = float(os.environ.get("MEKKA_DRAWDOWN_WARN_PCT", "0.05"))
+_DRAWDOWN_CRIT = float(os.environ.get("MEKKA_DRAWDOWN_CRIT_PCT", "0.10"))
+
+# ---------------------------------------------------------------------------
+# Login rate limiter — simple in-memory sliding-window, no external deps.
+# ---------------------------------------------------------------------------
+import time as _time_mod
+
+_LOGIN_MAX_ATTEMPTS = int(os.environ.get("MEKKA_LOGIN_MAX_ATTEMPTS", "5"))
+_LOGIN_WINDOW_SECONDS = int(os.environ.get("MEKKA_LOGIN_WINDOW_SECONDS", "300"))  # 5 min
+# {ip_str: [timestamp, ...]}  — pruned on each access to prevent unbounded growth.
+_login_attempts: dict[str, list[float]] = {}
+
+# Default Content-Security-Policy. Locks scripts/styles/images to same-origin
+# plus the explicit CDNs we use. `connect-src` allows the Binance WS used by
+# the live ticker. Tweak via `MEKKA_DASHBOARD_CSP` for custom deployments.
+_DEFAULT_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' https://cdn.jsdelivr.net https://unpkg.com "
+    "https://s3.tradingview.com; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self' data:; "
+    "connect-src 'self' https://api.binance.com wss://stream.binance.com:9443 "
+    "https://www.tradingview.com https://s.tradingview.com https://www.tradingview-widget.com; "
+    "frame-src 'self' https://www.tradingview.com https://s.tradingview.com https://www.tradingview-widget.com; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'"
+)
+_DASHBOARD_CSP = os.environ.get("MEKKA_DASHBOARD_CSP", _DEFAULT_CSP)
+# Single source of truth for the hero→layer mapping. Centralised in
+# `payload_builders.py` so the builders, the dashboard, and any future
+# tooling all read from the same dict.
+HERO_LAYER = _HERO_LAYER_FROM_BUILDERS
+
+
+@web.middleware
+async def _security_headers_middleware(
+    request: web.Request, handler
+) -> web.StreamResponse:
+    """Apply baseline security headers to every response.
+
+    Blocks framing, type-sniffing, leaks via Referrer, and forces a strict
+    Content-Security-Policy. HSTS is only emitted when we're on HTTPS so
+    plain-HTTP local dev doesn't get a useless preload header.
+    """
+    resp = await handler(request)
+    # WebSocket upgrades and aiohttp internals can yield non-Response objects
+    # before headers are mutable; we only set on regular responses.
+    headers = getattr(resp, "headers", None)
+    if headers is None:
+        return resp
+    # Office v2 transpiles JSX in the browser via Babel-standalone, which
+    # uses `Function`/`eval` on parsed source. The strict CSP would block
+    # that, so we relax `script-src` to include `unsafe-eval` ONLY for
+    # paths under `/office-v2/`. The main dashboard keeps the strict CSP.
+    if request.path.startswith("/office-v2"):
+        relaxed = _DASHBOARD_CSP.replace(
+            "script-src 'self'",
+            "script-src 'self' 'unsafe-eval' 'unsafe-inline'",
+        )
+        headers.setdefault("Content-Security-Policy", relaxed)
+    else:
+        headers.setdefault("Content-Security-Policy", _DASHBOARD_CSP)
+    headers.setdefault("X-Content-Type-Options", "nosniff")
+    # Dashboard embeds the Office scene via same-origin iframe.
+    # DENY blocks all framing (including self), so use SAMEORIGIN.
+    headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=(), payment=()",
+    )
+    if request.scheme == "https":
+        headers.setdefault(
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains",
+        )
+    return resp
+
+
+def _is_request_authenticated(request: web.Request) -> bool:
+    """Accept any of three credentials, in order:
+
+    1. Cookie ``mekka_session`` carrying a signed token from `/api/auth/login`.
+    2. Header ``X-Mekka-Token`` set to the same signed token (curl-friendly).
+    3. Header ``X-Mekka-Token`` matching the legacy shared-secret
+       ``MEKKA_DASHBOARD_TOKEN`` (back-compat for scripts/CI).
+    """
+    from src.dashboard.auth import COOKIE_NAME, verify_token
+
+    cookie = request.cookies.get(COOKIE_NAME, "")
+    if cookie and verify_token(cookie):
+        return True
+    header = request.headers.get("X-Mekka-Token", "")
+    if header:
+        if verify_token(header):
+            return True
+        if _DASHBOARD_TOKEN and hmac_equals(header, _DASHBOARD_TOKEN):
+            return True
+    return False
+
+
+def hmac_equals(a: str, b: str) -> bool:
+    """Tiny constant-time string compare wrapper to keep imports tidy."""
+    import hmac as _hmac
+    return _hmac.compare_digest(a, b)
+
+
+def _check_login_rate_limit(ip: str) -> bool:
+    """Return True if the IP is within the allowed attempt window, False if blocked.
+
+    Pruning is O(attempts) but lists stay tiny in practice (≤5 entries per IP).
+    """
+    now = _time_mod.time()
+    cutoff = now - _LOGIN_WINDOW_SECONDS
+    history = _login_attempts.get(ip, [])
+    # Prune stale entries
+    history = [t for t in history if t > cutoff]
+    if len(history) >= _LOGIN_MAX_ATTEMPTS:
+        _login_attempts[ip] = history
+        return False  # blocked
+    history.append(now)
+    _login_attempts[ip] = history
+    return True  # allowed
+
+
+def _clear_login_rate_limit(ip: str) -> None:
+    """Reset failed-attempt counter on successful login."""
+    _login_attempts.pop(ip, None)
+
+
+@web.middleware
+async def _auth_middleware(
+    request: web.Request, handler
+) -> web.StreamResponse:
+    """Require auth on mutating endpoints when any auth mechanism is enabled.
+
+    Auth is enabled when EITHER ``MEKKA_DASHBOARD_PASSWORD`` (session login)
+    OR ``MEKKA_DASHBOARD_TOKEN`` (shared secret) is configured. With both
+    empty, the dashboard runs unauthenticated — same dev behaviour as before.
+
+    Login endpoints (``/api/auth/login``) bypass the gate so users can
+    actually authenticate; logout requires no auth either, since hitting
+    a public ``/api/auth/logout`` just clears your own cookie.
+    """
+    from src.dashboard.auth import is_login_enabled
+
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return await handler(request)
+    # Always allow these so the auth flow itself can complete.
+    if request.path in {"/api/auth/login", "/api/auth/logout"}:
+        return await handler(request)
+    auth_required = bool(_DASHBOARD_TOKEN) or is_login_enabled()
+    if not auth_required:
+        return await handler(request)
+    if _is_request_authenticated(request):
+        return await handler(request)
+    return web.json_response(
+        {"error": "authentication required — provide X-Mekka-Token header"},
+        status=401,
+        headers={"WWW-Authenticate": 'Mekka realm="dashboard"'},
+    )
 
 
 class MekkaDashboardServer:
+    MARKET_BREAKER_THRESHOLD = 4
+    MARKET_BREAKER_COOLDOWN_S = 20.0
+
     def __init__(self) -> None:
-        self._app = web.Application()
+        # Per-request counter middleware. Defined inline so it can close
+        # over `self._metrics`. Order matters: counter outermost, then
+        # auth, then security headers (innermost = nearest the handler).
+        @web.middleware
+        async def _counter_middleware(request: web.Request, handler):
+            self._metrics["http_requests_total"] += 1
+            return await handler(request)
+
+        self._app = web.Application(
+            middlewares=[
+                _counter_middleware,
+                _security_headers_middleware,
+                _auth_middleware,
+            ]
+        )
         self._sockets: set[web.WebSocketResponse] = set()
+        # Bounded latency buffers — newest 240 samples each. Used by
+        # /metrics to compute p50/p95 without dragging in a metrics SDK.
+        self._payload_latencies_ms: list[float] = []
+        self._broadcast_latencies_ms: list[float] = []
+        # Internal counters/gauges exposed via /metrics in Prometheus text
+        # format. Cheap to update (in-memory dict), zero cost when unused.
+        self._metrics: dict[str, float] = {
+            "broadcasts_total": 0.0,
+            "broadcasts_errors_total": 0.0,
+            "ws_connections_total": 0.0,
+            "ws_connections_rejected_total": 0.0,
+            "ws_messages_sent_total": 0.0,
+            "ws_slow_consumers_dropped_total": 0.0,
+            "snapshot_writes_total": 0.0,
+            "incident_bundle_writes_total": 0.0,
+            "killswitch_engaged_total": 0.0,
+            "killswitch_released_total": 0.0,
+            "payload_cache_hits_total": 0.0,
+            "payload_cache_misses_total": 0.0,
+            "http_requests_total": 0.0,
+            "started_at_unix_seconds": 0.0,
+        }
         self._broadcast_task: asyncio.Task[Any] | None = None
+        self._daily_report_task: asyncio.Task[Any] | None = None
+        self._daily_reporter: Any | None = None  # DailyReporter, lazy import
+        # Live trading panel — Hyperliquid WebSocket price feed
+        self._live_sockets: set[web.WebSocketResponse] = set()
+        self._hl_prices: dict[str, float] = {}      # coin → mark price
+        self._hl_pump_task: asyncio.Task[Any] | None = None
+        self._live_bcast_task: asyncio.Task[Any] | None = None
         self._last_snapshot_minute: str | None = None
+        # Kill-switch dedup: only persist a new incident bundle when the
+        # state transitions from "no kill" to "kill" OR a new wall-clock
+        # minute starts (whichever happens first). Without this the loop
+        # would flood SNAPSHOT_DIR with one bundle every 2s.
+        self._kill_state_active: bool = False
+        self._last_bundle_minute: str | None = None
+        # _collect_payload TTL cache (1.5s for full payload, 0.5s for the
+        # lightweight overview-only variant) so the broadcast loop and
+        # /api/overview don't hammer the DB on the same request burst.
+        self._payload_cache: dict[bool, tuple[float, dict[str, Any]]] = {}
+        # Story 041 — recommendation cache (rec_id → {recommendation + equity_usd}).
+        # Capped at 20 entries (FIFO) so the server restart is the only reason
+        # a rec_id is missing. Keyed by UUID string.
+        self._rec_cache: dict[str, dict] = {}
+        self._rec_cache_max: int = 20
+        # Reusable HTTP session for Binance calls — created in _on_startup.
+        self._http: aiohttp.ClientSession | None = None
+        # Outbound alert dispatcher (Slack/Telegram). Lazily wired in
+        # _on_startup so it shares the HTTP session and event loop.
+        self._alert_dispatcher: Any = None
+        self._market_cache: dict[str, tuple[float, Any]] = {}
+        self._market_sem = asyncio.Semaphore(4)
+        self._market_diag: dict[str, dict[str, Any]] = {}
+        self._market_fail_streak: dict[str, int] = {}
+        self._market_breaker_until: dict[str, float] = {}
         self._configure_routes()
         self._app.on_startup.append(self._on_startup)
         self._app.on_shutdown.append(self._on_shutdown)
@@ -49,6 +334,7 @@ class MekkaDashboardServer:
 
     def _configure_routes(self) -> None:
         self._app.router.add_get("/", self._handle_index)
+        self._app.router.add_get("/api/health", self._handle_health)
         self._app.router.add_get("/api/overview", self._handle_overview)
         self._app.router.add_get("/api/signals", self._handle_signals)
         self._app.router.add_get("/api/trades", self._handle_trades)
@@ -61,15 +347,92 @@ class MekkaDashboardServer:
         self._app.router.add_get(
             "/api/replay/incident/latest/download", self._handle_incident_download
         )
+        self._app.router.add_get("/api/replay/incidents", self._handle_incidents_list)
+        self._app.router.add_get(
+            "/api/replay/incident/download", self._handle_incident_download_named
+        )
         self._app.router.add_get("/api/replay/timeseries", self._handle_replay_timeseries)
         self._app.router.add_get("/api/incidents/queue", self._handle_incidents_queue)
+        self._app.router.add_get("/api/incidents/export", self._handle_incidents_export)
+        self._app.router.add_get("/api/incidents/detail", self._handle_incident_detail)
+        self._app.router.add_get("/api/market/funding", self._handle_funding_rates)
+        self._app.router.add_get("/api/market/candles", self._handle_market_candles)
+        self._app.router.add_get("/api/market/depth", self._handle_market_depth)
+        self._app.router.add_get("/api/market/trades", self._handle_market_trades)
+        self._app.router.add_get("/api/market/diagnostics", self._handle_market_diagnostics)
+        self._app.router.add_get("/api/market/status", self._handle_market_status)
+        self._app.router.add_get("/api/pnl/series", self._handle_pnl_series)
+        self._app.router.add_get("/api/pnl/summary", self._handle_pnl_summary)
+        self._app.router.add_get("/api/pnl/benchmark", self._handle_pnl_benchmark)
+        self._app.router.add_get("/api/performance", self._handle_performance)
+        self._app.router.add_get("/api/trades/timeline", self._handle_trades_timeline)
+        self._app.router.add_get("/api/killswitch/status", self._handle_killswitch_status)
+        self._app.router.add_post("/api/killswitch/engage", self._handle_killswitch_engage)
+        self._app.router.add_post("/api/killswitch/release", self._handle_killswitch_release)
+        self._app.router.add_get("/api/mode", self._handle_mode_get)
+        self._app.router.add_post("/api/mode", self._handle_mode_set)
+        self._app.router.add_get("/api/report/daily", self._handle_report_daily)
+        self._app.router.add_get("/api/positions", self._handle_positions)
+        self._app.router.add_post("/api/positions/close", self._handle_positions_close)
+        self._app.router.add_get("/api/settings", self._handle_settings_get)
+        self._app.router.add_post("/api/settings", self._handle_settings_set)
+        self._app.router.add_get("/api/agents/tasks", self._handle_agents_tasks)
+        self._app.router.add_get("/api/audit/feed", self._handle_audit_feed)
+        self._app.router.add_post("/api/trade/analyze", self._handle_trade_analyze)
+        self._app.router.add_post("/api/trade/execute", self._handle_trade_execute)
+        self._app.router.add_get("/api/prefs", self._handle_prefs_get)
+        self._app.router.add_post("/api/prefs", self._handle_prefs_set)
+        self._app.router.add_post("/api/auth/login", self._handle_auth_login)
+        self._app.router.add_post("/api/auth/logout", self._handle_auth_logout)
+        self._app.router.add_get("/api/auth/me", self._handle_auth_me)
+        self._app.router.add_get("/metrics", self._handle_metrics)
         self._app.router.add_get("/ws", self._handle_ws)
+        self._app.router.add_get("/api/hl/candles", self._handle_hl_candles)
+        self._app.router.add_get("/ws/live", self._handle_ws_live)
         self._app.router.add_static("/static", path=STATIC_DIR)
+        # Office v2 (React + Babel-standalone) lives in static/office_v2/.
+        # Exposing it under its own prefix keeps the asset paths inside the
+        # HTML (relative `tweaks-panel.jsx` etc.) resolving cleanly without
+        # touching the index.html shipped by Claude Design.
+        office_v2_dir = STATIC_DIR / "office_v2"
+        if office_v2_dir.exists():
+            self._app.router.add_get(
+                "/office-v2", self._handle_office_v2_index
+            )
+            self._app.router.add_get(
+                "/office-v2/", self._handle_office_v2_index
+            )
+            self._app.router.add_static("/office-v2/", path=office_v2_dir)
 
     async def _on_startup(self, _: web.Application) -> None:
         await MekkaRepository.initialize()
         SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        self._metrics["started_at_unix_seconds"] = datetime.now(
+            timezone.utc
+        ).timestamp()
+        # One ClientSession reused across all Binance calls. Without this each
+        # _market_get_json would open/close TCP connections and could exhaust
+        # file descriptors under heavy polling.
+        if self._http is None or self._http.closed:
+            self._http = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10),
+                connector=aiohttp.TCPConnector(limit=16, ttl_dns_cache=300),
+            )
+        # Wire alert dispatcher after the HTTP session is up. We give the
+        # dispatcher its own session because Slack/Telegram timeouts are
+        # tighter (5s) than the market provider's (10s).
+        from src.dashboard.alert_dispatcher import AlertDispatcher
+        from src.dashboard.daily_reporter import DailyReporter
+        from src.services.telegram_alerter import TelegramAlerter
+        self._alert_dispatcher = AlertDispatcher()
+        self._daily_reporter = DailyReporter()
         self._broadcast_task = asyncio.create_task(self._broadcast_loop())
+        self._daily_report_task = asyncio.create_task(self._daily_reporter.run_loop())
+        # Live price feed — connect to Hyperliquid WS
+        self._hl_pump_task = asyncio.create_task(self._hl_price_pump_loop())
+        self._live_bcast_task = asyncio.create_task(self._live_price_broadcast_loop())
+        # Startup ping — fire-and-forget, non-blocking
+        asyncio.create_task(TelegramAlerter().ping(reason="dashboard startup"))
 
     async def _on_shutdown(self, _: web.Application) -> None:
         if self._broadcast_task is not None:
@@ -78,11 +441,52 @@ class MekkaDashboardServer:
                 await self._broadcast_task
             except asyncio.CancelledError:
                 pass
+        if self._daily_report_task is not None:
+            self._daily_report_task.cancel()
+            try:
+                await self._daily_report_task
+            except asyncio.CancelledError:
+                pass
+        if self._daily_reporter is not None:
+            try:
+                await self._daily_reporter.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._daily_reporter = None
         for ws in list(self._sockets):
             await ws.close(code=1001, message=b"server shutdown")
+        for ws in list(self._live_sockets):
+            await ws.close(code=1001, message=b"server shutdown")
+        for task in (self._hl_pump_task, self._live_bcast_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        if self._http is not None and not self._http.closed:
+            await self._http.close()
+            self._http = None
+        if self._alert_dispatcher is not None:
+            try:
+                await self._alert_dispatcher.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._alert_dispatcher = None
 
     async def _handle_index(self, _: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / "index.html")
+
+    async def _handle_health(self, _: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "ok": True,
+                "service": "mekka-dashboard",
+                "time_utc": datetime.now(timezone.utc).isoformat(),
+                "network": settings.hyperliquid_network,
+                "mode": settings.mode_label,
+            }
+        )
 
     async def _handle_overview(self, _: web.Request) -> web.Response:
         payload = await self._collect_payload(include_tables=False)
@@ -155,7 +559,7 @@ class MekkaDashboardServer:
 
     async def _handle_replay(self, request: web.Request) -> web.Response:
         snapshot_name = request.query.get("snapshot", "latest.json")
-        if "/" in snapshot_name or ".." in snapshot_name:
+        if not _is_valid_snapshot_name(snapshot_name):
             return web.json_response({"error": "invalid snapshot name"}, status=400)
 
         path = SNAPSHOT_DIR / snapshot_name
@@ -189,10 +593,17 @@ class MekkaDashboardServer:
             payload = json.loads(raw)
             ov = payload.get("overview", {})
             ts = _parse_iso_utc(ov.get("timestamp"))
-            if parsed_start and ts and ts < parsed_start:
-                continue
-            if parsed_end and ts and ts > parsed_end:
-                continue
+            # When a UTC bound is provided, REQUIRE a parseable timestamp
+            # and enforce the bound. A missing/unparseable timestamp under
+            # an active filter is treated as "out of range" (exclude),
+            # not "no opinion" (include) — the previous behavior silently
+            # let unfiltered rows through whenever ts was None.
+            if parsed_start is not None:
+                if ts is None or ts < parsed_start:
+                    continue
+            if parsed_end is not None:
+                if ts is None or ts > parsed_end:
+                    continue
             rows.append(
                 {
                     "snapshot": name,
@@ -227,7 +638,7 @@ class MekkaDashboardServer:
         b = request.query.get("b")
         if not a or not b:
             return web.json_response({"error": "params a and b are required"}, status=400)
-        if "/" in a or "/" in b or ".." in a or ".." in b:
+        if not _is_valid_snapshot_name(a) or not _is_valid_snapshot_name(b):
             return web.json_response({"error": "invalid snapshot name"}, status=400)
 
         path_a = SNAPSHOT_DIR / a
@@ -244,24 +655,39 @@ class MekkaDashboardServer:
         if not files:
             return web.json_response({"error": "no snapshots"}, status=404)
         for name in files:
-            payload = json.loads(await asyncio.to_thread((SNAPSHOT_DIR / name).read_text, "utf-8"))
+            payload = json.loads(
+                await asyncio.to_thread((SNAPSHOT_DIR / name).read_text, "utf-8")
+            )
             alerts = payload.get("global_alerts", [])
             has_kill = any("KILL_SWITCH" in str(a.get("code", "")) for a in alerts)
-            if has_kill:
-                prev = files[min(files.index(name) + 1, len(files) - 1)]
-                payload_prev = json.loads(await asyncio.to_thread((SNAPSHOT_DIR / prev).read_text, "utf-8"))
-                compare = _compare_snapshots(prev, payload_prev, name, payload)
-                severity = _compute_severity(payload)
-                return web.json_response(
-                    {
-                        "incident_snapshot": name,
-                        "baseline_snapshot": prev,
-                        "alerts": alerts,
-                        "compare": compare,
-                        "overview": payload.get("overview", {}),
-                        "severity": severity,
-                    }
+            if not has_kill:
+                continue
+            # Baseline = the snapshot immediately preceding the incident, or
+            # None if the incident itself is the oldest snapshot we have.
+            # Comparing a snapshot against itself produces a useless all-zero
+            # delta and confuses investigators, so we omit `compare` instead.
+            idx = files.index(name)
+            baseline_name: str | None = None
+            compare: dict[str, Any] | None = None
+            if idx + 1 < len(files):
+                baseline_name = files[idx + 1]
+                payload_prev = json.loads(
+                    await asyncio.to_thread(
+                        (SNAPSHOT_DIR / baseline_name).read_text, "utf-8"
+                    )
                 )
+                compare = _compare_snapshots(baseline_name, payload_prev, name, payload)
+            severity = _compute_severity(payload)
+            return web.json_response(
+                {
+                    "incident_snapshot": name,
+                    "baseline_snapshot": baseline_name,
+                    "alerts": alerts,
+                    "compare": compare,
+                    "overview": payload.get("overview", {}),
+                    "severity": severity,
+                }
+            )
         return web.json_response({"error": "no kill switch incident found"}, status=404)
 
     async def _handle_incident_download(self, _: web.Request) -> web.Response:
@@ -313,6 +739,27 @@ class MekkaDashboardServer:
 
         return web.json_response({"error": "no incident bundle available"}, status=404)
 
+    async def _handle_incidents_list(self, _: web.Request) -> web.Response:
+        bundles = sorted(
+            [p.name for p in SNAPSHOT_DIR.glob("incident-bundle-*.json")],
+            reverse=True,
+        )
+        return web.json_response({"bundles": bundles, "count": len(bundles)})
+
+    async def _handle_incident_download_named(self, request: web.Request) -> web.Response:
+        name = request.query.get("name", "")
+        if not _is_valid_bundle_name(name):
+            return web.json_response({"error": "invalid bundle name"}, status=400)
+        path = SNAPSHOT_DIR / name
+        if not path.exists():
+            return web.json_response({"error": "bundle not found"}, status=404)
+        raw = await asyncio.to_thread(path.read_text, "utf-8")
+        return web.Response(
+            text=raw,
+            content_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        )
+
     async def _handle_replay_timeseries(self, request: web.Request) -> web.Response:
         """Aggregated time-series of signals/trades/alerts across snapshots.
 
@@ -354,6 +801,18 @@ class MekkaDashboardServer:
         """Investigation queue: snapshots ranked by incident severity score."""
         limit = _safe_limit(request.query.get("limit"), default=25, max_value=200)
         scan = _safe_limit(request.query.get("scan"), default=200, max_value=1000)
+        try:
+            offset = int(request.query.get("offset") or 0)
+        except ValueError:
+            offset = 0
+        offset = max(0, min(offset, 5000))
+        query = str(request.query.get("q") or "").strip().lower()
+        tier_filter = str(request.query.get("tier") or "").strip().upper()
+        if tier_filter and tier_filter not in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+            return web.json_response(
+                {"error": "invalid tier filter", "allowed": ["CRITICAL", "HIGH", "MEDIUM", "LOW"]},
+                status=400,
+            )
 
         files = sorted(
             [p.name for p in SNAPSHOT_DIR.glob("snapshot-*.json")], reverse=True
@@ -373,27 +832,1397 @@ class MekkaDashboardServer:
             severity = _compute_severity(payload)
             if severity["score"] <= 0:
                 continue
+            if tier_filter and str(severity["tier"]).upper() != tier_filter:
+                continue
             ov = payload.get("overview") or {}
+            item = {
+                "snapshot": name,
+                "timestamp": ov.get("timestamp"),
+                "score": severity["score"],
+                "tier": severity["tier"],
+                "drivers": severity["drivers"],
+                "alerts": payload.get("global_alerts", []),
+                "kill_switch": severity["drivers"].get("kill_switch", 0) > 0,
+            }
+            if query and not _incident_matches_query(item, query):
+                continue
             items.append(
+                item
+            )
+        items.sort(key=lambda x: (x["score"], x["timestamp"] or ""), reverse=True)
+        page = items[offset : offset + limit]
+        return web.json_response(
+            {
+                "items": page,
+                "count": len(items),
+                "limit": limit,
+                "offset": offset,
+                "has_more": (offset + limit) < len(items),
+            }
+        )
+
+    async def _handle_incidents_export(self, request: web.Request) -> web.Response:
+        """Export consolidated incident queue as CSV for post-mortem analysis."""
+        limit = _safe_limit(request.query.get("limit"), default=500, max_value=5000)
+        scan = _safe_limit(request.query.get("scan"), default=1000, max_value=5000)
+        query = str(request.query.get("q") or "").strip().lower()
+        tier_filter = str(request.query.get("tier") or "").strip().upper()
+        if tier_filter and tier_filter not in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+            return web.json_response(
+                {"error": "invalid tier filter", "allowed": ["CRITICAL", "HIGH", "MEDIUM", "LOW"]},
+                status=400,
+            )
+
+        files = sorted([p.name for p in SNAPSHOT_DIR.glob("snapshot-*.json")], reverse=True)[:scan]
+        rows: list[dict[str, Any]] = []
+        for name in files:
+            try:
+                payload = json.loads(
+                    await asyncio.to_thread((SNAPSHOT_DIR / name).read_text, "utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                continue
+            severity = _compute_severity(payload)
+            if severity["score"] <= 0:
+                continue
+            if tier_filter and str(severity["tier"]).upper() != tier_filter:
+                continue
+            ov = payload.get("overview") or {}
+            drivers = severity.get("drivers") or {}
+            alerts = payload.get("global_alerts") or []
+            item = {
+                "snapshot": name,
+                "timestamp": ov.get("timestamp"),
+                "score": severity["score"],
+                "tier": severity["tier"],
+                "drivers": drivers,
+                "alerts": alerts,
+                "kill_switch": int(drivers.get("kill_switch", 0)) > 0,
+            }
+            if query and not _incident_matches_query(item, query):
+                continue
+            rows.append(
                 {
                     "snapshot": name,
                     "timestamp": ov.get("timestamp"),
-                    "score": severity["score"],
                     "tier": severity["tier"],
-                    "drivers": severity["drivers"],
-                    "alerts": payload.get("global_alerts", []),
-                    "kill_switch": severity["drivers"].get("kill_switch", 0) > 0,
+                    "score": severity["score"],
+                    "alerts_count": len(alerts),
+                    "kill_switch": int(drivers.get("kill_switch", 0)),
+                    "critical_alerts": int(drivers.get("critical_alerts", 0)),
+                    "warning_alerts": int(drivers.get("warning_alerts", 0)),
+                    "anomaly_pause": int(drivers.get("anomaly_pause", 0)),
+                    "breached_limits": int(drivers.get("breached_limits", 0)),
+                    "sla_degraded": int(drivers.get("sla_degraded", 0)),
+                    "signals_total": int(ov.get("total_signals") or 0),
+                    "trades_total": int(ov.get("total_trades") or 0),
+                    "trades_today": int(ov.get("trades_today") or 0),
+                    "executions_today": int(ov.get("executions_today") or 0),
                 }
             )
-        items.sort(key=lambda x: (x["score"], x["timestamp"] or ""), reverse=True)
-        return web.json_response({"items": items[:limit], "count": len(items)})
+
+        rows.sort(key=lambda x: (x["score"], x["timestamp"] or ""), reverse=True)
+        rows = rows[:limit]
+        output = io.StringIO()
+        fieldnames = [
+            "snapshot",
+            "timestamp",
+            "tier",
+            "score",
+            "alerts_count",
+            "kill_switch",
+            "critical_alerts",
+            "warning_alerts",
+            "anomaly_pause",
+            "breached_limits",
+            "sla_degraded",
+            "signals_total",
+            "trades_total",
+            "trades_today",
+            "executions_today",
+        ]
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        if rows:
+            writer.writerows(rows)
+        suffix = tier_filter.lower() if tier_filter else "all"
+        filename = f"mekka-incidents-postmortem-{suffix}.csv"
+        return web.Response(
+            text=output.getvalue(),
+            content_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    async def _handle_incident_detail(self, request: web.Request) -> web.Response:
+        snapshot = str(request.query.get("snapshot") or "").strip()
+        if not _is_valid_snapshot_name(snapshot):
+            return web.json_response({"error": "invalid snapshot name"}, status=400)
+        path = SNAPSHOT_DIR / snapshot
+        if not path.exists():
+            return web.json_response({"error": "snapshot not found"}, status=404)
+
+        files = sorted([p.name for p in SNAPSHOT_DIR.glob("snapshot-*.json")], reverse=True)
+        if snapshot not in files:
+            return web.json_response({"error": "snapshot index not found"}, status=404)
+        idx = files.index(snapshot)
+        baseline = files[idx + 1] if (idx + 1) < len(files) else None
+
+        payload = json.loads(await asyncio.to_thread(path.read_text, "utf-8"))
+        severity = _compute_severity(payload)
+        overview = payload.get("overview") or {}
+        alerts = payload.get("global_alerts") or []
+
+        compare = None
+        if baseline:
+            baseline_payload = json.loads(await asyncio.to_thread((SNAPSHOT_DIR / baseline).read_text, "utf-8"))
+            compare = _compare_snapshots(baseline, baseline_payload, snapshot, payload)
+
+        return web.json_response(
+            {
+                "snapshot": snapshot,
+                "baseline_snapshot": baseline,
+                "severity": severity,
+                "overview": overview,
+                "alerts": alerts,
+                "compare": compare,
+            }
+        )
+
+    async def _handle_funding_rates(self, request: web.Request) -> web.Response:
+        """
+        GET /api/market/funding[?symbols=BTC,ETH,SOL]
+
+        Returns current perpetual funding rates for the requested symbols
+        (defaults to current trading mode assets).
+        Primary source: Hyperliquid. Fallback: Binance USDT-M futures.
+        """
+        raw_symbols = request.query.get("symbols", "").strip()
+        symbols = [s.strip().upper() for s in raw_symbols.split(",") if s.strip()] or None
+
+        from src.dashboard.funding_provider import fetch_funding_rates
+        try:
+            data = await asyncio.wait_for(
+                fetch_funding_rates(symbols), timeout=12.0
+            )
+        except asyncio.TimeoutError:
+            return web.json_response(
+                {"error": "funding fetch timed out", "items": [], "count": 0},
+                status=504,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("funding_rates handler error: %s", exc)
+            return web.json_response(
+                {"error": str(exc), "items": [], "count": 0},
+                status=500,
+            )
+        return web.json_response(data)
+
+    async def _handle_market_candles(self, request: web.Request) -> web.Response:
+        symbol = str(request.query.get("symbol") or "BTCUSDT").strip().upper()
+        timeframe = str(request.query.get("timeframe") or "1h").strip()
+        limit = _safe_limit(request.query.get("limit"), default=300, max_value=1000)
+
+        if not symbol.endswith("USDT"):
+            return web.json_response({"error": "only USDT pairs are supported"}, status=400)
+        allowed_tf = {"1m", "5m", "15m", "1h", "4h", "1d"}
+        if timeframe not in allowed_tf:
+            return web.json_response(
+                {"error": "invalid timeframe", "allowed": sorted(allowed_tf)},
+                status=400,
+            )
+
+        url_klines = "https://api.binance.com/api/v3/klines"
+        url_ticker = "https://api.binance.com/api/v3/ticker/24hr"
+        params_klines = {"symbol": symbol, "interval": timeframe, "limit": limit}
+        params_ticker = {"symbol": symbol}
+
+        try:
+            raw_klines = await self._market_get_json(url_klines, params_klines, ttl_s=2.0)
+            ticker = await self._market_get_json(url_ticker, params_ticker, ttl_s=2.0, allow_error=True) or {}
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "market provider timeout"}, status=504)
+        except aiohttp.ClientError:
+            return web.json_response({"error": "market provider unavailable"}, status=502)
+        except RuntimeError as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+
+        candles: list[dict[str, Any]] = []
+        for row in raw_klines:
+            if not isinstance(row, list) or len(row) < 6:
+                continue
+            candles.append(
+                {
+                    "time": int(row[0] // 1000),
+                    "open": float(row[1]),
+                    "high": float(row[2]),
+                    "low": float(row[3]),
+                    "close": float(row[4]),
+                    "volume": float(row[5]),
+                }
+            )
+        if not candles:
+            return web.json_response({"error": "empty market data"}, status=502)
+
+        stats = {
+            "last_price": float(ticker.get("lastPrice") or candles[-1]["close"]),
+            "price_change_pct_24h": float(ticker.get("priceChangePercent") or 0.0),
+            "volume_24h": float(ticker.get("quoteVolume") or 0.0),
+            "high_24h": float(ticker.get("highPrice") or 0.0),
+            "low_24h": float(ticker.get("lowPrice") or 0.0),
+        }
+        return web.json_response(
+            {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "count": len(candles),
+                "candles": candles,
+                "stats": stats,
+                "source": "binance_spot",
+            }
+        )
+
+    async def _handle_market_depth(self, request: web.Request) -> web.Response:
+        symbol = str(request.query.get("symbol") or "BTCUSDT").strip().upper()
+        limit = _safe_limit(request.query.get("limit"), default=20, max_value=100)
+        if not symbol.endswith("USDT"):
+            return web.json_response({"error": "only USDT pairs are supported"}, status=400)
+
+        url_depth = "https://api.binance.com/api/v3/depth"
+        params_depth = {"symbol": symbol, "limit": limit}
+        try:
+            raw = await self._market_get_json(url_depth, params_depth, ttl_s=1.0)
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "market provider timeout"}, status=504)
+        except aiohttp.ClientError:
+            return web.json_response({"error": "market provider unavailable"}, status=502)
+        except RuntimeError as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+
+        bids_raw = raw.get("bids") or []
+        asks_raw = raw.get("asks") or []
+        bids = [{"price": float(p), "qty": float(q)} for p, q in bids_raw[:limit]]
+        asks = [{"price": float(p), "qty": float(q)} for p, q in asks_raw[:limit]]
+        if not bids or not asks:
+            return web.json_response({"error": "empty order book"}, status=502)
+
+        best_bid = bids[0]["price"]
+        best_ask = asks[0]["price"]
+        spread = max(0.0, best_ask - best_bid)
+        spread_bps = (spread / best_bid * 10000.0) if best_bid > 0 else 0.0
+        bid_notional = sum(x["price"] * x["qty"] for x in bids)
+        ask_notional = sum(x["price"] * x["qty"] for x in asks)
+        imbalance = (bid_notional - ask_notional) / (bid_notional + ask_notional) if (bid_notional + ask_notional) > 0 else 0.0
+
+        return web.json_response(
+            {
+                "symbol": symbol,
+                "limit": limit,
+                "bids": bids,
+                "asks": asks,
+                "summary": {
+                    "best_bid": best_bid,
+                    "best_ask": best_ask,
+                    "spread": spread,
+                    "spread_bps": spread_bps,
+                    "bid_notional": bid_notional,
+                    "ask_notional": ask_notional,
+                    "imbalance": imbalance,
+                },
+                "source": "binance_spot",
+            }
+        )
+
+    async def _handle_market_trades(self, request: web.Request) -> web.Response:
+        symbol = str(request.query.get("symbol") or "BTCUSDT").strip().upper()
+        limit = _safe_limit(request.query.get("limit"), default=30, max_value=200)
+        if not symbol.endswith("USDT"):
+            return web.json_response({"error": "only USDT pairs are supported"}, status=400)
+
+        url_trades = "https://api.binance.com/api/v3/aggTrades"
+        params = {"symbol": symbol, "limit": limit}
+        try:
+            raw = await self._market_get_json(url_trades, params, ttl_s=1.0)
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "market provider timeout"}, status=504)
+        except aiohttp.ClientError:
+            return web.json_response({"error": "market provider unavailable"}, status=502)
+        except RuntimeError as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+
+        items: list[dict[str, Any]] = []
+        for row in raw:
+            items.append(
+                {
+                    "trade_id": int(row.get("a") or 0),
+                    "price": float(row.get("p") or 0.0),
+                    "qty": float(row.get("q") or 0.0),
+                    "timestamp": int((row.get("T") or 0) / 1000),
+                    "is_sell": bool(row.get("m")),
+                }
+            )
+        items.sort(key=lambda x: x["timestamp"], reverse=True)
+        return web.json_response({"symbol": symbol, "items": items, "count": len(items), "source": "binance_spot"})
+
+    async def _handle_market_diagnostics(self, _: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "items": {k: _diag_public_view(v) for k, v in self._market_diag.items()},
+                "cache_size": len(self._market_cache),
+                "time_utc": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    async def _handle_market_status(self, _: web.Request) -> web.Response:
+        now = asyncio.get_running_loop().time()
+        items = [_diag_public_view(v) for v in self._market_diag.values()]
+        open_count = sum(1 for it in items if it.get("breaker_open"))
+        total_errors = sum(int(it.get("errors") or 0) for it in items)
+        total_calls = sum(int(it.get("calls") or 0) for it in items)
+        stale_served = sum(int(it.get("stale_served") or 0) for it in items)
+        next_recovery_s = None
+        if self._market_breaker_until:
+            remains = [max(0.0, t - now) for t in self._market_breaker_until.values() if t > now]
+            if remains:
+                next_recovery_s = round(min(remains), 2)
+        if not items:
+            state = "unknown"
+        elif open_count > 0:
+            state = "degraded"
+        elif total_errors > 0:
+            state = "warning"
+        else:
+            state = "healthy"
+        return web.json_response(
+            {
+                "state": state,
+                "breaker_open_keys": open_count,
+                "calls": total_calls,
+                "errors": total_errors,
+                "stale_served": stale_served,
+                "next_recovery_s": next_recovery_s,
+                "time_utc": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    async def _market_get_json(
+        self,
+        url: str,
+        params: dict[str, Any],
+        ttl_s: float,
+        allow_error: bool = False,
+    ) -> Any:
+        key = f"{url}?{json.dumps(params, sort_keys=True)}"
+        now = asyncio.get_running_loop().time()
+        diag = self._market_diag.setdefault(
+            key,
+            {
+                "calls": 0,
+                "cache_hits": 0,
+                "stale_served": 0,
+                "errors": 0,
+                "last_error": None,
+                "last_latency_ms": None,
+                "avg_latency_ms": None,
+                "failure_streak": 0,
+                "breaker_open": False,
+                "breaker_open_until_s": None,
+            },
+        )
+        diag["calls"] += 1
+        cached = self._market_cache.get(key)
+        if cached and cached[0] > now:
+            diag["cache_hits"] += 1
+            return cached[1]
+
+        breaker_until = float(self._market_breaker_until.get(key) or 0.0)
+        if breaker_until > now:
+            diag["breaker_open"] = True
+            diag["breaker_open_until_s"] = round(breaker_until - now, 2)
+            if cached:
+                diag["stale_served"] += 1
+                return cached[1]
+            if allow_error:
+                return None
+            raise RuntimeError("market circuit breaker open")
+        diag["breaker_open"] = False
+        diag["breaker_open_until_s"] = None
+
+        delays = [0.15, 0.45, 0.9]
+        last_exc: Exception | None = None
+        # Reuse the long-lived ClientSession created in _on_startup; falling
+        # back to a per-call session only if startup hasn't run yet (shouldn't
+        # happen in production but keeps the code defensive in tests).
+        if self._http is None or self._http.closed:
+            self._http = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10),
+                connector=aiohttp.TCPConnector(limit=16, ttl_dns_cache=300),
+            )
+        session = self._http
+        for attempt, delay in enumerate(delays, start=1):
+            start = asyncio.get_running_loop().time()
+            try:
+                async with self._market_sem:
+                    async with session.get(url, params=params) as resp:
+                        if resp.status != 200:
+                            if allow_error:
+                                return None
+                            raise RuntimeError(f"market provider error ({resp.status})")
+                        data = await resp.json()
+                latency_ms = int((asyncio.get_running_loop().time() - start) * 1000)
+                prev = diag["avg_latency_ms"]
+                diag["last_latency_ms"] = latency_ms
+                diag["avg_latency_ms"] = latency_ms if prev is None else round((prev * 0.8) + (latency_ms * 0.2), 2)
+                lat_samples = diag.setdefault("latencies_ms", [])
+                lat_samples.append(latency_ms)
+                if len(lat_samples) > 120:
+                    del lat_samples[:-120]
+                self._market_cache[key] = (now + ttl_s, data)
+                self._market_fail_streak[key] = 0
+                diag["failure_streak"] = 0
+                diag["breaker_open"] = False
+                diag["breaker_open_until_s"] = None
+                return data
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                diag["errors"] += 1
+                diag["last_error"] = f"{type(exc).__name__}: {exc}"
+                streak = int(self._market_fail_streak.get(key) or 0) + 1
+                self._market_fail_streak[key] = streak
+                diag["failure_streak"] = streak
+                if streak >= self.MARKET_BREAKER_THRESHOLD:
+                    open_until = asyncio.get_running_loop().time() + self.MARKET_BREAKER_COOLDOWN_S
+                    self._market_breaker_until[key] = open_until
+                    diag["breaker_open"] = True
+                    diag["breaker_open_until_s"] = round(self.MARKET_BREAKER_COOLDOWN_S, 2)
+                    if cached:
+                        diag["stale_served"] += 1
+                        return cached[1]
+                if attempt >= len(delays):
+                    break
+                await asyncio.sleep(delay)
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("market provider unknown error")
+
+    async def _handle_killswitch_status(self, _: web.Request) -> web.Response:
+        """Read-only state of the kill switch file. Safe to expose without auth.
+        UIs poll this to render the engage/release buttons accordingly."""
+        active = KILL_SWITCH_FILE.exists()
+        meta: dict[str, Any] = {"active": active, "path": str(KILL_SWITCH_FILE)}
+        if active:
+            try:
+                stat = KILL_SWITCH_FILE.stat()
+                meta["mtime_utc"] = datetime.fromtimestamp(
+                    stat.st_mtime, tz=timezone.utc
+                ).isoformat()
+                # Trim absurd payloads — kill switch reasons are short by spec.
+                content = KILL_SWITCH_FILE.read_text(
+                    encoding="utf-8", errors="replace"
+                )[:512]
+                meta["reason"] = content.strip() or None
+            except OSError as exc:
+                meta["read_error"] = str(exc)
+        return web.json_response(meta)
+
+    async def _handle_killswitch_engage(self, request: web.Request) -> web.Response:
+        """Atomically create the kill-switch file. Requires confirm=ENGAGE.
+
+        We deliberately demand a literal confirmation string in the body to
+        prevent accidental engagement (e.g. CSRF replays would also have to
+        guess this string in addition to the auth token).
+        """
+        body = await self._safe_json_body(request)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "invalid json body"}, status=400)
+        if str(body.get("confirm") or "").upper() != "ENGAGE":
+            return web.json_response(
+                {"error": "missing confirm=ENGAGE in body"}, status=400
+            )
+        reason = str(body.get("reason") or "").strip()[:240]
+        try:
+            await asyncio.to_thread(KILL_SWITCH_FILE.parent.mkdir, parents=True, exist_ok=True)
+            content = (
+                f"engaged_at={datetime.now(timezone.utc).isoformat()}\n"
+                f"reason={reason or 'manual'}\n"
+                f"source=dashboard\n"
+            )
+            await asyncio.to_thread(KILL_SWITCH_FILE.write_text, content, "utf-8")
+        except OSError as exc:
+            logger.exception("killswitch engage failed: %s", exc)
+            return web.json_response({"error": "fs error"}, status=500)
+        try:
+            await MekkaRepository.log_event(
+                agent="NickFury",
+                event="KILL_SWITCH_ENGAGED",
+                severity="CRITICAL",
+                message=f"Kill switch engaged via dashboard. Reason: {reason or '-'}",
+                payload={"source": "dashboard", "reason": reason},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("killswitch audit log failed: %s", exc)
+        self._metrics["killswitch_engaged_total"] += 1
+        # Invalidate the broadcast cache so the next /ws frame reflects the
+        # new state immediately (instead of after the 1.5s TTL).
+        self._payload_cache.clear()
+        return web.json_response({"active": True, "reason": reason or None}, status=200)
+
+    async def _handle_killswitch_release(self, request: web.Request) -> web.Response:
+        """Remove the kill-switch file. Requires confirm=RELEASE."""
+        body = await self._safe_json_body(request)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "invalid json body"}, status=400)
+        if str(body.get("confirm") or "").upper() != "RELEASE":
+            return web.json_response(
+                {"error": "missing confirm=RELEASE in body"}, status=400
+            )
+        operator = str(body.get("operator") or "").strip()[:120]
+        try:
+            existed = KILL_SWITCH_FILE.exists()
+            if existed:
+                await asyncio.to_thread(KILL_SWITCH_FILE.unlink)
+        except OSError as exc:
+            logger.exception("killswitch release failed: %s", exc)
+            return web.json_response({"error": "fs error"}, status=500)
+        try:
+            await MekkaRepository.log_event(
+                agent="NickFury",
+                event="KILL_SWITCH_RELEASED",
+                severity="WARNING",
+                message=f"Kill switch released via dashboard by {operator or 'unknown'}",
+                payload={"source": "dashboard", "operator": operator, "had_file": existed},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("killswitch audit log failed: %s", exc)
+        self._metrics["killswitch_released_total"] += 1
+        self._payload_cache.clear()
+        return web.json_response({"active": False, "had_file": existed}, status=200)
+
+    async def _handle_office_v2_index(self, _: web.Request) -> web.FileResponse:
+        """Serve the Office v2 single-page app entrypoint."""
+        return web.FileResponse(STATIC_DIR / "office_v2" / "index.html")
+
+    # ------------------------------------------------------------------
+    # Auth flow (login / logout / whoami)
+    # ------------------------------------------------------------------
+    async def _handle_auth_login(self, request: web.Request) -> web.Response:
+        """Operator login. Body ``{"password": "..."}`` returns a signed
+        session cookie + the token in JSON for header-style use.
+
+        When no password is configured (development default) we return 503
+        to make the misconfiguration loud — the UI can decide whether to
+        show the login form or hide it.
+        """
+        from src.dashboard.auth import (
+            COOKIE_NAME, check_password, is_login_enabled, issue_token,
+        )
+
+        if not is_login_enabled():
+            return web.json_response(
+                {"error": "login not configured", "enabled": False},
+                status=503,
+            )
+
+        # --- Rate limiting: block IPs that exceed failed-attempt threshold ---
+        client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        client_ip = client_ip or request.remote or "unknown"
+        if not _check_login_rate_limit(client_ip):
+            logger.warning(
+                "login rate-limit hit for ip=%s (max %d attempts / %ds window)",
+                client_ip, _LOGIN_MAX_ATTEMPTS, _LOGIN_WINDOW_SECONDS,
+            )
+            return web.json_response(
+                {"error": "too many failed attempts — try again later"},
+                status=429,
+                headers={"Retry-After": str(_LOGIN_WINDOW_SECONDS)},
+            )
+
+        body = await self._safe_json_body(request) or {}
+        if not check_password(body.get("password")):
+            return web.json_response({"error": "invalid credentials"}, status=401)
+
+        # Successful login: clear the rate-limit counter for this IP.
+        _clear_login_rate_limit(client_ip)
+        import time as _time
+        bundle = issue_token(subject="operator")
+        # `Max-Age` is bounded by exp; HttpOnly + SameSite=Lax keep the
+        # cookie out of cross-site requests; Secure is set automatically
+        # by aiohttp when responding over HTTPS.
+        ttl = max(60, int(bundle["expires_at"] - int(_time.time())))
+        resp = web.json_response(
+            {
+                "authenticated": True,
+                "expires_at": bundle["expires_at"],
+                "subject": bundle["subject"],
+                "token": bundle["token"],
+            }
+        )
+        resp.set_cookie(
+            COOKIE_NAME,
+            bundle["token"],
+            httponly=True,
+            samesite="Lax",
+            secure=request.scheme == "https",
+            path="/",
+            max_age=ttl,
+        )
+        return resp
+
+    async def _handle_auth_logout(self, request: web.Request) -> web.Response:
+        """Clear the session cookie. Always succeeds (idempotent)."""
+        from src.dashboard.auth import COOKIE_NAME
+        resp = web.json_response({"authenticated": False})
+        resp.del_cookie(COOKIE_NAME, path="/")
+        return resp
+
+    async def _handle_auth_me(self, request: web.Request) -> web.Response:
+        """Whoami / session-state probe used by the frontend."""
+        from src.dashboard.auth import (
+            COOKIE_NAME, is_login_enabled, verify_token,
+        )
+
+        cookie = request.cookies.get(COOKIE_NAME, "")
+        payload = verify_token(cookie) if cookie else None
+        return web.json_response(
+            {
+                "authenticated": bool(payload),
+                "expires_at": (payload or {}).get("exp"),
+                "subject": (payload or {}).get("sub"),
+                "login_enabled": is_login_enabled(),
+                "shared_secret_enabled": bool(_DASHBOARD_TOKEN),
+            }
+        )
+
+    async def _handle_agents_tasks(self, _: web.Request) -> web.Response:
+        """Latest task per agent — Office v2 ``fetchAgentTasks`` shape.
+
+        Logic lives in ``office_v2_endpoints.build_agents_tasks_payload``;
+        this handler just owns the timeout and error paths.
+        """
+        from src.dashboard.office_v2_endpoints import build_agents_tasks_payload
+        try:
+            audits = await asyncio.wait_for(
+                MekkaRepository.list_recent_audit(limit=200), timeout=2.0
+            )
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "audit query timed out"}, status=504)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("agents/tasks query failed: %s", exc)
+            return web.json_response({"items": {}})
+        return web.json_response(build_agents_tasks_payload(audits))
+
+    async def _handle_audit_feed(self, request: web.Request) -> web.Response:
+        """Audit feed in Office v2 wire format: ``[{t, who, msg}, ...]``."""
+        from src.dashboard.office_v2_endpoints import build_audit_feed_payload
+        n = _safe_limit(request.query.get("n"), default=20, max_value=200)
+        try:
+            audits = await asyncio.wait_for(
+                MekkaRepository.list_recent_audit(limit=n), timeout=2.0
+            )
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "audit query timed out"}, status=504)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("audit/feed query failed: %s", exc)
+            return web.json_response({"items": []})
+        return web.json_response(build_audit_feed_payload(audits))
+
+    async def _handle_positions(self, _: web.Request) -> web.Response:
+        """Open positions read via the Hyperliquid `info.user_state` endpoint.
+
+        Falls back to the stub shape (empty list, `source="stub"`) whenever
+        we can't reach Hyperliquid, paper trading is on, or credentials are
+        missing — the frontend renders both shapes uniformly.
+        """
+        from src.dashboard.positions_provider import fetch_positions
+
+        try:
+            data = await fetch_positions()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("positions provider crashed: %s", exc)
+            data = {
+                "items": [],
+                "count": 0,
+                "source": "stub",
+                "supported": False,
+                "message": f"Positions provider crashed: {type(exc).__name__}",
+            }
+        return web.json_response(data)
+
+    async def _handle_positions_close(self, request: web.Request) -> web.Response:
+        """Close a paper position by inserting an offsetting trade record.
+
+        Body: {"symbol": "BTC", "side": "LONG"}
+        Creates a PAPER trade on the opposite side with same quantity,
+        so the positions aggregator nets it out to zero.
+        """
+        from src.config.settings import settings as _s
+        from src.models.execution import ExecutionResult, ExecutionStatus
+        from datetime import datetime, timezone
+        import uuid
+
+        body = await self._safe_json_body(request)
+        if not body:
+            return web.json_response({"error": "body required"}, status=400)
+
+        symbol = str(body.get("symbol", "")).upper().strip()
+        side = str(body.get("side", "")).upper().strip()
+
+        if not symbol or side not in ("LONG", "SHORT"):
+            return web.json_response(
+                {"error": "symbol e side (LONG|SHORT) são obrigatórios"}, status=400
+            )
+
+        try:
+            # Calculate open net position
+            trades = await MekkaRepository.list_paper_filled_trades()
+            long_qty = sum(
+                t.quantity for t in trades
+                if t.symbol.upper() == symbol and (t.side or "long").lower() == "long"
+            )
+            short_qty = sum(
+                t.quantity for t in trades
+                if t.symbol.upper() == symbol and (t.side or "long").lower() == "short"
+            )
+            net = long_qty - short_qty
+
+            if abs(net) < 1e-8:
+                return web.json_response(
+                    {"error": f"Nenhuma posição aberta em {symbol}"}, status=400
+                )
+
+            # Average entry price of the open side
+            if net > 0:
+                open_qty = long_qty
+                open_trades = [
+                    t for t in trades
+                    if t.symbol.upper() == symbol and (t.side or "long").lower() == "long"
+                ]
+            else:
+                open_qty = short_qty
+                open_trades = [
+                    t for t in trades
+                    if t.symbol.upper() == symbol and (t.side or "long").lower() == "short"
+                ]
+
+            avg_px = (
+                sum(t.quantity * t.avg_price for t in open_trades) / open_qty
+                if open_qty > 0 else 0.0
+            )
+            close_qty = abs(net)
+            close_side = "short" if net > 0 else "long"
+
+            close_result = ExecutionResult(
+                timestamp=datetime.now(timezone.utc),
+                symbol=symbol,
+                status=ExecutionStatus.PAPER,
+                is_paper=True,
+                side=close_side,
+                quantity=close_qty,
+                avg_price=avg_px,
+                notional_usd=close_qty * avg_px,
+                order_id=f"CLOSE-{symbol}-{uuid.uuid4().hex[:8]}",
+                metadata={"action": "manual_close"},
+            )
+
+            trade_db_id = await MekkaRepository.save_trade(close_result)
+
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="POSITION_CLOSED",
+                severity="INFO",
+                symbol=symbol,
+                message=f"Posição {symbol} {side} fechada manualmente — qty={close_qty:.6f} @ ${avg_px:,.2f}",
+                payload={"trade_id": trade_db_id, "order_id": close_result.order_id},
+            )
+
+            return web.json_response({
+                "status": "closed",
+                "symbol": symbol,
+                "side": side,
+                "quantity": round(close_qty, 8),
+                "avg_price": round(avg_px, 2),
+                "order_id": close_result.order_id,
+                "trade_id": trade_db_id,
+            })
+
+        except Exception as exc:
+            logger.error("positions_close error: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=500)
+
+    # ── Runtime settings (Super Agressivo / Altcoins) ──────────────────────
+
+    @staticmethod
+    def _runtime_settings_path() -> "Path":
+        from pathlib import Path
+        return Path("data/runtime_settings.json")
+
+    def _load_runtime_settings(self) -> dict:
+        try:
+            p = self._runtime_settings_path()
+            if p.exists():
+                return json.loads(p.read_text())
+        except Exception:
+            pass
+        return {"super_aggressive": False, "altcoins_enabled": False}
+
+    def _save_runtime_settings(self, data: dict) -> None:
+        p = self._runtime_settings_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data, indent=2))
+
+    async def _handle_settings_get(self, _: web.Request) -> web.Response:
+        cfg = self._load_runtime_settings()
+        # [Bybit] Expose active exchange so frontend can show it
+        cfg.setdefault("active_exchange", settings.active_exchange)
+        return web.json_response(cfg)
+
+    async def _handle_settings_set(self, request: web.Request) -> web.Response:
+        body = await self._safe_json_body(request)
+        if not body:
+            return web.json_response({"error": "body required"}, status=400)
+
+        cfg = self._load_runtime_settings()
+        if "super_aggressive" in body:
+            cfg["super_aggressive"] = bool(body["super_aggressive"])
+        if "altcoins_enabled" in body:
+            cfg["altcoins_enabled"] = bool(body["altcoins_enabled"])
+
+        self._save_runtime_settings(cfg)
+
+        await MekkaRepository.log_event(
+            agent="Dashboard",
+            event="SETTINGS_CHANGED",
+            severity="INFO",
+            message=(
+                f"super_aggressive={'ON' if cfg['super_aggressive'] else 'OFF'} "
+                f"altcoins={'ON' if cfg['altcoins_enabled'] else 'OFF'}"
+            ),
+            payload=cfg,
+        )
+
+        return web.json_response({"status": "ok", "settings": cfg})
+
+    # ── Hyperliquid Live Price Feed ────────────────────────────────────────
+
+    async def _hl_price_pump_loop(self) -> None:
+        """Background task: connects to Hyperliquid WebSocket and keeps
+        self._hl_prices updated with the latest mark prices (allMids).
+        Reconnects automatically on any error.
+        """
+        hl_ws_url = (
+            "wss://api.hyperliquid.xyz/ws"
+            if settings.is_mainnet
+            else "wss://api.hyperliquid-testnet.xyz/ws"
+        )
+        while True:
+            try:
+                async with aiohttp.ClientSession() as _sess:
+                    async with _sess.ws_connect(
+                        hl_ws_url,
+                        heartbeat=20,
+                        timeout=aiohttp.ClientWSTimeout(ws_close=5.0),
+                    ) as _ws:
+                        await _ws.send_json({
+                            "method": "subscribe",
+                            "subscription": {"type": "allMids"},
+                        })
+                        logger.info("HL price pump connected: %s", hl_ws_url)
+                        async for _msg in _ws:
+                            if _msg.type == aiohttp.WSMsgType.TEXT:
+                                try:
+                                    _d = json.loads(_msg.data)
+                                    if _d.get("channel") == "allMids":
+                                        _mids = (_d.get("data") or {}).get("mids") or {}
+                                        for _coin, _price in _mids.items():
+                                            try:
+                                                self._hl_prices[_coin] = float(_price)
+                                            except (TypeError, ValueError):
+                                                pass
+                                except Exception:
+                                    pass
+                            elif _msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                break
+            except asyncio.CancelledError:
+                return
+            except Exception as _exc:
+                logger.warning("HL price pump disconnected (%s) — reconnecting in 5s", _exc)
+                await asyncio.sleep(5)
+
+    async def _live_price_broadcast_loop(self) -> None:
+        """Push live prices + open position PnL to all /ws/live clients every 1s."""
+        from src.dashboard.positions_provider import (  # noqa: WPS433
+            _fetch_paper_positions,
+            get_paper_equity_summary,
+        )
+        while True:
+            try:
+                await asyncio.sleep(1.0)
+                if not self._live_sockets:
+                    continue
+                prices = dict(self._hl_prices)
+                # Enrich paper positions with live mark prices + real PnL
+                pos_data: dict = {}
+                try:
+                    if settings.paper_trading:
+                        pos_data = await _fetch_paper_positions()
+                    else:
+                        from src.dashboard.positions_provider import fetch_positions  # noqa: WPS433
+                        pos_data = await fetch_positions()
+                except Exception:
+                    pos_data = {}
+                items = list(pos_data.get("items") or [])
+                for _item in items:
+                    _sym = _item.get("symbol", "")
+                    _mark = (
+                        prices.get(_sym)
+                        or prices.get(_sym + "-PERP")
+                        or prices.get(_sym.replace("-PERP", ""))
+                        or _item.get("entry_price", 0.0)
+                    )
+                    _item["mark_price"] = _mark
+                    _qty = float(_item.get("size", 0))
+                    _entry = float(_item.get("entry_price", 0) or 0)
+                    if _entry and _qty:
+                        if (_item.get("side") or "LONG").upper() == "LONG":
+                            _item["pnl_usd"] = round((_mark - _entry) * _qty, 2)
+                        else:
+                            _item["pnl_usd"] = round((_entry - _mark) * _qty, 2)
+                        _item["pnl_pct"] = round(
+                            (_item["pnl_usd"] / (_entry * _qty)) * 100, 3
+                        ) if _entry * _qty else 0.0
+                # [C3] Compute dynamic paper equity using mark prices
+                equity_summary: dict = {}
+                if settings.paper_trading:
+                    try:
+                        equity_summary = await get_paper_equity_summary(mark_prices=prices)
+                    except Exception:
+                        equity_summary = {}
+                _payload = json.dumps({
+                    "type": "live_tick",
+                    "prices": prices,
+                    "positions": items,
+                    "equity": equity_summary,
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                })
+                _stale: list[web.WebSocketResponse] = []
+                for _ws in list(self._live_sockets):
+                    if _ws.closed:
+                        _stale.append(_ws)
+                        continue
+                    try:
+                        await asyncio.wait_for(_ws.send_str(_payload), timeout=1.0)
+                    except Exception:
+                        _stale.append(_ws)
+                for _ws in _stale:
+                    self._live_sockets.discard(_ws)
+            except asyncio.CancelledError:
+                return
+            except Exception as _exc:
+                logger.debug("live broadcast error: %s", _exc)
+
+    async def _handle_ws_live(self, request: web.Request) -> web.WebSocketResponse:
+        """GET /ws/live — WebSocket endpoint for live Hyperliquid prices and PnL.
+
+        The client receives JSON ticks every 1 s:
+          { "type": "live_tick",
+            "prices": {"BTC": 104321.0, "ETH": 3412.5, ...},
+            "positions": [{... with live mark_price + pnl_usd + pnl_pct ...}],
+            "ts": "2026-05-12T..." }
+        """
+        # Origin check — same defence as /ws
+        _origin = request.headers.get("Origin")
+        if not _is_origin_allowed(_origin):
+            return web.Response(status=403, text="forbidden origin")
+
+        _ws = web.WebSocketResponse(heartbeat=20)
+        await _ws.prepare(request)
+        self._live_sockets.add(_ws)
+        try:
+            # Send current snapshot immediately on connect
+            if self._hl_prices:
+                try:
+                    await _ws.send_str(json.dumps({
+                        "type": "live_tick",
+                        "prices": dict(self._hl_prices),
+                        "positions": [],
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    }))
+                except Exception:
+                    pass
+            async for _msg in _ws:
+                if _msg.type == WSMsgType.TEXT and _msg.data == "ping":
+                    await _ws.send_str("pong")
+                elif _msg.type == WSMsgType.ERROR:
+                    break
+        finally:
+            self._live_sockets.discard(_ws)
+        return _ws
+
+    async def _handle_hl_candles(self, request: web.Request) -> web.Response:
+        """GET /api/hl/candles?symbol=BTC&tf=15m&limit=200
+
+        Returns OHLCV from Hyperliquid via ccxt.async_support.hyperliquid.
+        Lightweight-charts expects { time, open, high, low, close, volume }.
+        """
+        _sym = str(request.query.get("symbol") or "BTC").strip().upper()
+        _tf = str(request.query.get("tf") or "15m").strip()
+        _limit = _safe_limit(request.query.get("limit"), default=200, max_value=500)
+
+        _allowed_tf = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1d", "1w"}
+        if _tf not in _allowed_tf:
+            return web.json_response(
+                {"error": "invalid timeframe", "allowed": sorted(_allowed_tf)},
+                status=400,
+            )
+
+        try:
+            import ccxt.async_support as _ccxt  # noqa: WPS433
+            _exchange = _ccxt.hyperliquid({
+                "walletAddress": (settings.hyperliquid_wallet_address or "0x0000000000000000000000000000000000000000"),
+                "enableRateLimit": True,
+            })
+            _hl_sym = f"{_sym}/USDT:USDT"
+            _raw = await asyncio.wait_for(
+                _exchange.fetch_ohlcv(_hl_sym, _tf, limit=_limit),
+                timeout=12.0,
+            )
+            await _exchange.close()
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "Hyperliquid OHLCV timeout"}, status=504)
+        except Exception as _exc:
+            logger.warning("hl_candles fetch error %s: %s", _sym, _exc)
+            return web.json_response({"error": str(_exc)}, status=502)
+
+        _candles = [
+            {
+                "time": int(_r[0] // 1000),
+                "open":   float(_r[1]),
+                "high":   float(_r[2]),
+                "low":    float(_r[3]),
+                "close":  float(_r[4]),
+                "volume": float(_r[5]),
+            }
+            for _r in (_raw or [])
+            if _r and len(_r) >= 6
+        ]
+        _last_price = self._hl_prices.get(_sym) or (_candles[-1]["close"] if _candles else 0.0)
+        return web.json_response({
+            "symbol": _sym,
+            "tf": _tf,
+            "count": len(_candles),
+            "candles": _candles,
+            "last_price": _last_price,
+        })
+
+    async def _handle_metrics(self, _: web.Request) -> web.Response:
+        """Prometheus text-format exposition of internal counters/gauges.
+
+        Heavy lifting (descriptor table + live gauge derivation) lives in
+        :mod:`src.dashboard.metrics`; this handler is just a thin adapter
+        that snapshots in-memory state and serialises it.
+        """
+        from src.dashboard.metrics import (
+            derive_runtime_metrics,
+            render_prometheus,
+        )
+
+        values = derive_runtime_metrics(
+            self._metrics,
+            sockets_count=len(self._sockets),
+            market_diag=self._market_diag,
+            market_cache_size=len(self._market_cache),
+            payload_latencies_ms=self._payload_latencies_ms,
+            broadcast_latencies_ms=self._broadcast_latencies_ms,
+            percentile_fn=_percentile,
+        )
+        return web.Response(
+            text=render_prometheus(values),
+            content_type="text/plain",
+            charset="utf-8",
+        )
+
+    async def _safe_json_body(self, request: web.Request) -> Any:
+        """Read JSON body without crashing on bad/empty payloads. Returns
+        None for malformed bodies; callers decide how to react."""
+        try:
+            return await request.json()
+        except (json.JSONDecodeError, ValueError):
+            return None
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def _handle_pnl_series(self, request: web.Request) -> web.Response:
+        """Daily-PnL time series for the Equity & PnL dashboard panel.
+
+        ``days`` clamps the window (1..365). Output is oldest-first so the
+        frontend can pipe it straight into Chart.js.
+        """
+        days = _safe_limit(request.query.get("days"), default=30, max_value=365)
+        rows = await MekkaRepository.list_recent_daily_pnl(limit=days)
+        items = [
+            {
+                "date_utc": r.date_utc,
+                "is_paper": bool(r.is_paper),
+                "starting_equity": float(r.starting_equity or 0.0),
+                "ending_equity": float(r.ending_equity or 0.0),
+                "pnl_usd": float(r.pnl_usd or 0.0),
+                "pnl_pct": float(r.pnl_pct or 0.0),
+                "drawdown_pct": float(r.drawdown_pct or 0.0),
+                "trades_count": int(r.trades_count or 0),
+                "wins": int(r.wins or 0),
+                "losses": int(r.losses or 0),
+            }
+            for r in rows
+        ]
+        return web.json_response({"items": items, "count": len(items), "days": days})
+
+    async def _handle_trades_timeline(self, request: web.Request) -> web.Response:
+        """Hourly buckets of executions for the last ``hours`` hours.
+
+        Output: ``{ hours, items: [{ hour_utc, filled, paper, rejected, error,
+        skipped, total }] }``. The UI renders a stacked bar chart so the
+        operator can spot fill-rate regressions and execution gaps at a glance.
+        """
+        from collections import defaultdict
+        hours = _safe_limit(request.query.get("hours"), default=24, max_value=168)
+        try:
+            trades = await asyncio.wait_for(
+                MekkaRepository.list_trades_within(hours), timeout=3.0
+            )
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "trades query timed out"}, status=504)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("trades/timeline query failed: %s", exc)
+            return web.json_response({"items": [], "hours": hours})
+
+        # Aggregate by hour. Status enum from IronMan:
+        #   FILLED / PARTIAL / PAPER / SKIPPED / REJECTED / ERROR
+        STATUS_BUCKETS = {
+            "FILLED": "filled", "PARTIAL": "filled",
+            "PAPER": "paper",
+            "REJECTED": "rejected", "ERROR": "error", "FAILED": "error",
+            "SKIPPED": "skipped", "PENDING": "skipped",
+        }
+        buckets: dict[str, dict[str, int]] = defaultdict(
+            lambda: {"filled": 0, "paper": 0, "rejected": 0, "error": 0, "skipped": 0}
+        )
+        for t in trades:
+            ts = t.timestamp
+            # Truncate to the hour boundary (UTC).
+            hour_key = ts.replace(minute=0, second=0, microsecond=0).isoformat()
+            label = STATUS_BUCKETS.get(str(t.status or "").upper(), "skipped")
+            buckets[hour_key][label] += 1
+
+        items = []
+        for hour, counts in sorted(buckets.items()):
+            total = sum(counts.values())
+            items.append({"hour_utc": hour, **counts, "total": total})
+        return web.json_response({"hours": hours, "count": len(items), "items": items})
+
+    async def _handle_pnl_benchmark(self, request: web.Request) -> web.Response:
+        """Normalized benchmark series for the equity-vs-benchmark overlay.
+
+        For each requested symbol we fetch ``days`` daily candles from the
+        existing market endpoint cache and emit ``[date_utc, ratio]`` where
+        ratio = close[i] / close[0] (so the curve starts at 1.0 and shows
+        relative performance only — operator overlays it on equity curve).
+        """
+        days = _safe_limit(request.query.get("days"), default=30, max_value=180)
+        symbols_raw = (request.query.get("symbols") or "BTCUSDT").upper()
+        symbols = [s.strip() for s in symbols_raw.split(",") if s.strip()]
+        symbols = [s if s.endswith("USDT") else f"{s}USDT" for s in symbols][:4]
+
+        params_template = {"interval": "1d", "limit": str(days)}
+        url = "https://api.binance.com/api/v3/klines"
+        result: list[dict[str, Any]] = []
+        for symbol in symbols:
+            try:
+                raw = await self._market_get_json(
+                    url, {"symbol": symbol, **params_template}, ttl_s=60.0,
+                    allow_error=True,
+                )
+            except (asyncio.TimeoutError, aiohttp.ClientError, RuntimeError) as exc:
+                logger.warning("benchmark %s failed: %s", symbol, exc)
+                continue
+            if not raw:
+                continue
+            closes = []
+            for row in raw:
+                if not isinstance(row, list) or len(row) < 5:
+                    continue
+                ts_ms = int(row[0])
+                close = float(row[4])
+                closes.append((ts_ms, close))
+            if not closes:
+                continue
+            base = closes[0][1] or 1.0
+            points = [
+                {
+                    "date_utc": datetime.fromtimestamp(
+                        ts_ms / 1000.0, tz=timezone.utc
+                    ).strftime("%Y-%m-%d"),
+                    "ratio": round(close / base, 6),
+                }
+                for ts_ms, close in closes
+            ]
+            result.append({"symbol": symbol, "points": points, "count": len(points)})
+
+        return web.json_response({"days": days, "series": result})
+
+    async def _handle_pnl_summary(self, request: web.Request) -> web.Response:
+        days = _safe_limit(request.query.get("days"), default=30, max_value=365)
+        try:
+            data = await asyncio.wait_for(
+                MekkaRepository.get_pnl_summary(window_days=days), timeout=3.0
+            )
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "pnl summary timed out"}, status=504)
+
+        # [C3] For paper mode: inject dynamic equity (realized + unrealized PnL)
+        if settings.paper_trading:
+            try:
+                from src.dashboard.positions_provider import get_paper_equity_summary  # noqa: WPS433
+                eq = await asyncio.wait_for(
+                    get_paper_equity_summary(mark_prices=dict(self._hl_prices)), timeout=2.0
+                )
+                data["paper_equity"] = eq
+                # Override latest_equity_usd in the window summary for accuracy
+                if "window" in data and eq.get("equity_usd"):
+                    data["window"]["latest_equity_usd"] = eq["equity_usd"]
+            except Exception as _exc:
+                logger.debug("paper equity summary failed: %s", _exc)
+
+        return web.json_response(data)
+
+    async def _handle_performance(self, request: web.Request) -> web.Response:
+        """
+        GET /api/performance[?days=30]
+
+        Runs Deadpool and returns a PerformanceReport as JSON.
+
+        Query params
+        ------------
+        days : int, 1–365, default 30 — rolling window for the report.
+
+        Response shape
+        --------------
+        All fields from PerformanceReport.to_audit_payload(), plus
+        ``generated_at`` (ISO 8601 UTC string).
+
+        Errors
+        ------
+        504 — Deadpool timed out (DB slow or not initialised yet).
+        500 — unexpected error.
+        """
+        _Deadpool = Deadpool
+        if _Deadpool is None:
+            from src.agents.deadpool import Deadpool as _Deadpool
+
+        days = _safe_limit(request.query.get("days"), default=30, max_value=365)
+        try:
+            dp = _Deadpool(repo=MekkaRepository)
+            report = await asyncio.wait_for(dp.run(window_days=days), timeout=10.0)
+            return web.json_response(report.to_audit_payload())
+        except asyncio.TimeoutError:
+            return web.json_response(
+                {"error": "performance report timed out"}, status=504
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("_handle_performance error: %s", exc)
+            return web.json_response({"error": str(exc)}, status=500)
+
+    # ------------------------------------------------------------------
+    # Trading Mode — GET /api/mode  POST /api/mode
+    # ------------------------------------------------------------------
+
+    async def _handle_mode_get(self, _: web.Request) -> web.Response:
+        """Return current trading mode + all presets summary."""
+        from src.config.runtime_mode import all_modes_summary, get_mode
+        return web.json_response({
+            "mode": get_mode(),
+            "modes": all_modes_summary(),
+        })
+
+    async def _handle_mode_set(self, request: web.Request) -> web.Response:
+        """
+        POST /api/mode  body: {"mode": "aggressive"}
+
+        Changes the active trading mode immediately (next cycle picks it up).
+        Emits a MODE_CHANGED audit event.
+        """
+        from src.config.runtime_mode import VALID_MODES, get_params, set_mode
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+
+        mode = body.get("mode", "")
+        if mode not in VALID_MODES:
+            return web.json_response(
+                {"error": f"unknown mode '{mode}'. Valid: {VALID_MODES}"},
+                status=400,
+            )
+
+        preset = set_mode(mode)
+
+        # Emit audit event so operators can trace mode changes
+        try:
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="MODE_CHANGED",
+                payload={"mode": mode, "preset": preset},
+                severity="INFO",
+            )
+        except Exception:
+            pass  # audit is best-effort
+
+        logger.info("Trading mode changed to '%s' via dashboard API", mode)
+        return web.json_response({"mode": mode, "params": get_params()})
+
+    async def _handle_report_daily(self, request: web.Request) -> web.Response:
+        """
+        GET /api/report/daily[?force=1]
+
+        Trigger the daily PnL report on-demand and return the dispatch result.
+        Useful for testing webhooks and for the /report Telegram command.
+        Does not require auth — reporting is read-only and non-destructive.
+        """
+        force = request.query.get("force", "0") not in ("0", "false", "")
+        if self._daily_reporter is None:
+            from src.dashboard.daily_reporter import DailyReporter
+            self._daily_reporter = DailyReporter()
+        try:
+            result = await asyncio.wait_for(
+                self._daily_reporter.send_daily_report(force=force),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "report send timed out"}, status=504)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)}, status=500)
+        return web.json_response(result)
 
     async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
+        # Cross-Site WebSocket Hijacking defence. Without this, any tab the
+        # user has open in their browser could connect to ws://host/ws and
+        # exfiltrate live signals/trades/audit. We bounce missing/foreign
+        # origins before upgrading the connection.
+        origin = request.headers.get("Origin")
+        if not _is_origin_allowed(origin):
+            self._metrics["ws_connections_rejected_total"] += 1
+            logger.warning("ws rejected: origin=%r remote=%s", origin, request.remote)
+            return web.Response(status=403, text="forbidden origin")
+
         ws = web.WebSocketResponse(heartbeat=20)
         await ws.prepare(request)
 
         self._sockets.add(ws)
-        await ws.send_str(json.dumps(await self._collect_payload(include_tables=True)))
+        self._metrics["ws_connections_total"] += 1
+        try:
+            await ws.send_str(
+                json.dumps(await self._collect_payload(include_tables=True))
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ws initial payload failed: %s", exc)
 
         try:
             async for msg in ws:
@@ -407,27 +2236,89 @@ class MekkaDashboardServer:
         return ws
 
     async def _broadcast_loop(self) -> None:
+        # Guarantees the loop never dies silently. Any exception in payload
+        # collection, persistence or WS send is logged and we sleep again so
+        # connected clients keep receiving updates as soon as the issue clears.
         while True:
-            await asyncio.sleep(2.0)
-            if not self._sockets:
-                continue
-            snapshot = await self._collect_payload(include_tables=True)
-            await self._persist_snapshot(snapshot)
-            payload = json.dumps(snapshot)
-            stale: list[web.WebSocketResponse] = []
-            for ws in self._sockets:
-                if ws.closed:
-                    stale.append(ws)
+            try:
+                await asyncio.sleep(2.0)
+                if not self._sockets:
                     continue
-                try:
-                    await ws.send_str(payload)
-                except Exception:
-                    stale.append(ws)
-            for ws in stale:
-                self._sockets.discard(ws)
+                self._metrics["broadcasts_total"] += 1
+                loop = asyncio.get_running_loop()
+                tick_start = loop.time()
+                snapshot = await self._collect_payload(include_tables=True)
+                await self._persist_snapshot(snapshot)
+                payload = json.dumps(snapshot)
+                self._record_latency(
+                    self._broadcast_latencies_ms,
+                    (loop.time() - tick_start) * 1000.0,
+                )
+                stale: list[web.WebSocketResponse] = []
+                # Iterate over a snapshot of the set so concurrent
+                # _handle_ws add/discard calls can never raise during iteration.
+                for ws in list(self._sockets):
+                    if ws.closed:
+                        stale.append(ws)
+                        continue
+                    try:
+                        # Backpressure: a single slow client used to block the
+                        # entire broadcast. We bound the per-client write time
+                        # and drop laggards so other clients still get fresh data.
+                        await asyncio.wait_for(ws.send_str(payload), timeout=2.0)
+                        self._metrics["ws_messages_sent_total"] += 1
+                    except (asyncio.TimeoutError, ConnectionError, RuntimeError):
+                        stale.append(ws)
+                    except Exception:  # noqa: BLE001
+                        stale.append(ws)
+                for ws in stale:
+                    self._sockets.discard(ws)
+                    self._metrics["ws_slow_consumers_dropped_total"] += 1
+                    try:
+                        await ws.close(code=1011, message=b"slow consumer")
+                    except Exception:  # noqa: BLE001
+                        pass
+            except asyncio.CancelledError:
+                # Honour shutdown — re-raise so the awaiting code (in
+                # _on_shutdown) can finish cleaning up.
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._metrics["broadcasts_errors_total"] += 1
+                logger.exception("dashboard broadcast loop error: %s", exc)
+                # Brief breather to avoid hot-spinning on a persistent failure.
+                await asyncio.sleep(1.0)
+
+    @staticmethod
+    def _record_latency(buf: list[float], value_ms: float) -> None:
+        """Append a latency sample, keeping the newest 240 in memory."""
+        buf.append(value_ms)
+        if len(buf) > 240:
+            del buf[:-240]
 
     async def _collect_payload(self, include_tables: bool) -> dict:
-        overview = await MekkaRepository.get_overview()
+        # Short-lived cache. The broadcast loop ticks every 2s and several
+        # REST endpoints share this builder; serving the same payload twice
+        # within the TTL avoids hammering the DB and keeps responses crisp.
+        loop = asyncio.get_running_loop()
+        ttl = 1.5 if include_tables else 0.5
+        cached = self._payload_cache.get(include_tables)
+        if cached and cached[0] > loop.time():
+            self._metrics["payload_cache_hits_total"] += 1
+            return cached[1]
+        self._metrics["payload_cache_misses_total"] += 1
+        build_start = loop.time()
+
+        # Hard timeouts. If the DB hangs we fail fast and let the broadcast
+        # loop's outer try/except log it rather than blocking every WS client.
+        try:
+            overview = await asyncio.wait_for(
+                MekkaRepository.get_overview(), timeout=3.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning("get_overview timed out; serving last known payload")
+            if cached:
+                return cached[1]
+            raise
         payload = {
             "overview": {
                 **overview,
@@ -438,11 +2329,24 @@ class MekkaDashboardServer:
             }
         }
         if not include_tables:
+            self._payload_cache[include_tables] = (loop.time() + ttl, payload)
             return payload
 
-        signals = await MekkaRepository.list_recent_signals(limit=12)
-        trades = await MekkaRepository.list_recent_trades(limit=12)
-        audits = await MekkaRepository.list_recent_audit(limit=80)
+        try:
+            signals, trades, audits, drawdown_pct = await asyncio.wait_for(
+                asyncio.gather(
+                    MekkaRepository.list_recent_signals(limit=12),
+                    MekkaRepository.list_recent_trades(limit=12),
+                    MekkaRepository.list_recent_audit(limit=80),
+                    MekkaRepository.get_today_drawdown_pct(),
+                ),
+                timeout=3.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("payload tables query timed out")
+            if cached:
+                return cached[1]
+            raise
 
         payload["signals"] = [
             {
@@ -483,8 +2387,14 @@ class MekkaDashboardServer:
         payload["risk_heatmap"] = _build_risk_heatmap(audits)
         payload["risk_drilldown"] = _build_risk_drilldown(audits)
         payload["anomalies"] = _build_spiderman_anomalies(audits)
-        payload["global_alerts"] = _build_global_alerts(audits)
+        payload["global_alerts"] = _build_global_alerts(audits, drawdown_pct)
         payload["hero_sla"] = _build_hero_sla(audits)
+        payload["overview"]["drawdown_pct_today"] = float(drawdown_pct or 0.0)
+        self._record_latency(
+            self._payload_latencies_ms,
+            (loop.time() - build_start) * 1000.0,
+        )
+        self._payload_cache[include_tables] = (loop.time() + ttl, payload)
         return payload
 
     async def _persist_snapshot(self, payload: dict) -> None:
@@ -495,37 +2405,687 @@ class MekkaDashboardServer:
 
         alerts = payload.get("global_alerts", [])
         has_kill = any("KILL_SWITCH" in str(a.get("code", "")) for a in alerts)
-        if has_kill:
-            bundle = SNAPSHOT_DIR / f"incident-bundle-{now.strftime('%Y%m%dT%H%M%S')}.json"
-            await asyncio.to_thread(
-                bundle.write_text,
-                json.dumps(
-                    {
-                        "captured_at": now.isoformat(),
-                        "overview": payload.get("overview", {}),
-                        "alerts": alerts,
-                        "risk_heatmap": payload.get("risk_heatmap", []),
-                        "hero_sla": payload.get("hero_sla", []),
-                        "severity": _compute_severity(payload),
-                    },
-                    ensure_ascii=True,
-                ),
-                "utf-8",
+
+        # Outbound webhook fan-out. Fired in a background task so disk I/O
+        # below (snapshot/bundle write) doesn't wait on Slack/Telegram.
+        # Dispatcher dedups internally so kill switches that linger across
+        # broadcast ticks don't spam channels.
+        if self._alert_dispatcher is not None and self._alert_dispatcher.has_targets:
+            context = payload.get("overview") or {}
+            asyncio.create_task(
+                self._alert_dispatcher.dispatch(alerts, context),
             )
 
+        # Bundle dedup. Persist a new bundle ONLY when:
+        #   (a) we just transitioned from "no kill" → "kill" (front-edge), OR
+        #   (b) the kill is still active but we crossed into a new wall-clock
+        #       minute (so investigators get one bundle per minute of incident,
+        #       not 30 per minute as before).
+        # This avoids flooding SNAPSHOT_DIR with hundreds of identical bundles
+        # during a sustained kill switch.
         minute_key = now.strftime("%Y%m%dT%H%M")
+        if has_kill:
+            transition = not self._kill_state_active
+            new_minute = self._last_bundle_minute != minute_key
+            if transition or new_minute:
+                # Second-resolution stamps collide when two bundle-worthy
+                # transitions happen inside the same wall-clock second
+                # (kill → clear → kill in tests, or rapid breaker churn in
+                # prod). Append a microsecond-derived suffix so each bundle
+                # gets its own file even on hot loops.
+                stamp = now.strftime("%Y%m%dT%H%M%S")
+                suffix = f"{now.microsecond:06d}"
+                bundle_name = f"incident-bundle-{stamp}-{suffix}.json"
+                bundle_path = SNAPSHOT_DIR / bundle_name
+                bundle_payload = {
+                    "captured_at": now.isoformat(),
+                    "overview": payload.get("overview", {}),
+                    "alerts": alerts,
+                    "risk_heatmap": payload.get("risk_heatmap", []),
+                    "hero_sla": payload.get("hero_sla", []),
+                    "severity": _compute_severity(payload),
+                    "trigger": "transition" if transition else "minute_rollover",
+                }
+                await asyncio.to_thread(
+                    bundle_path.write_text,
+                    json.dumps(bundle_payload, ensure_ascii=True),
+                    "utf-8",
+                )
+                self._metrics["incident_bundle_writes_total"] += 1
+                self._last_bundle_minute = minute_key
+            self._kill_state_active = True
+        else:
+            # Reset edge tracker as soon as kill clears so the next occurrence
+            # generates a fresh "transition" bundle.
+            self._kill_state_active = False
+
         if minute_key != self._last_snapshot_minute:
             self._last_snapshot_minute = minute_key
             path = SNAPSHOT_DIR / f"snapshot-{minute_key}.json"
             await asyncio.to_thread(path.write_text, data, "utf-8")
+            self._metrics["snapshot_writes_total"] += 1
+            # Lazy retention: prune oldest snapshots/bundles when the new
+            # minute lands. Cheap (1x/min) and keeps disk usage bounded.
+            await asyncio.to_thread(self._prune_snapshot_dir)
+
+    # ------------------------------------------------------------------
+    # Widget Prefs — GET /api/prefs  POST /api/prefs          (Story 042)
+    # ------------------------------------------------------------------
+
+    _PREFS_FILE = "data/widget_prefs.json"
+
+    async def _handle_prefs_get(self, request: web.Request) -> web.Response:
+        """GET /api/prefs — return server-persisted widget preferences.
+
+        Returns ``{"prefs": {section_id: bool, ...}}`` or ``{"prefs": {}}``
+        if no prefs have been saved yet. Auth not required (display-only).
+        """
+        import json as _json
+        from pathlib import Path as _Path
+
+        prefs_path = _Path(self._PREFS_FILE)
+        try:
+            if prefs_path.exists():
+                raw = await asyncio.to_thread(prefs_path.read_text, "utf-8")
+                data = _json.loads(raw)
+                prefs = data if isinstance(data, dict) else {}
+            else:
+                prefs = {}
+        except Exception as exc:
+            logger.warning("prefs_get: could not read %s: %s", prefs_path, exc)
+            prefs = {}
+
+        return web.json_response({"prefs": prefs})
+
+    async def _handle_prefs_set(self, request: web.Request) -> web.Response:
+        """POST /api/prefs — persist widget preferences server-side.
+
+        Body: ``{"prefs": {section_id: bool, ...}}``
+        Auth required (same gate as mutating endpoints).
+        """
+        import json as _json
+        from pathlib import Path as _Path
+
+        body = await self._safe_json_body(request) or {}
+        prefs = body.get("prefs")
+        if not isinstance(prefs, dict):
+            return web.json_response({"error": "Campo 'prefs' deve ser um objeto."}, status=400)
+
+        # Sanitise: only boolean values, keys that look like section IDs
+        clean: dict = {
+            str(k)[:64]: bool(v)
+            for k, v in prefs.items()
+            if isinstance(k, str) and str(k).startswith("sec-")
+        }
+
+        prefs_path = _Path(self._PREFS_FILE)
+        try:
+            prefs_path.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(
+                prefs_path.write_text, _json.dumps(clean, indent=2), "utf-8"
+            )
+        except Exception as exc:
+            logger.warning("prefs_set: could not write %s: %s", prefs_path, exc)
+            return web.json_response({"error": f"Falha ao salvar prefs: {exc}"}, status=500)
+
+        return web.json_response({"saved": True, "count": len(clean)})
+
+    # ------------------------------------------------------------------
+    # TradeNow — POST /api/trade/analyze  POST /api/trade/execute
+    # (Story 040 — Dashboard v2)
+    # ------------------------------------------------------------------
+
+    async def _handle_trade_analyze(self, request: web.Request) -> web.Response:
+        """POST /api/trade/analyze — run agent analysis for the best trade
+        opportunity right now.
+
+        Guardrails are evaluated server-side before any agent is called.
+        Returns a typed ``TradeRecommendation`` plus a guardrail checklist.
+        Auth required (same gate as all mutating endpoints).
+
+        Response shape
+        --------------
+        {
+          "recommendation_id": str,   # opaque ID, required for /execute
+          "guardrails": {
+            "passed": bool,
+            "checks": [{"name": str, "ok": bool, "detail": str}, ...]
+          },
+          "recommendation": {         # null when guardrails.passed == false
+            "symbol": str,
+            "direction": "LONG"|"SHORT",
+            "entry_price": float,
+            "stop_loss": float,
+            "take_profit": float,
+            "size_pct": float,        # fraction of equity e.g. 0.02
+            "confidence": float,      # 0..1
+            "risk_usd": float,
+            "justification": str,
+            "source": "agents"|"mock",
+            "agents_consensus": bool,
+          },
+          "is_paper": bool,
+          "generated_at": str,        # ISO-8601 UTC
+        }
+        """
+        # ── Global guard — always return JSON, never let aiohttp emit 500 text ──
+        import uuid  # noqa: PLC0415 — local import so uuid is in scope for all code below
+        try:
+            from src.agents.batman import is_kill_switch_active
+            from src.config.settings import settings as _s
+            from src.config.runtime_mode import get_params
+        except Exception as _import_exc:
+            logger.error("trade_analyze: import failed: %s", _import_exc, exc_info=True)
+            return web.json_response({
+                "recommendation_id": str(uuid.uuid4()),
+                "guardrails": {"passed": False, "checks": [
+                    {"name": "server_ready", "ok": False,
+                     "detail": f"Erro interno de inicialização: {_import_exc}"}
+                ]},
+                "recommendation": None,
+                "is_paper": True,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }, status=200)
+
+        generated_at = datetime.now(timezone.utc).isoformat()
+
+        # ── Guardrail evaluation ────────────────────────────────────────
+        checks: list[dict] = []
+
+        # G1: kill switch
+        ks_active = is_kill_switch_active()
+        checks.append({
+            "name": "kill_switch_clear",
+            "ok": not ks_active,
+            "detail": "Kill switch ativo — libere antes de operar" if ks_active else "Clear",
+        })
+
+        # G2: equity available
+        equity_usd = 0.0
+        try:
+            summary = await MekkaRepository.get_pnl_summary(window_days=1)
+            equity_usd = float(summary["window"].get("latest_equity_usd") or 0.0)
+        except Exception:
+            equity_usd = float(_s.paper_equity_usd) if _s.paper_trading else 0.0
+        wallet_ok = equity_usd > 0
+        checks.append({
+            "name": "wallet_ok",
+            "ok": wallet_ok,
+            "detail": f"Equity ${equity_usd:,.2f}" if wallet_ok else "Equity zero ou indisponível",
+        })
+
+        # G3: risk/drawdown headroom
+        params = get_params()
+
+        # ── Runtime overrides: Super Agressivo + Altcoins ───────────────────
+        _runtime_cfg = self._load_runtime_settings()
+        _super_aggressive = bool(_runtime_cfg.get("super_aggressive", False))
+        _altcoins_enabled  = bool(_runtime_cfg.get("altcoins_enabled", False))
+        # Confidence threshold: 55% when super_aggressive, else 70%
+        _confidence_threshold = 0.55 if _super_aggressive else 0.70
+        # Extra assets when altcoins enabled
+        _ALTCOINS = ["ETH", "SOL", "AVAX", "BNB", "LINK"]
+
+        max_dd = float(params.get("max_daily_drawdown_pct", _s.max_daily_drawdown_pct))
+        try:
+            pnl_data = await MekkaRepository.get_pnl_summary(window_days=1)
+            dd_pct = float(pnl_data["window"].get("max_drawdown_pct") or 0.0)
+        except Exception:
+            dd_pct = 0.0
+        risk_ok = dd_pct < max_dd
+        checks.append({
+            "name": "risk_ok",
+            "ok": risk_ok,
+            "detail": (
+                f"Drawdown {dd_pct:.2%} < limite {max_dd:.2%}"
+                if risk_ok else
+                f"Drawdown {dd_pct:.2%} ≥ limite {max_dd:.2%} — não operar"
+            ),
+        })
+
+        # G4: data freshness (payload cache age)
+        cache_age_s = None
+        if self._payload_cache:
+            cached = self._payload_cache.get("overview")
+            if cached and isinstance(cached, dict):
+                ts_str = cached.get("as_of") or cached.get("generated_at", "")
+                try:
+                    from dateutil.parser import parse as _parse
+                    delta = datetime.now(timezone.utc) - _parse(ts_str)
+                    cache_age_s = delta.total_seconds()
+                except Exception:
+                    cache_age_s = None
+        data_fresh = cache_age_s is None or cache_age_s < 300  # 5 min
+        checks.append({
+            "name": "data_fresh",
+            "ok": data_fresh,
+            "detail": (
+                f"Cache {int(cache_age_s or 0)}s atrás" if not data_fresh
+                else "Dados recentes"
+            ),
+        })
+
+        all_passed = all(c["ok"] for c in checks)
+        rec_id = str(uuid.uuid4())
+
+        # ── Log TRADE_NOW_REQUESTED ─────────────────────────────────────
+        try:
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="TRADE_NOW_REQUESTED",
+                severity="INFO",
+                message=f"TradeNow analysis requested — guardrails {'passed' if all_passed else 'blocked'}",
+                payload={"recommendation_id": rec_id, "guardrails": checks},
+            )
+        except Exception as exc:
+            logger.warning("trade_now audit log failed: %s", exc)
+
+        if not all_passed:
+            return web.json_response({
+                "recommendation_id": rec_id,
+                "guardrails": {"passed": False, "checks": checks},
+                "recommendation": None,
+                "is_paper": _s.paper_trading,
+                "generated_at": generated_at,
+            }, status=200)
+
+        # ── Build recommendation ─────────────────────────────────────────
+        # Try to pull the latest Vision signal from DB as a real recommendation.
+        # Fall back to a mock (stub) when no signal is available.
+        recommendation = None
+        source = "mock"
+        try:
+            from src.persistence.models import SignalRecord
+            from src.persistence.db import get_session
+            from sqlalchemy import desc, select
+            async with get_session() as _sess:
+                row = (
+                    await _sess.execute(
+                        select(SignalRecord)
+                        .where(SignalRecord.is_actionable.is_(True))
+                        .order_by(desc(SignalRecord.timestamp))
+                        .limit(1)
+                    )
+                ).scalars().first()
+            if row:
+                entry = float(row.entry_price or 0)
+                sl = float(row.stop_loss or 0)
+                tp = float(row.take_profit or 0)
+                size_pct = float(row.size_pct or params.get("max_position_size_pct", 0.02))
+                leverage_val = int(row.leverage or params.get("max_leverage", 1) or 1)
+                # Super Agressivo: boost size and leverage
+                if _super_aggressive:
+                    size_pct = max(size_pct, 0.05)   # mínimo 5% do capital
+                    leverage_val = max(leverage_val, 10)  # mínimo 10x
+                conf = float(row.confidence or 0.5)
+                risk_usd = round(equity_usd * size_pct * abs(entry - sl) / entry, 2) if entry else 0.0
+                recommendation = {
+                    "symbol": row.symbol,
+                    "direction": row.action.upper(),
+                    "entry_price": entry,
+                    "stop_loss": sl,
+                    "take_profit": tp,
+                    "size_pct": round(size_pct, 4),
+                    "leverage": leverage_val,
+                    "confidence": round(conf, 3),
+                    "risk_usd": risk_usd,
+                    "justification": (row.reasoning or "Vision analysis")[:400],
+                    "source": "agents",
+                    "agents_consensus": conf >= _confidence_threshold,
+                }
+                source = "agents"
+        except Exception as exc:
+            logger.warning("trade_analyze: could not fetch latest signal: %s", exc)
+
+        if recommendation is None:
+            # Mock stub — clear TODO marker for operator awareness
+            _base_assets = list(params.get("trading_assets", ["BTC"]))
+            _all_assets = _base_assets + [a for a in _ALTCOINS if a not in _base_assets] if _altcoins_enabled else _base_assets
+            top_asset = _all_assets[0]
+            source = "mock"
+            _mock_size = 0.05 if _super_aggressive else float(params.get("max_position_size_pct", 0.02))
+            recommendation = {
+                "symbol": top_asset,
+                "direction": "LONG",
+                "entry_price": 0.0,
+                "stop_loss": 0.0,
+                "take_profit": 0.0,
+                "size_pct": round(_mock_size, 4),
+                "confidence": 0.0,
+                "risk_usd": 0.0,
+                "justification": (
+                    "⚠️ MOCK — Nenhum sinal recente encontrado. "
+                    "Execute um ciclo de análise dos agentes antes de operar."
+                ),
+                "source": "mock",
+                "agents_consensus": False,
+            }
+
+        # Add consensus guardrail check
+        consensus_ok = recommendation.get("agents_consensus", False)
+        _thresh_label = f"{_confidence_threshold:.0%}"
+        _mode_tag = " (Super Agressivo)" if _super_aggressive else ""
+        checks.append({
+            "name": "agents_consensus",
+            "ok": consensus_ok,
+            "detail": (
+                f"Confiança {recommendation['confidence']:.0%} ≥ {_thresh_label}{_mode_tag}"
+                if consensus_ok else
+                f"Confiança {recommendation['confidence']:.0%} < {_thresh_label}{_mode_tag} — consenso insuficiente"
+            ),
+        })
+        all_passed = all(c["ok"] for c in checks)
+
+        # ── Log TRADE_NOW_RECOMMENDED ───────────────────────────────────
+        try:
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="TRADE_NOW_RECOMMENDED",
+                severity="INFO",
+                message=(
+                    f"TradeNow recommendation: {recommendation['direction']} "
+                    f"{recommendation['symbol']} conf={recommendation['confidence']:.2f} "
+                    f"source={source}"
+                ),
+                payload={"recommendation_id": rec_id, "recommendation": recommendation},
+            )
+        except Exception as exc:
+            logger.warning("trade_now_recommended audit log failed: %s", exc)
+
+        # Story 041 — cache recommendation so _handle_trade_execute can look it up.
+        # Store equity_usd alongside so IronMan gets accurate sizing context.
+        if recommendation is not None:
+            cached_entry = {**recommendation, "_equity_usd": equity_usd}
+            self._rec_cache[rec_id] = cached_entry
+            # FIFO eviction — keep at most self._rec_cache_max entries
+            if len(self._rec_cache) > self._rec_cache_max:
+                oldest_key = next(iter(self._rec_cache))
+                del self._rec_cache[oldest_key]
+
+        from src.config.settings import settings as _s2
+        return web.json_response({
+            "recommendation_id": rec_id,
+            "guardrails": {"passed": all_passed, "checks": checks},
+            "recommendation": recommendation,
+            "is_paper": _s2.paper_trading,
+            "generated_at": generated_at,
+            "mode": {
+                "super_aggressive": _super_aggressive,
+                "altcoins_enabled": _altcoins_enabled,
+            },
+        }, status=200)
+
+    async def _handle_trade_execute(self, request: web.Request) -> web.Response:
+        """POST /api/trade/execute — execute a previously recommended trade.
+
+        Body ``{"recommendation_id": "...", "confirmed": true}``
+
+        CRITICAL:
+          - ``confirmed`` MUST be boolean ``true`` — no execution without it.
+          - Guardrails are re-evaluated server-side; client state is not trusted.
+          - In paper mode, order is flagged as paper and never sent to SDK.
+          - Audit events are always written regardless of outcome.
+
+        Response shape
+        --------------
+        {
+          "status": "submitted"|"blocked"|"rejected",
+          "reason": str,
+          "order_id": str|null,
+          "is_paper": bool,
+          "executed_at": str,
+        }
+        """
+        from src.agents.batman import is_kill_switch_active
+        from src.config.settings import settings as _s
+
+        executed_at = datetime.now(timezone.utc).isoformat()
+
+        body = await self._safe_json_body(request) or {}
+        rec_id = str(body.get("recommendation_id") or "").strip()[:64]
+        confirmed = body.get("confirmed")
+
+        # Hard gate: confirmed must be exactly True (boolean)
+        if confirmed is not True:
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="TRADE_NOW_BLOCKED",
+                severity="WARNING",
+                message="TradeNow execute rejected — confirmed != true",
+                payload={"recommendation_id": rec_id, "body_keys": list(body.keys())},
+            )
+            return web.json_response({
+                "status": "rejected",
+                "reason": "Campo 'confirmed' deve ser exatamente true para executar.",
+                "order_id": None,
+                "is_paper": _s.paper_trading,
+                "executed_at": executed_at,
+            }, status=400)
+
+        # Re-evaluate critical guardrails server-side
+        if is_kill_switch_active():
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="TRADE_NOW_BLOCKED",
+                severity="WARNING",
+                message="TradeNow execute blocked — kill switch active",
+                payload={"recommendation_id": rec_id},
+            )
+            return web.json_response({
+                "status": "blocked",
+                "reason": "Kill switch ativo — libere antes de executar ordens.",
+                "order_id": None,
+                "is_paper": _s.paper_trading,
+                "executed_at": executed_at,
+            }, status=200)
+
+        # ── Story 041 — Wire IronMan broker adapter ────────────────────
+        # Look up the cached recommendation from _handle_trade_analyze.
+        # The cache survives until server restart or 20-entry FIFO eviction.
+        cached_rec = self._rec_cache.get(rec_id)
+
+        if cached_rec is None:
+            # Recommendation not found — likely server was restarted between
+            # analyze and execute, or the rec_id is stale/forged.
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="TRADE_NOW_BLOCKED",
+                severity="WARNING",
+                message="TradeNow execute blocked — recommendation_id not in cache",
+                payload={"recommendation_id": rec_id},
+            )
+            return web.json_response({
+                "status": "blocked",
+                "reason": (
+                    "Recomendação não encontrada no servidor. "
+                    "Execute /api/trade/analyze novamente (o servidor pode ter sido reiniciado)."
+                ),
+                "order_id": None,
+                "is_paper": _s.paper_trading,
+                "executed_at": executed_at,
+            }, status=200)
+
+        # Block mock recommendations at the server level (belt-and-suspenders;
+        # the frontend already disables the confirm button for mock sources).
+        if cached_rec.get("source") == "mock":
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="TRADE_NOW_BLOCKED",
+                severity="WARNING",
+                message="TradeNow execute blocked — mock recommendation, no real signal",
+                payload={"recommendation_id": rec_id},
+            )
+            return web.json_response({
+                "status": "blocked",
+                "reason": (
+                    "Fonte da recomendação é 'mock' — nenhum sinal real disponível. "
+                    "Aguarde os agentes gerarem um sinal antes de operar."
+                ),
+                "order_id": None,
+                "is_paper": _s.paper_trading,
+                "executed_at": executed_at,
+            }, status=200)
+
+        # ── Build TradingSignal from cached recommendation ──────────────
+        order_id: str | None = None
+        exec_status = "submitted"
+        exec_reason = ""
+
+        try:
+            from src.models.signal import TradingSignal, TradeAction
+            from src.agents.batman import Batman
+            from src.agents.iron_man import IronMan
+            from src.models.risk import RiskVerdict
+
+            direction = cached_rec.get("direction", "LONG").upper()
+            equity_usd = float(cached_rec.get("_equity_usd") or _s.paper_equity_usd or 10_000)
+
+            signal = TradingSignal(
+                symbol=cached_rec["symbol"],
+                action=TradeAction.LONG if direction == "LONG" else TradeAction.SHORT,
+                confidence=float(cached_rec.get("confidence", 0.5)),
+                entry_price=float(cached_rec["entry_price"]),
+                stop_loss=float(cached_rec["stop_loss"]),
+                take_profit=float(cached_rec["take_profit"]),
+                size_pct=float(cached_rec.get("size_pct", 0.01)),
+                leverage=int(cached_rec.get("leverage", 1)),
+                reasoning=str(cached_rec.get("justification", "TradeNow execution"))[:400],
+            )
+
+            # Batman risk gate
+            batman = Batman()
+            approval = await batman.run(signal=signal, equity_usd=equity_usd)
+
+            if not approval.is_executable:
+                exec_status = "blocked"
+                exec_reason = (
+                    f"Batman bloqueou: {approval.verdict.value} — "
+                    + (approval.reasons[0] if approval.reasons else "risco excedido")
+                )
+                await MekkaRepository.log_event(
+                    agent="Dashboard",
+                    event="TRADE_NOW_BLOCKED",
+                    severity="WARNING",
+                    message=f"TradeNow blocked by Batman verdict={approval.verdict.value}",
+                    payload={
+                        "recommendation_id": rec_id,
+                        "verdict": approval.verdict.value,
+                        "reasons": approval.reasons,
+                    },
+                )
+                return web.json_response({
+                    "status": "blocked",
+                    "reason": exec_reason,
+                    "order_id": None,
+                    "is_paper": _s.paper_trading,
+                    "executed_at": executed_at,
+                }, status=200)
+
+            # IronMan execution (paper or live depending on settings.paper_trading)
+            iron_man = IronMan()
+            result = await iron_man.run(
+                signal=signal,
+                approval=approval,
+                equity_usd=equity_usd,
+            )
+
+            # Persist trade to DB so it appears in the trades panel and positions
+            try:
+                _signal_id = cached_rec.get("signal_id") if cached_rec else None
+                _trade_db_id = await MekkaRepository.save_trade(result, signal_id=_signal_id)
+                logger.info(
+                    "trade persisted: db_id=%d order_id=%s symbol=%s",
+                    _trade_db_id, result.order_id, result.symbol,
+                )
+            except Exception as _save_exc:
+                logger.warning("save_trade failed (non-fatal): %s", _save_exc)
+
+            order_id = result.order_id
+            exec_status = "submitted"
+            exec_reason = (
+                f"{'Paper' if result.is_paper else 'Live'} order "
+                f"{result.status.value} | "
+                f"qty={result.quantity} avg={result.avg_price}"
+            )
+
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="TRADE_NOW_EXECUTED",
+                severity="INFO",
+                message=(
+                    f"TradeNow order {result.status.value} "
+                    f"{'(paper)' if result.is_paper else '(LIVE)'} "
+                    f"rec_id={rec_id} order_id={order_id}"
+                ),
+                payload={
+                    "recommendation_id": rec_id,
+                    "order_id": order_id,
+                    "is_paper": result.is_paper,
+                    "status": result.status.value,
+                    "symbol": result.symbol,
+                    "quantity": result.quantity,
+                    "avg_price": result.avg_price,
+                    "notional_usd": result.notional_usd,
+                    "batman_verdict": approval.verdict.value,
+                },
+            )
+
+        except Exception as exc:
+            logger.error("trade_now_execute agent call failed: %s", exc, exc_info=True)
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="TRADE_NOW_BLOCKED",
+                severity="ERROR",
+                message=f"TradeNow execute agent exception: {exc}",
+                payload={"recommendation_id": rec_id, "error": str(exc)},
+            )
+            return web.json_response({
+                "status": "blocked",
+                "reason": f"Erro interno na execução: {exc}",
+                "order_id": None,
+                "is_paper": _s.paper_trading,
+                "executed_at": executed_at,
+            }, status=200)
+
+        return web.json_response({
+            "status": exec_status,
+            "reason": exec_reason,
+            "order_id": order_id,
+            "is_paper": _s.paper_trading,
+            "executed_at": executed_at,
+        }, status=200)
+
+    def _prune_snapshot_dir(self) -> None:
+        """Keep only the most recent ``SNAPSHOT_RETENTION_MINUTES`` snapshots
+        and ``INCIDENT_BUNDLE_RETENTION`` incident bundles. Runs in a thread
+        so disk I/O never blocks the event loop."""
+        try:
+            snaps = sorted(SNAPSHOT_DIR.glob("snapshot-*.json"))
+            for stale in snaps[:-SNAPSHOT_RETENTION_MINUTES]:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+            bundles = sorted(SNAPSHOT_DIR.glob("incident-bundle-*.json"))
+            for stale in bundles[:-INCIDENT_BUNDLE_RETENTION]:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+        except OSError as exc:
+            logger.warning("snapshot prune failed: %s", exc)
 
 
-async def run_dashboard_server(host: str = "0.0.0.0", port: int = 8787) -> None:
+async def run_dashboard_server(host: str = "127.0.0.1", port: int = 8787) -> None:
+    """Boot the dashboard. Default bind is loopback so the UI is not exposed
+    on the LAN by accident; pass host='0.0.0.0' explicitly when sharing.
+    """
     server = MekkaDashboardServer()
     runner = web.AppRunner(server.app)
     await runner.setup()
     site = web.TCPSite(runner, host=host, port=port)
     await site.start()
+    logger.info("dashboard listening on http://%s:%d", host, port)
 
     try:
         while True:
@@ -541,193 +3101,89 @@ def _safe_limit(raw: str | None, default: int, max_value: int) -> int:
         value = int(raw)
     except ValueError:
         return default
-    return max(1, min(value, max_value))
+    # Negative or zero is treated as garbage input (same bucket as
+    # non-numeric) — fall back to default so callers can rely on
+    # `_safe_limit(...) >= 1` without an extra clamp at the call site.
+    if value < 1:
+        return default
+    return min(value, max_value)
 
 
-def _build_layers_snapshot(audits: list[Any]) -> dict[str, Any]:
-    hero_latest: dict[str, Any] = {}
-    for row in audits:
-        if row.agent not in HERO_LAYER:
-            continue
-        current = hero_latest.get(row.agent)
-        if current is None or row.timestamp > current.timestamp:
-            hero_latest[row.agent] = row
-
-    layers: dict[str, dict[str, Any]] = {
-        "L1": {"label": "Market Analysis", "heroes": []},
-        "L2": {"label": "Strategy", "heroes": []},
-        "L3": {"label": "Risk & Execution", "heroes": []},
-        "L4": {"label": "Command & Control", "heroes": []},
-    }
-
-    now = max((r.timestamp for r in audits), default=None)
-    for hero, layer in HERO_LAYER.items():
-        row = hero_latest.get(hero)
-        status = "idle"
-        age_s = None
-        event = "NO_EVENT"
-        if row is not None:
-            event = row.event
-            if row.severity in ("ERROR", "CRITICAL"):
-                status = "critical"
-            elif row.severity == "WARNING":
-                status = "warning"
-            else:
-                status = "active"
-            if now is not None:
-                age_s = int((now - row.timestamp).total_seconds())
-        layers[layer]["heroes"].append(
-            {
-                "hero": hero,
-                "status": status,
-                "event": event,
-                "age_seconds": age_s,
-            }
-        )
-
-    cycle_window_seconds = None
-    if len(audits) >= 2:
-        cycle_window_seconds = int((audits[0].timestamp - audits[-1].timestamp).total_seconds())
-
+def _diag_public_view(diag: dict[str, Any]) -> dict[str, Any]:
+    lat = [float(v) for v in diag.get("latencies_ms", []) if isinstance(v, (int, float))]
     return {
-        "cycle_window_seconds": cycle_window_seconds,
-        "items": layers,
+        "calls": int(diag.get("calls") or 0),
+        "cache_hits": int(diag.get("cache_hits") or 0),
+        "stale_served": int(diag.get("stale_served") or 0),
+        "errors": int(diag.get("errors") or 0),
+        "last_error": diag.get("last_error"),
+        "failure_streak": int(diag.get("failure_streak") or 0),
+        "breaker_open": bool(diag.get("breaker_open") or False),
+        "breaker_open_until_s": diag.get("breaker_open_until_s"),
+        "last_latency_ms": diag.get("last_latency_ms"),
+        "avg_latency_ms": diag.get("avg_latency_ms"),
+        "sample_count": len(lat),
+        "p50_latency_ms": _percentile(lat, 0.5),
+        "p95_latency_ms": _percentile(lat, 0.95),
     }
 
 
-def _build_timeline(audits: list[Any]) -> list[dict[str, Any]]:
-    # Latest Nick Fury cycle markers for quick command timeline.
-    rows = [r for r in audits if r.agent == "NickFury"]
-    rows = sorted(rows, key=lambda r: r.timestamp, reverse=True)[:14]
-    return [
-        {
-            "timestamp": r.timestamp.isoformat(),
-            "event": r.event,
-            "severity": r.severity,
-            "message": r.message,
-            "symbol": r.symbol,
-        }
-        for r in rows
-    ]
+def _incident_matches_query(item: dict[str, Any], query: str) -> bool:
+    if query in str(item.get("snapshot") or "").lower():
+        return True
+    if query in str(item.get("tier") or "").lower():
+        return True
+    for key, value in (item.get("drivers") or {}).items():
+        if bool(value) and query in str(key).lower():
+            return True
+    for alert in (item.get("alerts") or []):
+        code = str(alert.get("code") or "").lower()
+        message = str(alert.get("message") or "").lower()
+        if query in code or query in message:
+            return True
+    return False
 
 
-def _build_risk_heatmap(audits: list[Any]) -> list[dict[str, Any]]:
-    risk_rows = [r for r in audits if r.agent == "Batman"]
-    per_symbol: dict[str, dict[str, Any]] = {}
-    for row in risk_rows:
-        symbol = row.symbol or "GLOBAL"
-        item = per_symbol.setdefault(
-            symbol,
-            {
-                "symbol": symbol,
-                "approved": 0,
-                "reduced": 0,
-                "rejected": 0,
-                "kill_switch": 0,
-                "warning_count": 0,
-                "critical_count": 0,
-            },
-        )
-        event = row.event or ""
-        if "APPROVED" in event:
-            item["approved"] += 1
-        elif "REDUCED" in event:
-            item["reduced"] += 1
-        elif "KILL_SWITCH" in event:
-            item["kill_switch"] += 1
-        else:
-            item["rejected"] += 1
-        if row.severity == "WARNING":
-            item["warning_count"] += 1
-        if row.severity in ("ERROR", "CRITICAL"):
-            item["critical_count"] += 1
-    return sorted(per_symbol.values(), key=lambda x: x["symbol"])
-
-
-def _build_risk_drilldown(audits: list[Any]) -> dict[str, list[dict[str, Any]]]:
-    rows = [r for r in audits if r.agent == "Batman"]
-    by_symbol: dict[str, list[dict[str, Any]]] = {}
-    for r in rows:
-        symbol = r.symbol or "GLOBAL"
-        bucket = by_symbol.setdefault(symbol, [])
-        payload = r.payload or {}
-        bucket.append(
-            {
-                "timestamp": r.timestamp.isoformat(),
-                "event": r.event,
-                "severity": r.severity,
-                "message": r.message,
-                "reasons": payload.get("reasons", []),
-                "breached_limits": payload.get("breached", []),
-            }
-        )
-    return by_symbol
-
-
-def _build_spiderman_anomalies(audits: list[Any]) -> list[dict[str, Any]]:
-    rows = [r for r in audits if r.agent == "SpiderMan"]
-    rows = sorted(rows, key=lambda r: r.timestamp, reverse=True)[:20]
-    data: list[dict[str, Any]] = []
-    for r in rows:
-        payload = r.payload or {}
-        severity = payload.get("severity") or payload.get("anomaly_severity") or r.severity
-        should_pause = bool(payload.get("should_pause", False))
-        data.append(
-            {
-                "timestamp": r.timestamp.isoformat(),
-                "event": r.event,
-                "symbol": r.symbol,
-                "severity": str(severity),
-                "should_pause": should_pause,
-                "message": r.message,
-            }
-        )
-    return data
-
-
-def _build_symbol_timeline(audits: list[Any]) -> list[dict[str, Any]]:
-    tracked_agents = {"ProfessorX", "Vision", "Batman", "IronMan"}
-    by_symbol: dict[str, list[Any]] = {}
-    for r in audits:
-        if r.agent not in tracked_agents:
-            continue
-        symbol = r.symbol or "GLOBAL"
-        by_symbol.setdefault(symbol, []).append(r)
-
-    items: list[dict[str, Any]] = []
-    for symbol, rows in by_symbol.items():
-        rows_sorted = sorted(rows, key=lambda x: x.timestamp)
-        first_ts = rows_sorted[0].timestamp
-        last_ts = rows_sorted[-1].timestamp
-        duration_s = int((last_ts - first_ts).total_seconds())
-        steps = []
-        seen = set()
-        for r in reversed(rows_sorted):
-            if r.agent in seen:
-                continue
-            seen.add(r.agent)
-            steps.append({"agent": r.agent, "event": r.event, "severity": r.severity})
-        items.append(
-            {
-                "symbol": symbol,
-                "started_at": first_ts.isoformat(),
-                "last_at": last_ts.isoformat(),
-                "duration_seconds": duration_s,
-                "steps": list(reversed(steps)),
-            }
-        )
-    return sorted(items, key=lambda x: x["last_at"], reverse=True)[:20]
-
-
-def _build_global_alerts(audits: list[Any]) -> list[dict[str, Any]]:
+def _build_global_alerts(
+    audits: list[Any], drawdown_pct: float | None = None
+) -> list[dict[str, Any]]:
     alerts: list[dict[str, Any]] = []
-    kill_file = Path("data/.kill_switch")
-    if kill_file.exists():
+    if KILL_SWITCH_FILE.exists():
         alerts.append(
             {
                 "code": "KILL_SWITCH_FILE",
                 "severity": "CRITICAL",
-                "message": "Kill switch file ativo em data/.kill_switch",
+                "message": f"Kill switch file ativo em {KILL_SWITCH_FILE}",
+            }
+        )
+
+    # Drawdown alerts. Two thresholds: WARN (default 5%) lights up the
+    # severity score and surfaces in the UI banner; CRITICAL (default 10%)
+    # bumps the score hard so the incident queue ranks it near kill-switch
+    # events. Both thresholds are configurable via env.
+    dd = float(drawdown_pct or 0.0)
+    if dd >= _DRAWDOWN_CRIT:
+        alerts.append(
+            {
+                "code": "DRAWDOWN_CRITICAL",
+                "severity": "CRITICAL",
+                "message": (
+                    f"Drawdown atual {dd * 100:.2f}% >= "
+                    f"{_DRAWDOWN_CRIT * 100:.2f}% (CRITICAL)"
+                ),
+                "drawdown_pct": dd,
+            }
+        )
+    elif dd >= _DRAWDOWN_WARN:
+        alerts.append(
+            {
+                "code": "DRAWDOWN_WARNING",
+                "severity": "WARNING",
+                "message": (
+                    f"Drawdown atual {dd * 100:.2f}% >= "
+                    f"{_DRAWDOWN_WARN * 100:.2f}% (WARNING)"
+                ),
+                "drawdown_pct": dd,
             }
         )
 
@@ -760,202 +3216,3 @@ def _build_global_alerts(audits: list[Any]) -> list[dict[str, Any]]:
     return alerts
 
 
-def _build_hero_sla(audits: list[Any]) -> list[dict[str, Any]]:
-    tracked_agents = {"ProfessorX", "Vision", "Batman", "IronMan"}
-    by_symbol: dict[str, dict[str, Any]] = {}
-    for r in audits:
-        if r.agent not in tracked_agents:
-            continue
-        symbol = r.symbol or "GLOBAL"
-        bucket = by_symbol.setdefault(symbol, {})
-        if r.agent not in bucket or r.timestamp > bucket[r.agent].timestamp:
-            bucket[r.agent] = r
-
-    deltas: dict[str, list[int]] = {a: [] for a in tracked_agents}
-    for symbol, points in by_symbol.items():
-        _ = symbol
-        px = points.get("ProfessorX")
-        vi = points.get("Vision")
-        ba = points.get("Batman")
-        im = points.get("IronMan")
-
-        if px and vi and vi.timestamp >= px.timestamp:
-            deltas["Vision"].append(int((vi.timestamp - px.timestamp).total_seconds()))
-        if vi and ba and ba.timestamp >= vi.timestamp:
-            deltas["Batman"].append(int((ba.timestamp - vi.timestamp).total_seconds()))
-        if ba and im and im.timestamp >= ba.timestamp:
-            deltas["IronMan"].append(int((im.timestamp - ba.timestamp).total_seconds()))
-        if px and im and im.timestamp >= px.timestamp:
-            deltas["ProfessorX"].append(int((im.timestamp - px.timestamp).total_seconds()))
-
-    result = []
-    for hero in ["ProfessorX", "Vision", "Batman", "IronMan"]:
-        values = deltas.get(hero, [])
-        avg_s = round(sum(values) / len(values), 2) if values else None
-        p95_s = sorted(values)[int((len(values) - 1) * 0.95)] if values else None
-        result.append(
-            {
-                "hero": hero,
-                "samples": len(values),
-                "avg_seconds": avg_s,
-                "p95_seconds": p95_s,
-            }
-        )
-    return result
-
-
-def _compute_severity(payload: dict) -> dict[str, Any]:
-    """Score 0-100 and tier (NONE/LOW/MEDIUM/HIGH/CRITICAL) for a snapshot.
-
-    Drivers considered:
-    - kill_switch alerts (file or event)
-    - critical / warning alert counts
-    - SpiderMan anomalies with should_pause
-    - breached_limits across Batman drilldown rows
-    - degraded hero SLA (avg_seconds above threshold)
-    """
-    alerts = payload.get("global_alerts") or []
-    anomalies = payload.get("anomalies") or []
-    drilldown = payload.get("risk_drilldown") or {}
-    hero_sla = payload.get("hero_sla") or []
-
-    kill_switch = sum(1 for a in alerts if "KILL_SWITCH" in str(a.get("code", "")))
-    critical_alerts = sum(
-        1 for a in alerts if str(a.get("severity", "")).upper() == "CRITICAL"
-    )
-    warning_alerts = sum(
-        1 for a in alerts if str(a.get("severity", "")).upper() == "WARNING"
-    )
-    anomaly_pause = sum(1 for a in anomalies if bool(a.get("should_pause")))
-
-    breached_count = 0
-    for rows in drilldown.values():
-        for row in rows or []:
-            breached = row.get("breached_limits") or []
-            breached_count += len(breached)
-
-    sla_degraded = 0
-    for entry in hero_sla:
-        avg = entry.get("avg_seconds")
-        if isinstance(avg, (int, float)) and avg >= 30:
-            sla_degraded += 1
-
-    raw_score = (
-        50 * critical_alerts
-        + 35 * kill_switch
-        + 25 * anomaly_pause
-        + 15 * warning_alerts
-        + 4 * breached_count
-        + 5 * sla_degraded
-    )
-    score = max(0, min(100, raw_score))
-
-    if score >= 80:
-        tier = "CRITICAL"
-    elif score >= 50:
-        tier = "HIGH"
-    elif score >= 20:
-        tier = "MEDIUM"
-    elif score > 0:
-        tier = "LOW"
-    else:
-        tier = "NONE"
-
-    return {
-        "score": score,
-        "tier": tier,
-        "drivers": {
-            "kill_switch": kill_switch,
-            "critical_alerts": critical_alerts,
-            "warning_alerts": warning_alerts,
-            "anomaly_pause": anomaly_pause,
-            "breached_limits": breached_count,
-            "sla_degraded": sla_degraded,
-        },
-    }
-
-
-def _slice_snapshots(files: list[str], start: str | None, end: str | None) -> list[str]:
-    if start is None and end is None:
-        return files
-    start_idx = 0
-    end_idx = len(files) - 1
-    if start is not None and start in files:
-        start_idx = files.index(start)
-    if end is not None and end in files:
-        end_idx = files.index(end)
-    if start_idx > end_idx:
-        start_idx, end_idx = end_idx, start_idx
-    return files[start_idx : end_idx + 1]
-
-
-def _parse_iso_utc(raw: str | None) -> datetime | None:
-    if not raw:
-        return None
-    try:
-        value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
-    except ValueError:
-        return None
-
-
-def _compare_snapshots(name_a: str, a: dict, name_b: str, b: dict) -> dict[str, Any]:
-    ov_a = a.get("overview", {})
-    ov_b = b.get("overview", {})
-    overview_delta = {
-        "total_signals": (ov_b.get("total_signals") or 0) - (ov_a.get("total_signals") or 0),
-        "total_trades": (ov_b.get("total_trades") or 0) - (ov_a.get("total_trades") or 0),
-        "trades_today": (ov_b.get("trades_today") or 0) - (ov_a.get("trades_today") or 0),
-        "executions_today": (ov_b.get("executions_today") or 0) - (ov_a.get("executions_today") or 0),
-    }
-
-    risk_a = {r["symbol"]: r for r in a.get("risk_heatmap", [])}
-    risk_b = {r["symbol"]: r for r in b.get("risk_heatmap", [])}
-    all_symbols = sorted(set(risk_a) | set(risk_b))
-    risk_delta = []
-    for symbol in all_symbols:
-        ra = risk_a.get(symbol, {})
-        rb = risk_b.get(symbol, {})
-        risk_delta.append(
-            {
-                "symbol": symbol,
-                "approved": (rb.get("approved") or 0) - (ra.get("approved") or 0),
-                "reduced": (rb.get("reduced") or 0) - (ra.get("reduced") or 0),
-                "rejected": (rb.get("rejected") or 0) - (ra.get("rejected") or 0),
-                "kill_switch": (rb.get("kill_switch") or 0) - (ra.get("kill_switch") or 0),
-            }
-        )
-
-    alerts_a = {f'{x.get("code")}::{x.get("message")}' for x in a.get("global_alerts", [])}
-    alerts_b = {f'{x.get("code")}::{x.get("message")}' for x in b.get("global_alerts", [])}
-    alerts_added = sorted(list(alerts_b - alerts_a))
-    alerts_removed = sorted(list(alerts_a - alerts_b))
-
-    sla_a = {x["hero"]: x for x in a.get("hero_sla", [])}
-    sla_b = {x["hero"]: x for x in b.get("hero_sla", [])}
-    heroes = sorted(set(sla_a) | set(sla_b))
-    sla_delta = []
-    for hero in heroes:
-        ha = sla_a.get(hero, {})
-        hb = sla_b.get(hero, {})
-        a_avg = ha.get("avg_seconds") or 0
-        b_avg = hb.get("avg_seconds") or 0
-        sla_delta.append(
-            {
-                "hero": hero,
-                "avg_seconds_delta": round(b_avg - a_avg, 2),
-                "samples_delta": (hb.get("samples") or 0) - (ha.get("samples") or 0),
-            }
-        )
-
-    return {
-        "snapshot_a": name_a,
-        "snapshot_b": name_b,
-        "overview_delta": overview_delta,
-        "risk_delta": risk_delta,
-        "alerts_added": alerts_added,
-        "alerts_removed": alerts_removed,
-        "sla_delta": sla_delta,
-    }

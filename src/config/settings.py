@@ -74,6 +74,34 @@ class Settings(BaseSettings):
     )
 
     # --------------------------------------------------------------------------
+    # Multi-Exchange (Story 047 — Bybit / Binance adapter)
+    # --------------------------------------------------------------------------
+    active_exchange: Literal["hyperliquid", "bybit", "binance"] = Field(
+        default="hyperliquid",
+        alias="ACTIVE_EXCHANGE",
+        description=(
+            "Primary exchange for market data (Superman) and live execution (IronMan). "
+            "'hyperliquid' uses the HL SDK; 'bybit'/'binance' use CCXT unified API."
+        ),
+    )
+    bybit_api_key: str = Field(
+        default="",
+        description="Bybit API key (required when ACTIVE_EXCHANGE=bybit)",
+    )
+    bybit_api_secret: str = Field(
+        default="",
+        description="Bybit API secret (required when ACTIVE_EXCHANGE=bybit)",
+    )
+    binance_api_key: str = Field(
+        default="",
+        description="Binance API key (required when ACTIVE_EXCHANGE=binance)",
+    )
+    binance_api_secret: str = Field(
+        default="",
+        description="Binance API secret (required when ACTIVE_EXCHANGE=binance)",
+    )
+
+    # --------------------------------------------------------------------------
     # Telegram
     # --------------------------------------------------------------------------
     telegram_bot_token: str = Field(
@@ -109,6 +137,21 @@ class Settings(BaseSettings):
         description="When True, no real orders are sent to Hyperliquid",
     )
 
+    # [036] Second explicit opt-in required for live execution.
+    # BOTH paper_trading=False AND live_trading_confirmed=True must be set
+    # before IronMan will touch the real exchange. Belt-and-suspenders:
+    # accidental paper_trading=False (e.g. .env copy-paste) does NOT
+    # expose real funds without a deliberate second env var.
+    live_trading_confirmed: bool = Field(
+        default=False,
+        description=(
+            "Explicit second opt-in for live execution. "
+            "Must be True together with paper_trading=False. "
+            "Set LIVE_TRADING_CONFIRMED=true only after operator sign-off in "
+            "docs/MAINNET-AUTHORIZATION.md."
+        ),
+    )
+
     # --------------------------------------------------------------------------
     # Assets
     # --------------------------------------------------------------------------
@@ -128,6 +171,14 @@ class Settings(BaseSettings):
     max_leverage: Annotated[int, Field(ge=1, le=50)] = Field(
         default=5,
         description="Maximum allowed leverage for any trade",
+    )
+    max_leverage_high_regime: Annotated[int, Field(ge=1, le=50)] = Field(
+        default=3,
+        description="Maximum leverage when Thor classifies volatility as HIGH. Overrides max_leverage.",
+    )
+    max_leverage_extreme_regime: Annotated[int, Field(ge=1, le=50)] = Field(
+        default=2,
+        description="Maximum leverage when Thor classifies volatility as EXTREME. Overrides max_leverage.",
     )
     max_daily_drawdown_pct: Annotated[float, Field(gt=0.0, le=1.0)] = Field(
         default=0.10,
@@ -204,6 +255,17 @@ class Settings(BaseSettings):
     # --------------------------------------------------------------------------
     # Portfolio Manager (Story 026)
     # --------------------------------------------------------------------------
+    paper_slippage_bps: float = Field(
+        default=3.0,
+        ge=0.0,
+        le=100.0,
+        description=(
+            "Synthetic slippage applied to paper fills (basis points). "
+            "3 bps = 0.03%% of fill price. Applied in the direction that "
+            "hurts the trade: higher price for LONG, lower for SHORT."
+        ),
+    )
+
     paper_equity_usd: float = Field(
         default=10_000.0,
         gt=0.0,
@@ -252,6 +314,106 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --------------------------------------------------------------------------
+    # Vision Critic (Story 031)
+    # --------------------------------------------------------------------------
+    vision_critic_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, every Vision signal is reviewed by a second LLM "
+            "(Vision Critic). Adds ~1 OpenAI call per symbol per cycle. "
+            "Enabled by default — disabling degrades signal quality and "
+            "should only be done temporarily to reduce API costs."
+        ),
+    )
+    vision_critic_min_disagreement: float = Field(
+        default=0.30,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum confidence-delta the critic must claim to AMEND or "
+            "REJECT. Below this threshold the critic's verdict is downgraded "
+            "to ENDORSE — small disagreements aren't worth overriding."
+        ),
+    )
+    vision_critic_model: str = Field(
+        default="",
+        description=(
+            "Model used by VisionCritic. Empty string = inherit openai_model. "
+            "Set to 'gpt-4o-mini' to cut critic cost by ~60%% while keeping "
+            "Vision on the full model."
+        ),
+    )
+    vision_critic_temperature: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=2.0,
+        description=(
+            "Sampling temperature for VisionCritic. Default 0.0 for maximum "
+            "determinism and conservative bias, different from Vision's 0.2."
+        ),
+    )
+
+    # --------------------------------------------------------------------------
+    # Telegram alerter (Story 035)
+    # --------------------------------------------------------------------------
+    telegram_alert_min_severity: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
+        default="WARNING",
+        description=(
+            "Minimum severity for Telegram push alerts. Audit events below "
+            "this threshold are skipped."
+        ),
+    )
+    telegram_alert_events_raw: str = Field(
+        default="RISK_KILL_SWITCH,EXEC_ERROR,AGENT_ERROR,WRITE_ERROR,CYCLE_ERROR",
+        alias="TELEGRAM_ALERT_EVENTS",
+        description=(
+            "Comma-separated whitelist of event codes that trigger a "
+            "Telegram alert regardless of severity (still subject to "
+            "telegram_enabled). Empty string disables event-based filter."
+        ),
+    )
+    telegram_alert_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0.0,
+        description="HTTP timeout for Telegram Bot API calls.",
+    )
+
+    # --------------------------------------------------------------------------
+    # Telegram inbound (Story 035b)
+    # --------------------------------------------------------------------------
+    telegram_inbound_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, TelegramInboundPoller starts long-polling getUpdates "
+            "and dispatches operator commands (/status /pnl /pause /resume /positions)."
+        ),
+    )
+    telegram_inbound_allowed_chat_ids_raw: str = Field(
+        default="",
+        alias="TELEGRAM_INBOUND_ALLOWED_CHAT_IDS",
+        description=(
+            "Comma-separated list of Telegram chat IDs that may send commands. "
+            "Empty string disables the allowlist check (all chats accepted — "
+            "only do this on private bots)."
+        ),
+    )
+    telegram_inbound_poll_interval_seconds: float = Field(
+        default=2.0,
+        ge=0.5,
+        le=30.0,
+        description="Sleep between getUpdates calls (seconds).",
+    )
+    telegram_inbound_long_poll_timeout_seconds: int = Field(
+        default=25,
+        ge=1,
+        le=50,
+        description=(
+            "Telegram long-poll timeout (seconds). Telegram holds the connection "
+            "open for up to this many seconds before returning an empty result."
+        ),
+    )
+
     # ==========================================================================
     # Validators
     # ==========================================================================
@@ -286,6 +448,30 @@ class Settings(BaseSettings):
             pass
         return self
 
+    @model_validator(mode="after")
+    def live_trading_double_gate(self) -> "Settings":
+        """
+        [036] Enforce the double-gate for live execution.
+
+        Allowed combinations:
+          paper_trading=True,  live_trading_confirmed=False  → PAPER (normal)
+          paper_trading=True,  live_trading_confirmed=True   → PAPER (confirmed ignored)
+          paper_trading=False, live_trading_confirmed=True   → LIVE  (explicit double opt-in)
+          paper_trading=False, live_trading_confirmed=False  → ERROR (accidental live attempt)
+        """
+        if not self.paper_trading and not self.live_trading_confirmed:
+            raise ValueError(
+                "LIVE_TRADING_CONFIRMED must be set to 'true' when PAPER_TRADING=false. "
+                "This double-gate prevents accidental live orders. "
+                "Read docs/MAINNET-AUTHORIZATION.md before enabling live trading."
+            )
+        return self
+
+    @property
+    def is_live(self) -> bool:
+        """True only when both paper_trading=False AND live_trading_confirmed=True."""
+        return not self.paper_trading and self.live_trading_confirmed
+
     # ==========================================================================
     # Computed Properties
     # ==========================================================================
@@ -311,13 +497,33 @@ class Settings(BaseSettings):
         return bool(self.telegram_bot_token and self.telegram_chat_id)
 
     @cached_property
+    def telegram_alert_events(self) -> set[str]:
+        """Parsed whitelist of event codes that always trigger Telegram alerts."""
+        raw = (self.telegram_alert_events_raw or "").strip()
+        if not raw:
+            return set()
+        return {tok.strip().upper() for tok in raw.split(",") if tok.strip()}
+
+    @cached_property
+    def telegram_inbound_allowed_chat_ids(self) -> set[str]:
+        """Parsed set of allowed chat IDs for inbound commands. Empty = all allowed."""
+        raw = (self.telegram_inbound_allowed_chat_ids_raw or "").strip()
+        if not raw:
+            return set()
+        return {tok.strip() for tok in raw.split(",") if tok.strip()}
+
+    @cached_property
     def sentiment_enabled(self) -> bool:
         return bool(self.cryptopanic_api_key)
 
     @cached_property
     def mode_label(self) -> str:
         """Human-readable label for the current trading mode."""
-        return "PAPER" if self.paper_trading else "LIVE"
+        if self.paper_trading:
+            return "PAPER"
+        if self.live_trading_confirmed:
+            return "LIVE"
+        return "LIVE(unconfirmed)"  # should never reach here — validator blocks it
 
     def summary(self) -> str:
         """Return a printable configuration summary (no secrets)."""
@@ -326,6 +532,7 @@ class Settings(BaseSettings):
             "  Mekka Trading — Configuration Summary",
             "=" * 60,
             f"  Mode          : {self.mode_label}",
+            f"  Live confirmed: {'YES ⚠️' if self.live_trading_confirmed else 'no'}",
             f"  Network       : {self.hyperliquid_network.upper()}",
             f"  Assets        : {', '.join(self.trading_assets)}",
             f"  Max Position  : {self.max_position_size_pct * 100:.1f}% of equity",

@@ -25,9 +25,11 @@ from src.agents.aquaman import Aquaman
 from src.agents.base import AgentError, BaseAgent
 from src.agents.black_panther import BlackPanther
 from src.agents.doctor_strange import DoctorStrange
+from src.agents.flash import Flash
 from src.agents.spider_man import SpiderMan
 from src.agents.superman import Superman
 from src.agents.thor import Thor
+from src.config.settings import settings
 from src.models.market_data import (
     LiquidityData,
     MarketAnalysis,
@@ -36,6 +38,7 @@ from src.models.market_data import (
     SentimentData,
     VolatilityData,
 )
+from src.models.signal import MomentumSignal
 
 
 class ProfessorX(BaseAgent[MarketAnalysis]):
@@ -57,6 +60,7 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
         self._thor = Thor()
         self._aquaman = Aquaman()
         self._spider = SpiderMan()
+        self._flash = Flash()  # [C5] Momentum scalper — advisory
 
     async def close(self) -> None:
         if self._superman is not None:
@@ -68,24 +72,45 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
         if self._superman is None:
             self._superman = Superman()
 
-        # 1. Superman first — required (no chart = no decision)
+        # 1. Superman — primary TF (required; no chart = no decision)
         try:
             chart: MarketData = await self._superman.run(symbol=symbol)
         except AgentError as exc:
             self._log.error(f"[ProfessorX] Superman failed for {symbol}: {exc}")
             raise
 
+        # [C1] Superman — confirmation TF (1h by default, best-effort)
+        confirmation_chart: Optional[MarketData] = None
+        conf_tf = settings.confirmation_timeframe
+        if conf_tf and conf_tf != settings.primary_timeframe:
+            try:
+                confirmation_chart = await self._superman.run(
+                    symbol=symbol, timeframe=conf_tf
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._log.warning(
+                    f"[ProfessorX] Superman confirmation TF {conf_tf} failed: {exc}"
+                )
+
         # 2. Layer-1 fan-out (independent of each other)
+        # [C5] Flash runs alongside other agents — uses recent_closes from chart
         sentiment_task = asyncio.create_task(self._strange.run(symbol=symbol))
         onchain_task = asyncio.create_task(self._panther.run(symbol=symbol))
         thor_task = asyncio.create_task(self._thor.run(market_data=chart))
         aquaman_task = asyncio.create_task(self._aquaman.run(symbol=symbol))
+        flash_task = asyncio.create_task(
+            self._flash.run(
+                symbol=symbol,
+                recent_prices=chart.recent_closes,
+            )
+        )
 
         results = await asyncio.gather(
             sentiment_task,
             onchain_task,
             thor_task,
             aquaman_task,
+            flash_task,
             return_exceptions=True,
         )
 
@@ -93,6 +118,7 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
         onchain = self._coerce(results[1], "BlackPanther", OnchainData)
         volatility = self._coerce(results[2], "Thor", VolatilityData)
         liquidity = self._coerce(results[3], "Aquaman", LiquidityData)
+        momentum = self._coerce(results[4], "Flash", MomentumSignal)  # [C5]
 
         # 3. Spider-Man depends on chart + onchain — run last
         try:
@@ -107,16 +133,20 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
 
         analysis = MarketAnalysis(
             chart=chart,
+            confirmation_chart=confirmation_chart,  # [C1]
             sentiment=sentiment,
             onchain=onchain,
             volatility=volatility,
             liquidity=liquidity,
             anomaly=anomaly,
+            momentum=momentum,  # [C5]
         )
 
         self._log.info(
             f"[ProfessorX] {symbol} analysis assembled — "
-            f"safe_to_trade={analysis.is_safe_to_trade}"
+            f"safe_to_trade={analysis.is_safe_to_trade} "
+            f"confirmation_tf={conf_tf if confirmation_chart else 'N/A'} "
+            f"momentum={getattr(getattr(momentum, 'direction', None), 'value', 'N/A')}"
         )
         return analysis
 

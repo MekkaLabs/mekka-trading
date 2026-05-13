@@ -14,7 +14,7 @@ Returns `SentimentData` with a composite score -1.0 → +1.0.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import aiohttp
@@ -55,12 +55,18 @@ async def _fetch_btc_dominance(session: aiohttp.ClientSession) -> Optional[float
 async def _fetch_cryptopanic(session: aiohttp.ClientSession, api_key: str, symbol: str) -> tuple[float, list[str]]:
     if not api_key:
         return 0.0, []
+    # [C3] Restrict to posts from the last 8 hours to prevent stale news from
+    # inflating the sentiment score. Format: ISO 8601 UTC timestamp.
+    published_after = (
+        datetime.now(timezone.utc) - timedelta(hours=8)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
     params = {
         "auth_token": api_key,
         "currencies": symbol,
         "filter": "hot",
         "kind": "news",
         "public": "true",
+        "published_after": published_after,
     }
     try:
         data = await _get_json(session, _CRYPTOPANIC_URL, params=params)

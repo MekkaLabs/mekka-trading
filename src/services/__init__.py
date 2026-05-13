@@ -11,7 +11,7 @@ DailyPnLWriter introduced in Story 027.
 
 from __future__ import annotations
 
-__all__ = ["DailyPnLWriter", "ConsecutiveBreaker"]
+__all__ = ["DailyPnLWriter", "ConsecutiveBreaker", "TelegramAlerter"]
 
 
 def __getattr__(name: str):  # noqa: N807
@@ -21,4 +21,7 @@ def __getattr__(name: str):  # noqa: N807
     if name == "ConsecutiveBreaker":
         from src.services.breakers import ConsecutiveBreaker
         return ConsecutiveBreaker
+    if name == "TelegramAlerter":
+        from src.services.telegram_alerter import TelegramAlerter
+        return TelegramAlerter
     raise AttributeError(f"module 'src.services' has no attribute {name!r}")

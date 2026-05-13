@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -186,6 +186,13 @@ class MarketData(BaseModel):
     # Derived trend assessment
     trend: Trend = Field(default=Trend.NEUTRAL)
     trend_strength: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    # [C5] Last N close prices (chronological) — used by Flash to compute
+    # intra-candle momentum without a second OHLCV fetch.
+    recent_closes: Optional[List[float]] = Field(
+        default=None,
+        description="Last N closing prices (oldest first) for Flash momentum detection",
+    )
 
     @property
     def bb_width(self) -> Optional[float]:
@@ -551,21 +558,33 @@ class MarketAnalysis(BaseModel):
 
     Attributes
     ----------
-    chart       : Technical analysis from Superman (required)
-    sentiment   : Sentiment data from Doctor Strange (optional)
-    onchain     : On-chain data from Black Panther (optional)
-    volatility  : Volatility regime from Thor (optional)
-    liquidity   : Liquidity analysis from Aquaman (optional)
-    anomaly     : Anomaly report from Spider-Man (optional)
+    chart               : Technical analysis from Superman on primary TF (required)
+    confirmation_chart  : Superman analysis on confirmation TF (e.g. 1h) [C1]
+    sentiment           : Sentiment data from Doctor Strange (optional)
+    onchain             : On-chain data from Black Panther (optional)
+    volatility          : Volatility regime from Thor (optional)
+    liquidity           : Liquidity analysis from Aquaman (optional)
+    anomaly             : Anomaly report from Spider-Man (optional)
+    momentum            : Intra-candle momentum signal from Flash [C5] (optional)
     """
 
     schema_version: int = Field(default=1, description="Schema version for migration safety")
-    chart: MarketData = Field(..., description="Required: technical analysis data")
+    chart: MarketData = Field(..., description="Required: primary-TF technical analysis data")
+    # [C1] Second timeframe confirmation chart (e.g. 1h alongside 4h primary)
+    confirmation_chart: Optional[MarketData] = Field(
+        default=None,
+        description="Secondary-TF technical analysis for trend confirmation",
+    )
     sentiment: Optional[SentimentData] = None
     onchain: Optional[OnchainData] = None
     volatility: Optional[VolatilityData] = None
     liquidity: Optional[LiquidityData] = None
     anomaly: Optional[AnomalyReport] = None
+    # [C5] Flash MomentumSignal — advisory; does not gate execution in v1
+    momentum: Optional[Any] = Field(
+        default=None,
+        description="Intra-candle momentum signal from Flash (MomentumSignal)",
+    )
 
     @property
     def symbol(self) -> str:
@@ -593,14 +612,36 @@ class MarketAnalysis(BaseModel):
 
         Returns a structured, section-separated text block. Vision reads this
         block and generates a TradingSignal in response.
+
+        Ordering rules:
+        - [C4] HIGH-severity / should_pause anomalies appear BEFORE chart data so
+          the LLM gives them maximum attention weight.
+        - [C1] Confirmation-TF chart follows primary chart immediately.
+        - [C5] Flash momentum signal appears after volatility (intra-session context).
         """
         sections = [
             "You are Vision, the AI decision-making agent of the Mekka Trading System.",
             "Below is the consolidated market analysis for a potential trade.",
             "Your job is to output a structured trading decision.",
             "",
-            self.chart.to_prompt_section(),
         ]
+
+        # [C4] HIGH-severity anomalies go FIRST — they are the most urgent context.
+        _anomaly_placed = False
+        if self.anomaly is not None and (
+            self.anomaly.severity == AnomalySeverity.HIGH or self.anomaly.should_pause
+        ):
+            sections.append(self.anomaly.to_prompt_section())
+            sections.append("")
+            _anomaly_placed = True
+
+        # Primary chart (always present)
+        sections.append(self.chart.to_prompt_section())
+
+        # [C1] Confirmation timeframe — immediately after primary for easy comparison
+        if self.confirmation_chart is not None:
+            sections.append("")
+            sections.append(self.confirmation_chart.to_prompt_section())
 
         if self.sentiment is not None:
             sections.append("")
@@ -614,11 +655,17 @@ class MarketAnalysis(BaseModel):
             sections.append("")
             sections.append(self.volatility.to_prompt_section())
 
+        # [C5] Flash momentum — intra-session context, after volatility
+        if self.momentum is not None:
+            sections.append("")
+            sections.append(self._momentum_prompt_section())
+
         if self.liquidity is not None:
             sections.append("")
             sections.append(self.liquidity.to_prompt_section())
 
-        if self.anomaly is not None:
+        # Anomaly section (skip if already placed at the top by C4 logic)
+        if self.anomaly is not None and not _anomaly_placed:
             sections.append("")
             sections.append(self.anomaly.to_prompt_section())
 
@@ -642,6 +689,29 @@ class MarketAnalysis(BaseModel):
 
         return "\n".join(sections)
 
+    def _momentum_prompt_section(self) -> str:
+        """[C5] Format Flash MomentumSignal as a prompt block."""
+        m = self.momentum
+        if m is None:
+            return ""
+        direction = getattr(m, "direction", None)
+        direction_val = direction.value if direction is not None else "N/A"
+        strength = getattr(m, "strength", 0.0)
+        price_change_pct = getattr(m, "price_change_pct", 0.0)
+        volume_mult = getattr(m, "volume_multiplier", 1.0)
+        notes = getattr(m, "notes", "") or ""
+        is_strong = getattr(m, "is_strong", False)
+        lines = [
+            f"=== Momentum (Flash): {self.symbol} ===",
+            f"  Direction   : {direction_val}",
+            f"  Strength    : {strength:.0%}{'  ← STRONG' if is_strong else ''}",
+            f"  Price Δ     : {price_change_pct:+.3%}",
+            f"  Volume Mult : {volume_mult:.2f}x",
+        ]
+        if notes:
+            lines.append(f"  Notes       : {notes}")
+        return "\n".join(lines)
+
     def to_json_summary(self) -> str:
         """Compact JSON summary for logging."""
         return json.dumps({
@@ -650,6 +720,10 @@ class MarketAnalysis(BaseModel):
             "trend": self.chart.trend.value,
             "trend_strength": self.chart.trend_strength,
             "rsi": self.chart.rsi_14,
+            "confirmation_tf": self.confirmation_chart.timeframe if self.confirmation_chart else None,
+            "confirmation_trend": self.confirmation_chart.trend.value if self.confirmation_chart else None,
+            "momentum_direction": getattr(getattr(self.momentum, "direction", None), "value", None),
+            "momentum_strength": getattr(self.momentum, "strength", None),
             "sentiment_score": self.sentiment.score if self.sentiment else None,
             "whale_signal": self.onchain.signal.value if self.onchain else None,
             "volatility_regime": self.volatility.volatility_regime.value if self.volatility else None,

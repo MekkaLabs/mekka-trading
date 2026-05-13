@@ -30,13 +30,15 @@ the operator has not explicitly disabled the live-block (intentional friction).
 
 from __future__ import annotations
 
+import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from src.agents.base import BaseAgent
 from src.config.settings import settings
-from src.models.market_data import LiquidityData, VolatilityData
+from src.models.market_data import LiquidityData, VolatilityData, VolatilityRegime
 from src.models.risk import RiskApproval, RiskVerdict
 from src.models.signal import TradeAction, TradingSignal
 
@@ -60,10 +62,30 @@ def is_kill_switch_active() -> bool:
     return _KILL_SWITCH_FILE.exists()
 
 
-def engage_kill_switch(reason: str) -> None:
-    """Persist a kill-switch flag with a reason payload."""
+def engage_kill_switch(reason: str, agent: str = "system") -> None:
+    """Persist a kill-switch flag with a structured JSON payload."""
     _KILL_SWITCH_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _KILL_SWITCH_FILE.write_text(f"{reason}\n")
+    payload = {
+        "reason": reason,
+        "agent": agent,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    _KILL_SWITCH_FILE.write_text(json.dumps(payload) + "\n")
+
+
+def read_kill_switch_metadata() -> dict:
+    """
+    Read kill-switch metadata. Returns empty dict if not engaged.
+    Handles legacy plain-text files gracefully (pre-squad-fixes format).
+    """
+    if not _KILL_SWITCH_FILE.exists():
+        return {}
+    raw = _KILL_SWITCH_FILE.read_text().strip()
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        # Legacy format: plain text reason
+        return {"reason": raw, "agent": "legacy", "timestamp_utc": None}
 
 
 def release_kill_switch() -> None:
@@ -286,23 +308,48 @@ class Batman(BaseAgent[RiskApproval]):
             breached.append("liquidity_penalty")
             adjusted_size = new_size
 
+        # Runtime mode overrides (hot-reload — no restart required)
+        from src.config.runtime_mode import get_params as _get_mode_params
+        _mode_params = _get_mode_params()
+        _max_pos = _mode_params.get("max_position_size_pct", settings.max_position_size_pct)
+        _max_lev = _mode_params.get("max_leverage", settings.max_leverage)
+        _max_lev_high = _mode_params.get("max_leverage_high_regime", settings.max_leverage_high_regime)
+        _max_lev_extreme = _mode_params.get("max_leverage_extreme_regime", settings.max_leverage_extreme_regime)
+
         # Hard cap on size
-        if adjusted_size > settings.max_position_size_pct:
+        if adjusted_size > _max_pos:
             reasons.append(
                 f"Size {adjusted_size:.2%} capped to "
-                f"{settings.max_position_size_pct:.2%}"
+                f"{_max_pos:.2%}"
             )
             breached.append("max_position_size_pct")
-            adjusted_size = settings.max_position_size_pct
+            adjusted_size = _max_pos
 
-        # Hard cap on leverage
-        if adjusted_leverage > settings.max_leverage:
+        # Regime-based leverage cap (tighter than global max in HIGH/EXTREME)
+        if volatility is not None:
+            regime = volatility.volatility_regime
+            if regime == VolatilityRegime.EXTREME:
+                regime_lev_cap = _max_lev_extreme
+            elif regime == VolatilityRegime.HIGH:
+                regime_lev_cap = _max_lev_high
+            else:
+                regime_lev_cap = _max_lev
+            if adjusted_leverage > regime_lev_cap:
+                reasons.append(
+                    f"Leverage {adjusted_leverage}x capped to {regime_lev_cap}x "
+                    f"(regime={regime.value})"
+                )
+                breached.append(f"max_leverage_{regime.value.lower()}_regime")
+                adjusted_leverage = regime_lev_cap
+
+        # Hard cap on leverage (global ceiling regardless of regime)
+        if adjusted_leverage > _max_lev:
             reasons.append(
                 f"Leverage {adjusted_leverage}x capped to "
-                f"{settings.max_leverage}x"
+                f"{_max_lev}x"
             )
             breached.append("max_leverage")
-            adjusted_leverage = settings.max_leverage
+            adjusted_leverage = _max_lev
 
         # ---------------------------------------------------------------
         # 6. Final verdict

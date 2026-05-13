@@ -283,8 +283,8 @@ async def test_nick_fury_uses_portfolio_manager_equity(monkeypatch):
     assert len(reports) == 1
     report = reports[0]
     assert report.execution is not None
-    # notional = equity * size_pct * leverage = 25_000 * 0.02 * 3 = 1500
-    assert report.execution.notional_usd == pytest.approx(1500.0, rel=1e-6)
+    # notional = equity * size_pct * leverage = 25_000 * 0.02 * 3 = 1500 (±0.5% for B5 slippage)
+    assert report.execution.notional_usd == pytest.approx(1500.0, rel=0.005)
 
     # Batman saw open_positions=2 from the snapshot
     assert captured.get("open_positions") == 2
@@ -334,8 +334,8 @@ async def test_nick_fury_equity_override_wins(monkeypatch):
         real_settings.__dict__.pop("trading_assets", None)
 
     # notional uses 5_000 (override), not 99_999 (snapshot)
-    # 5000 * 0.02 * 3 = 300
-    assert reports[0].execution.notional_usd == pytest.approx(300.0, rel=1e-6)
+    # 5000 * 0.02 * 3 = 300 (±0.5% for B5 slippage)
+    assert reports[0].execution.notional_usd == pytest.approx(300.0, rel=0.005)
 
 
 @pytest.mark.asyncio

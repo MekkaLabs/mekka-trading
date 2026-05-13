@@ -5,123 +5,557 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mekka Trading Command Center</title>
     <link rel="stylesheet" href="/static/style.css" />
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+    <link rel="stylesheet" href="/static/office-v2/office-v2.css" />
+    <!-- Vendored copies first (no SRI needed — same-origin), CDN fallback
+         on error with SRI matching the vendored bytes. If the CDN serves
+         a different build the load fails closed instead of polluting the
+         page. Refresh the hashes via `scripts/update_sri.sh` whenever the
+         vendored files are bumped. -->
+    <script src="/static/vendor/tv.js" defer
+            onerror="this.onerror=null;this.src='https://s3.tradingview.com/tv.js';this.integrity='sha384-PrAUhlnhshqe64CQsL37sz1scuWsYLu/6j5GpdHGyGDqL+A47QxmNl0GX9jiUEUO';this.crossOrigin='anonymous';"></script>
+    <script src="/static/vendor/lightweight-charts.standalone.production.js" defer
+            onerror="this.onerror=null;this.src='https://unpkg.com/lightweight-charts@5.2.0/dist/lightweight-charts.standalone.production.js';this.integrity='sha384-q1KYLSKHgBnW5tWYGGR8+6YV4/iPy31dILoF2I1OD7XiVUvHEp/TaxIQVmB0j3R2';this.crossOrigin='anonymous';"></script>
+    <!--
+      Chart.js loaded from jsDelivr. SRI integrity attribute is added by
+      `scripts/update_sri.sh` (which fetches the asset, computes the
+      sha384, and patches this file). We ship without a hardcoded hash
+      because chart.umd.min.js bytes vary per CDN edge cache and a wrong
+      integrity value bricks the dashboard. CSP + crossorigin already
+      restrict the load.
+    -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
+            crossorigin="anonymous"
+            referrerpolicy="no-referrer"
+            defer></script>
   </head>
   <body>
     <div class="bg-grid"></div>
-    <header class="topbar">
-      <div>
-        <h1>Mekka Trading Command Center</h1>
-        <p>Nick Fury Operations • Wall Street Marvel Office</p>
-      </div>
-      <div id="status-pill" class="pill">Conectando...</div>
-    </header>
-    <div id="global-alerts" class="global-alerts"></div>
-    <section class="panel replay-panel">
-      <h2>Replay Player</h2>
-      <div class="replay-controls">
-        <button id="replay-live" type="button">Live</button>
-        <button id="replay-prev" type="button">Prev</button>
-        <button id="replay-play" type="button">Play</button>
-        <button id="replay-next" type="button">Next</button>
-        <select id="replay-snapshot"></select>
-        <button id="replay-export-json" type="button">Export JSON</button>
-        <button id="replay-export-csv" type="button">Export CSV</button>
-        <span id="replay-status">Live stream ativo</span>
-      </div>
-      <div class="compare-controls">
-        <input id="export-start-utc" placeholder="start_utc (ISO)" />
-        <input id="export-end-utc" placeholder="end_utc (ISO)" />
-        <button id="incident-latest" type="button">Incident Latest</button>
-        <button id="incident-download" type="button" class="btn-incident-download">Download Bundle</button>
-        <button id="charts-refresh" type="button">Refresh Charts</button>
-        <button id="queue-refresh" type="button">Refresh Queue</button>
-      </div>
-      <div class="compare-controls">
-        <select id="compare-a"></select>
-        <select id="compare-b"></select>
-        <button id="compare-run" type="button">Comparar A/B</button>
-      </div>
-      <div id="compare-output" class="compare-output"></div>
-    </section>
-
-    <section class="panel replay-panel">
-      <h2>Replay Charts (Series Temporais)</h2>
-      <div class="charts-grid">
-        <div class="chart-card">
-          <h3>Signals (total)</h3>
-          <canvas id="chart-signals" height="120"></canvas>
+    <aside class="sidebar">
+      <div class="sidebar-brand">MEKKA OPS</div>
+      <nav class="sidebar-nav">
+        <button class="page-nav-btn active" data-page="overview">Overview</button>
+        <ul class="page-nav-sub">
+          <li><a href="#sec-office">⬡ Pixel 3D Office</a></li>
+          <li><a href="#sec-live-market">Market Live</a></li>
+          <li><a href="#sec-metrics">Mission Metrics</a></li>
+        </ul>
+        <button class="page-nav-btn" data-page="wallet">Wallet</button>
+        <ul class="page-nav-sub">
+          <li><a href="#sec-killswitch">Kill Switch</a></li>
+          <li><a href="#sec-pnl">Equity &amp; PnL</a></li>
+          <li><a href="#sec-positions">Open Positions</a></li>
+          <li><a href="#sec-funding">Funding Rates</a></li>
+        </ul>
+        <button class="page-nav-btn" data-page="performance">Performance</button>
+        <ul class="page-nav-sub">
+          <li><a href="#sec-trades-timeline">Trades Timeline</a></li>
+          <li><a href="#sec-replay-charts">Replay Charts</a></li>
+          <li><a href="#sec-hero-sla">Hero SLA</a></li>
+        </ul>
+        <button class="page-nav-btn" data-page="agents">Agents</button>
+        <ul class="page-nav-sub">
+          <li><a href="#sec-layers">Layer Command Map</a></li>
+          <li><a href="#sec-agents">Agents Pixel Roster</a></li>
+          <li><a href="#sec-internals">Dashboard Internals</a></li>
+        </ul>
+        <button class="page-nav-btn" data-page="trades">Trades</button>
+        <ul class="page-nav-sub">
+          <li><a href="#sec-signals">Vision Signals</a></li>
+          <li><a href="#sec-trades">Iron Man Executions</a></li>
+        </ul>
+        <button class="page-nav-btn" data-page="risk">Risk</button>
+        <ul class="page-nav-sub">
+          <li><a href="#sec-risk">Risk Heatmap</a></li>
+          <li><a href="#sec-anomalies">Anomaly Console</a></li>
+          <li><a href="#sec-incident-queue">Incident Queue</a></li>
+        </ul>
+        <button class="page-nav-btn" data-page="logs">Logs</button>
+        <ul class="page-nav-sub">
+          <li><a href="#sec-audit">Hero Audit Stream</a></li>
+          <li><a href="#sec-replay-player">Replay Player</a></li>
+          <li><a href="#sec-manual">Mini Manual</a></li>
+        </ul>
+        <button class="page-nav-btn" data-page="settings">Settings</button>
+        <button class="page-nav-btn page-nav-live" data-page="live">📡 Live</button>
+      </nav>
+    </aside>
+    <div class="content-shell">
+      <header class="topbar">
+        <div>
+          <h1>Mekka Trading Command Center</h1>
+          <p>Nick Fury Operations • Wall Street Marvel Office</p>
         </div>
-        <div class="chart-card">
-          <h3>Trades (total)</h3>
-          <canvas id="chart-trades" height="120"></canvas>
+        <div class="topbar-actions">
+          <label for="lang-toggle" class="muted-line">Idioma</label>
+          <select id="lang-toggle" class="prefs-reset-btn">
+            <option value="pt">Português</option>
+            <option value="en">English</option>
+          </select>
+          <button id="theme-toggle" type="button" class="prefs-reset-btn">Light Mode</button>
+          <button id="prefs-reset" type="button" class="prefs-reset-btn">Reset Preferences</button>
+          <div id="status-pill" class="pill">Conectando...</div>
         </div>
-        <div class="chart-card">
-          <h3>Alerts &amp; Severity</h3>
-          <canvas id="chart-alerts" height="120"></canvas>
+      </header>
+      <div id="financial-topbar" class="financial-topbar">
+        <div class="ftb-card" id="ftb-wallet">
+          <span class="ftb-label" title="Saldo atual da carteira operada">Carteira</span>
+          <span class="ftb-value" id="ftb-wallet-val">—</span>
+        </div>
+        <div class="ftb-card ftb-pnl" id="ftb-daypnl">
+          <span class="ftb-label" title="Lucro/prejuízo do dia em USD">PnL Hoje</span>
+          <span class="ftb-value" id="ftb-daypnl-val">—</span>
+        </div>
+        <div class="ftb-card ftb-pnl" id="ftb-daypnl-pct">
+          <span class="ftb-label" title="Variação percentual do dia">PnL %</span>
+          <span class="ftb-value" id="ftb-daypnl-pct-val">—</span>
+        </div>
+        <div class="ftb-card" id="ftb-positions">
+          <span class="ftb-label" title="Número de posições abertas">Posições</span>
+          <span class="ftb-value" id="ftb-positions-val">—</span>
+        </div>
+        <div class="ftb-card" id="ftb-risk">
+          <span class="ftb-label" title="Nível de risco atual">Risco</span>
+          <span class="ftb-value" id="ftb-risk-val">—</span>
+        </div>
+        <div class="ftb-card" id="ftb-agents">
+          <span class="ftb-label" title="Status dos agentes IA">Agentes</span>
+          <span class="ftb-value" id="ftb-agents-val">—</span>
+        </div>
+        <div class="ftb-card ftb-update" id="ftb-update">
+          <span class="ftb-label">Atualizado</span>
+          <span class="ftb-value" id="ftb-update-val">—</span>
+        </div>
+        <span id="ftb-live-badge" class="ftb-live-badge live-off" title="Status da conexão em tempo real">○ OFF</span>
+        <button id="trade-now-btn" class="trade-now-btn" type="button" title="Acionar análise dos agentes para melhor trade agora">
+          ⚡ Executar Trade
+        </button>
+      </div>
+      <div id="global-alerts" class="global-alerts"></div>
+
+      <section class="panel killswitch-panel" id="sec-killswitch" data-page="wallet">
+        <div class="killswitch-row">
+          <div>
+            <h2>Kill Switch</h2>
+            <div id="killswitch-status" class="muted-line">Verificando...</div>
+          </div>
+          <div class="killswitch-actions">
+            <button id="killswitch-engage" type="button" class="btn-engage">Engage</button>
+            <button id="killswitch-release" type="button" class="btn-release">Release</button>
+            <button id="auth-button" type="button" class="btn-token">Login</button>
+            <span id="auth-state" class="auth-state muted-line"></span>
+          </div>
+        </div>
+      </section>
+
+      <div id="auth-modal" class="modal hidden">
+        <div class="modal-card">
+          <div class="modal-head">
+            <strong>Mekka Dashboard — Login</strong>
+            <button id="auth-modal-close" type="button">Fechar</button>
+          </div>
+          <div class="modal-body">
+            <p class="muted-line">Cole a senha de operador para iniciar sessão. Token de sessão é armazenado em cookie HttpOnly por até 12h (configurável via <code>MEKKA_DASHBOARD_SESSION_TTL</code>).</p>
+            <label class="ks-field">
+              <span>Senha</span>
+              <input id="auth-password" type="password" autocomplete="current-password" />
+            </label>
+            <div class="ks-error" id="auth-error"></div>
+            <div class="ks-actions">
+              <button id="auth-cancel" type="button">Cancelar</button>
+              <button id="auth-submit" type="button">Entrar</button>
+            </div>
+          </div>
         </div>
       </div>
-      <p id="charts-status" class="muted-line">Aguardando snapshots...</p>
-    </section>
 
-    <section class="panel replay-panel">
-      <h2>Incident Investigation Queue</h2>
-      <div id="incident-queue" class="incident-queue">
-        <div class="muted-line">Sem incidentes ativos.</div>
+      <div id="killswitch-modal" class="modal hidden">
+        <div class="modal-card">
+          <div class="modal-head">
+            <strong id="killswitch-modal-title">Confirmar ação</strong>
+            <button id="killswitch-modal-close" type="button">Fechar</button>
+          </div>
+          <div class="modal-body">
+            <p id="killswitch-modal-text"></p>
+            <label class="ks-field">
+              <span>Motivo (opcional, &lt;240 chars)</span>
+              <input id="killswitch-modal-reason" type="text" maxlength="240" placeholder="ex: anomaly Spider-Man pause + drawdown 6%" />
+            </label>
+            <label class="ks-field">
+              <span id="killswitch-modal-confirm-label">Digite ENGAGE para confirmar</span>
+              <input id="killswitch-modal-confirm" type="text" autocomplete="off" />
+            </label>
+            <div class="ks-error" id="killswitch-modal-error"></div>
+            <div class="ks-actions">
+              <button id="killswitch-modal-cancel" type="button">Cancelar</button>
+              <button id="killswitch-modal-submit" type="button">Confirmar</button>
+            </div>
+          </div>
+        </div>
       </div>
-    </section>
 
-    <main class="layout">
-      <section class="panel metrics">
+      <section class="panel full office-hero" id="sec-office" data-page="overview">
+        <div class="office-hero-bar">
+          <span class="office-hero-label">⬡ PIXEL 3D OFFICE</span>
+          <a href="/office-v2/" target="_blank" rel="noopener" class="office-hero-expand" title="Abrir em tela cheia">↗</a>
+        </div>
+        <iframe
+          id="office-v2-frame"
+          title="Mekka Pixel Office"
+          src="/office-v2/"
+          allow="same-origin"
+        ></iframe>
+      </section>
+
+      <section class="panel replay-panel" id="sec-live-market" data-page="overview">
+        <h2>Market Live (Exchange View)</h2>
+        <div class="market-topbar">
+          <div class="market-controls">
+            <label for="market-symbol">Par</label>
+            <select id="market-symbol">
+              <option value="BTCUSDT">BTCUSDT</option>
+              <option value="ETHUSDT">ETHUSDT</option>
+              <option value="SOLUSDT">SOLUSDT</option>
+            </select>
+            <label for="market-timeframe">TF</label>
+            <select id="market-timeframe">
+              <option value="1m">1m</option>
+              <option value="5m">5m</option>
+              <option value="15m">15m</option>
+              <option value="1h" selected>1h</option>
+              <option value="4h">4h</option>
+              <option value="1d">1d</option>
+            </select>
+            <label for="market-refresh-interval">Refresh</label>
+            <select id="market-refresh-interval">
+              <option value="1000">1s</option>
+              <option value="3000" selected>3s</option>
+              <option value="5000">5s</option>
+              <option value="10000">10s</option>
+            </select>
+            <button id="market-refresh" type="button">Atualizar</button>
+            <button id="market-live-toggle" type="button">Pause Live</button>
+            <span id="market-breaker-pill" class="breaker-pill ok">BREAKER CLOSED</span>
+            <span id="market-status" class="muted-line">Aguardando mercado...</span>
+          </div>
+          <div class="market-stats" id="market-stats"></div>
+        </div>
+        <div class="market-chart-wrap">
+          <div id="market-chart"></div>
+        </div>
+        <div class="orderbook-wrap">
+          <div class="orderbook-head">
+            <strong>Order Book Depth</strong>
+            <span id="orderbook-status" class="muted-line">Aguardando order book...</span>
+          </div>
+          <div id="orderbook-summary" class="orderbook-summary"></div>
+          <div class="orderbook-grid">
+            <div>
+              <h3>Bids</h3>
+              <div id="orderbook-bids" class="book-table"></div>
+            </div>
+            <div>
+              <h3>Asks</h3>
+              <div id="orderbook-asks" class="book-table"></div>
+            </div>
+          </div>
+        </div>
+        <div class="tape-wrap">
+          <div class="orderbook-head">
+            <strong>Time &amp; Sales (Tape)</strong>
+            <span id="tape-status" class="muted-line">Aguardando trades...</span>
+          </div>
+          <div id="trade-tape" class="trade-tape"></div>
+        </div>
+        <div class="tape-wrap">
+          <div class="orderbook-head">
+            <strong>Market Diagnostics</strong>
+            <span id="market-diag-status" class="muted-line">Aguardando métricas...</span>
+          </div>
+          <div id="market-diag" class="trade-tape"></div>
+        </div>
+      </section>
+
+      <section class="panel replay-panel" id="sec-manual" data-page="logs">
+        <h2>Mini Manual Operacional</h2>
+        <div class="manual-grid">
+          <article>
+            <h3>Como ler o painel</h3>
+            <p>Comece por <strong>Global Alerts</strong>, depois <strong>Layer Command Map</strong> e <strong>Incident Queue</strong>.</p>
+          </article>
+          <article>
+            <h3>Replay e investigação</h3>
+            <p>Use o Replay Player para navegar snapshots e o Compare A/B para validar deltas antes/depois de incidentes.</p>
+          </article>
+          <article>
+            <h3>Tomada de decisão</h3>
+            <p>Priorize incidentes com score alto, sinais de kill switch e alertas críticos no Batman/Spider-Man.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel replay-panel" id="sec-replay-player" data-page="logs">
+        <h2>Replay Player</h2>
+        <div class="replay-controls">
+          <button id="replay-live" type="button">Live</button>
+          <button id="replay-prev" type="button">Prev</button>
+          <button id="replay-play" type="button">Play</button>
+          <button id="replay-next" type="button">Next</button>
+          <select id="replay-snapshot"></select>
+          <button id="replay-export-json" type="button">Export JSON</button>
+          <button id="replay-export-csv" type="button">Export CSV</button>
+          <span id="replay-status">Live stream ativo</span>
+        </div>
+        <div class="compare-controls">
+          <input id="export-start-utc" placeholder="start_utc (ISO)" />
+          <input id="export-end-utc" placeholder="end_utc (ISO)" />
+          <button id="incident-latest" type="button">Incident Latest</button>
+          <button id="incident-download" type="button" class="btn-incident-download">Download Bundle</button>
+          <select id="incident-bundle-select"></select>
+          <button id="incident-download-selected" type="button">Download Selecionado</button>
+          <button id="charts-refresh" type="button">Refresh Charts</button>
+          <button id="queue-refresh" type="button">Refresh Queue</button>
+        </div>
+        <div class="compare-controls">
+          <select id="compare-a"></select>
+          <select id="compare-b"></select>
+          <button id="compare-run" type="button">Comparar A/B</button>
+        </div>
+        <div id="compare-output" class="compare-output"></div>
+      </section>
+
+      <section class="panel replay-panel" id="sec-replay-charts" data-page="performance">
+        <h2>Replay Charts (Series Temporais)</h2>
+        <div class="charts-grid">
+          <div class="chart-card">
+            <h3>Signals (total)</h3>
+            <canvas id="chart-signals" height="120"></canvas>
+          </div>
+          <div class="chart-card">
+            <h3>Trades (total)</h3>
+            <canvas id="chart-trades" height="120"></canvas>
+          </div>
+          <div class="chart-card">
+            <h3>Alerts &amp; Severity</h3>
+            <canvas id="chart-alerts" height="120"></canvas>
+          </div>
+        </div>
+        <p id="charts-status" class="muted-line">Aguardando snapshots...</p>
+      </section>
+
+      <section class="panel replay-panel" id="sec-incident-queue" data-page="risk">
+        <h2>Incident Investigation Queue</h2>
+        <div class="queue-toolbar">
+          <label for="queue-severity-filter">Severidade:</label>
+          <select id="queue-severity-filter">
+            <option value="">Todas</option>
+            <option value="CRITICAL">Critical</option>
+            <option value="HIGH">High</option>
+            <option value="MEDIUM">Medium</option>
+            <option value="LOW">Low</option>
+          </select>
+          <input id="queue-search" placeholder="Buscar (code, mensagem, snapshot, driver)" />
+          <button id="queue-prev" type="button">Prev</button>
+          <button id="queue-next" type="button">Next</button>
+          <span id="queue-page-status" class="muted-line">Page 1</span>
+          <button id="incident-export-csv" type="button">Export Incidents CSV</button>
+        </div>
+        <div id="incident-queue" class="incident-queue">
+          <div class="muted-line">Sem incidentes ativos.</div>
+        </div>
+        <div id="incident-queue-detail" class="incident-queue-detail muted-line">
+          Selecione um incidente para ver detalhes rápidos de investigação.
+        </div>
+      </section>
+
+      <section class="panel replay-panel" id="sec-pnl" data-page="wallet">
+        <h2>Equity &amp; PnL</h2>
+        <div class="pnl-toolbar">
+          <label for="pnl-window">Janela:</label>
+          <select id="pnl-window">
+            <option value="7">7d</option>
+            <option value="30" selected>30d</option>
+            <option value="90">90d</option>
+            <option value="180">180d</option>
+            <option value="365">365d</option>
+          </select>
+          <button id="pnl-refresh" type="button">Atualizar</button>
+          <span id="pnl-status" class="muted-line">Aguardando dados de PnL...</span>
+        </div>
+        <div class="pnl-cards" id="pnl-cards"></div>
+        <div class="charts-grid pnl-charts">
+          <div class="chart-card">
+            <h3>Equity Curve (USD)</h3>
+            <canvas id="chart-equity" height="120"></canvas>
+          </div>
+          <div class="chart-card">
+            <h3>Daily PnL</h3>
+            <canvas id="chart-daily-pnl" height="120"></canvas>
+          </div>
+          <div class="chart-card">
+            <h3>Drawdown (%)</h3>
+            <canvas id="chart-drawdown" height="120"></canvas>
+          </div>
+          <div class="chart-card">
+            <h3>Equity vs Benchmark (BTC)</h3>
+            <canvas id="chart-benchmark" height="120"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel replay-panel" id="sec-trades-timeline" data-page="performance">
+        <h2>Trades Execution Timeline</h2>
+        <div class="positions-toolbar">
+          <label for="trades-timeline-hours">Janela:</label>
+          <select id="trades-timeline-hours">
+            <option value="6">6h</option>
+            <option value="12">12h</option>
+            <option value="24" selected>24h</option>
+            <option value="72">72h</option>
+            <option value="168">7d</option>
+          </select>
+          <button id="trades-timeline-refresh" type="button">Atualizar</button>
+          <span id="trades-timeline-status" class="muted-line">Aguardando trades...</span>
+        </div>
+        <div class="charts-grid pnl-charts">
+          <div class="chart-card chart-full">
+            <canvas id="chart-trades-timeline" height="120"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel replay-panel" id="sec-funding" data-page="wallet">
+        <h2>⚡ Funding Rates</h2>
+        <div class="positions-toolbar">
+          <button id="funding-refresh" type="button">Atualizar</button>
+          <span id="funding-status" class="muted-line">Aguardando...</span>
+          <span id="funding-as-of" class="muted-line"></span>
+        </div>
+        <div id="funding-body" class="funding-body">
+          <div class="muted-line">Carregando...</div>
+        </div>
+      </section>
+
+      <section class="panel replay-panel" id="sec-positions" data-page="wallet">
+        <h2>Open Positions</h2>
+        <div class="positions-toolbar">
+          <button id="positions-refresh" type="button">Atualizar</button>
+          <span id="positions-status" class="muted-line">Aguardando provider...</span>
+        </div>
+        <div id="positions-body" class="positions-body">
+          <div class="muted-line">Carregando...</div>
+        </div>
+      </section>
+
+      <section class="panel replay-panel" id="sec-internals" data-page="agents">
+        <h2>Dashboard Internals</h2>
+        <div class="internals-toolbar">
+          <button id="internals-refresh" type="button">Atualizar</button>
+          <span id="internals-status" class="muted-line">Aguardando métricas...</span>
+        </div>
+        <div id="internals-cards" class="pnl-cards"></div>
+        <details class="internals-raw">
+          <summary>Métricas raw (Prometheus text)</summary>
+          <pre id="internals-raw" class="internals-raw-pre">—</pre>
+        </details>
+      </section>
+
+      <main class="layout">
+      <section class="panel metrics" id="sec-metrics" data-page="overview">
         <h2>Mission Metrics</h2>
         <div class="cards" id="metrics"></div>
       </section>
 
-      <section class="panel scene">
-        <h2>Pixel 3D Office</h2>
-        <canvas id="office-canvas" width="900" height="520"></canvas>
-      </section>
-
-      <section class="panel full">
+      <section class="panel full" id="sec-layers" data-page="agents">
         <h2>Layer Command Map (L1-L4)</h2>
         <div id="layer-map" class="layer-map"></div>
       </section>
 
-      <section class="panel full">
+      <section class="panel full" id="sec-agents" data-page="agents">
+        <h2>Agents Pixel Roster 3D</h2>
+        <div id="agents-roster" class="agents-roster"></div>
+      </section>
+
+      <!-- ── Trading Mode Settings ────────────────────────────────────── -->
+      <section class="panel full" id="sec-trading-settings" data-page="settings">
+        <h2>⚡ Modos de Trading</h2>
+        <div class="trading-modes-grid">
+          <!-- Super Agressivo -->
+          <div class="trading-mode-card">
+            <div class="mode-header">
+              <span class="mode-icon">🚀</span>
+              <div>
+                <strong class="mode-title">Super Agressivo</strong>
+                <p class="mode-desc">Posição mínima 5% do capital · Leverage 10x · Threshold de confiança reduzido para 55%</p>
+              </div>
+            </div>
+            <label class="toggle-switch" title="Ligar/desligar modo Super Agressivo">
+              <input type="checkbox" id="toggle-super-aggressive" />
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            </label>
+            <span class="mode-status" id="status-super-aggressive">OFF</span>
+          </div>
+          <!-- Altcoins -->
+          <div class="trading-mode-card">
+            <div class="mode-header">
+              <span class="mode-icon">🪙</span>
+              <div>
+                <strong class="mode-title">Altcoins</strong>
+                <p class="mode-desc">Expande universo de ativos para ETH, SOL, AVAX, BNB, LINK além de BTC</p>
+              </div>
+            </div>
+            <label class="toggle-switch" title="Ligar/desligar Altcoins">
+              <input type="checkbox" id="toggle-altcoins" />
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            </label>
+            <span class="mode-status" id="status-altcoins">OFF</span>
+          </div>
+        </div>
+        <p class="mode-save-status muted-line" id="mode-save-status"></p>
+      </section>
+
+      <section class="panel full" id="sec-filters" data-page="settings">
         <h2>Filters</h2>
         <div class="filters">
           <input id="filter-symbol" placeholder="Símbolo (ex: BTC)" />
           <input id="filter-hero" placeholder="Herói (ex: Batman)" />
           <input id="filter-event" placeholder="Evento (ex: RISK_)" />
+          <div class="filter-mode-wrap">
+            <label for="filter-mode">Modo</label>
+            <select id="filter-mode">
+              <option value="contains">Contém</option>
+              <option value="exact">Exato</option>
+              <option value="prefix">Prefixo</option>
+            </select>
+          </div>
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="sec-timeline" data-page="logs">
         <h2>Nick Fury Timeline</h2>
         <div class="timeline" id="timeline"></div>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="sec-symbol-timeline" data-page="logs">
         <h2>Timeline Por Símbolo</h2>
         <div id="symbol-timeline" class="symbol-timeline"></div>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="sec-hero-sla" data-page="performance">
         <h2>Hero SLA (s)</h2>
         <div id="hero-sla" class="hero-sla"></div>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="sec-risk" data-page="risk">
         <h2>Batman Risk Heatmap</h2>
         <div id="risk-heatmap" class="risk-heatmap"></div>
       </section>
 
-      <section class="panel full">
+      <section class="panel full" id="sec-anomalies" data-page="risk">
         <h2>Spider-Man Anomaly Console</h2>
         <div id="anomaly-console" class="anomaly-console"></div>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="sec-signals" data-page="trades">
         <h2>Vision Signals</h2>
         <table>
           <thead><tr><th>Time</th><th>Symbol</th><th>Action</th><th>Conf.</th></tr></thead>
@@ -129,7 +563,7 @@
         </table>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="sec-trades" data-page="trades">
         <h2>Iron Man Executions</h2>
         <table>
           <thead><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Notional</th></tr></thead>
@@ -137,11 +571,78 @@
         </table>
       </section>
 
-      <section class="panel full">
+      <section class="panel full" id="sec-audit" data-page="logs">
         <h2>Hero Audit Stream</h2>
         <div class="log" id="audit-log"></div>
       </section>
-    </main>
+      <section class="panel full" id="sec-settings" data-page="settings">
+        <h2>⚙️ Personalizar Dashboard</h2>
+        <p class="muted-line">Escolha quais painéis aparecem em cada página. Preferências salvas localmente.</p>
+        <div id="widget-customizer" class="widget-customizer"></div>
+      </section>
+
+      <!-- ── Live Trading Panel ──────────────────────────────────────────── -->
+      <section class="panel full live-trading-panel" id="sec-live-trading" data-page="live">
+        <!-- Toolbar -->
+        <div class="live-toolbar">
+          <span class="live-dot-badge" id="live-dot">⬤</span>
+          <strong class="live-title">Live Trading</strong>
+          <!-- Symbol selector -->
+          <div class="live-ctrl">
+            <label for="live-symbol-select">Ativo</label>
+            <select id="live-symbol-select">
+              <option value="BTC">BTC</option>
+              <option value="ETH">ETH</option>
+              <option value="SOL">SOL</option>
+              <option value="AVAX">AVAX</option>
+              <option value="BNB">BNB</option>
+              <option value="LINK">LINK</option>
+            </select>
+          </div>
+          <!-- Timeframe selector -->
+          <div class="live-ctrl">
+            <label for="live-tf-select">Timeframe</label>
+            <select id="live-tf-select">
+              <option value="1m">1m</option>
+              <option value="5m">5m</option>
+              <option value="15m" selected>15m</option>
+              <option value="1h">1h</option>
+              <option value="4h">4h</option>
+              <option value="1d">1d</option>
+            </select>
+          </div>
+          <!-- Ticker strip -->
+          <div class="live-ticker" id="live-ticker">
+            <span class="live-ticker-price" id="live-price">—</span>
+            <span class="live-ticker-change" id="live-change"></span>
+          </div>
+          <span class="live-status-msg muted-line" id="live-status">Conectando…</span>
+        </div>
+
+        <!-- Main split: chart | positions -->
+        <div class="live-split">
+          <!-- Candlestick chart -->
+          <div class="live-chart-wrap">
+            <div id="live-chart" class="live-chart"></div>
+            <div class="live-chart-legend" id="live-legend"></div>
+          </div>
+
+          <!-- Open positions sidebar -->
+          <div class="live-positions-wrap">
+            <div class="live-pos-header">
+              <span>Posições Abertas</span>
+              <span class="live-pos-count" id="live-pos-count">0</span>
+            </div>
+            <div id="live-positions-list" class="live-positions-list">
+              <div class="muted-line live-pos-empty">Sem posições abertas</div>
+            </div>
+            <div class="live-equity-strip" id="live-equity-strip"></div>
+          </div>
+        </div>
+      </section>
+
+      </main>
+    </div>
 
     <div id="risk-modal" class="modal hidden">
       <div class="modal-card">
@@ -153,6 +654,34 @@
       </div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <div id="trade-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="trade-modal-title">
+      <div class="modal-card modal-card--wide">
+        <div class="modal-head">
+          <strong id="trade-modal-title">⚡ Análise de Trade — Agentes Mekka</strong>
+          <button id="trade-modal-close" type="button" aria-label="Fechar">✕</button>
+        </div>
+        <div id="trade-modal-body" class="modal-body">
+          <div id="trade-modal-loading" class="trade-modal-loading">
+            <div class="spinner"></div>
+            <p>Consultando agentes… aguarde.</p>
+          </div>
+          <div id="trade-modal-recommendation" class="hidden">
+            <div id="trade-guardrails" class="trade-guardrails"></div>
+            <div id="trade-rec-card" class="trade-rec-card"></div>
+            <div class="trade-modal-actions">
+              <button id="trade-confirm-btn" type="button" class="btn-engage">✅ Confirmar e Executar</button>
+              <button id="trade-cancel-btn" type="button" class="prefs-reset-btn">Cancelar</button>
+            </div>
+          </div>
+          <div id="trade-modal-result" class="hidden">
+            <div id="trade-result-content"></div>
+            <button id="trade-result-close" type="button" class="prefs-reset-btn">Fechar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/i18n.js" defer></script>
+    <script src="/static/app.js" defer></script>
   </body>
 </html>

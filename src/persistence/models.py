@@ -9,6 +9,7 @@ Tables
   trades       — every ExecutionResult Iron Man produced
   daily_pnl    — daily aggregate PnL/drawdown (one row per UTC day)
   audit_log    — append-only events from any agent (for replay/forensics)
+  perf_reports — daily Deadpool PerformanceReport snapshots (one per UTC day)
 
 All columns use UTC timestamps.
 """
@@ -18,7 +19,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -80,12 +81,26 @@ class TradeRecord(Base):
 
 
 class DailyPnLRecord(Base):
-    """One row per UTC day per environment (paper vs live)."""
+    """One row per UTC day per environment (paper vs live).
+
+    The unique constraint is on (date_utc, is_paper) so that paper and live
+    trading can both have records on the same day.  The previous single-column
+    unique=True on date_utc would cause an IntegrityError when switching from
+    paper to live mid-day.
+
+    Migration note: if upgrading an existing DB, run:
+      ALTER TABLE daily_pnl DROP CONSTRAINT IF EXISTS uq_daily_pnl_date;
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_daily_pnl_date_paper
+          ON daily_pnl (date_utc, is_paper);
+    """
 
     __tablename__ = "daily_pnl"
+    __table_args__ = (
+        UniqueConstraint("date_utc", "is_paper", name="uq_daily_pnl_date_paper"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    date_utc: Mapped[str] = mapped_column(String(10), unique=True, index=True)  # 'YYYY-MM-DD'
+    date_utc: Mapped[str] = mapped_column(String(10), index=True)  # 'YYYY-MM-DD'
     is_paper: Mapped[bool] = mapped_column(Boolean, default=True)
     starting_equity: Mapped[float] = mapped_column(Float, default=0.0)
     ending_equity: Mapped[float] = mapped_column(Float, default=0.0)
@@ -112,3 +127,29 @@ class AuditRecord(Base):
     severity: Mapped[str] = mapped_column(String(16), default="INFO")
     message: Mapped[str] = mapped_column(Text, default="")
     payload: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+
+class PerfReportRecord(Base):
+    """
+    Daily Deadpool PerformanceReport snapshot (one row per UTC day).
+
+    Written by DailyPerformanceWriter (Story 039). The ``date_utc`` column
+    is the write date; if two writes happen on the same day the second
+    overwrites the first (upsert semantics in DailyPerformanceWriter).
+    ``payload`` stores the full ``PerformanceReport.to_audit_payload()`` dict.
+    """
+
+    __tablename__ = "perf_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    date_utc: Mapped[str] = mapped_column(String(10), unique=True, index=True)  # YYYY-MM-DD
+    verdict: Mapped[str] = mapped_column(String(24))
+    win_rate_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    total_pnl_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    max_drawdown_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    wolverine_endorse_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    days_with_data: Mapped[int] = mapped_column(Integer, default=0)
+    payload: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )

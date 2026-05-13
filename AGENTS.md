@@ -16,6 +16,7 @@ Establish an autonomous, modular, and observable trading operating system founda
 
 ### Layer 2 — Strategy
 - **Vision** — Predictive Analyst. OpenAI GPT-4o with `response_format=json_object`. Receives consolidated `MarketAnalysis`, returns a structured `TradingSignal`. Falls back to a safe HOLD on any failure (timeout, rate limit, parse error, schema violation, anomaly halt).
+  - *Modalidade Vision Critic* (Story 031) — second-look opcional do mesmo herói. `vision_critic_enabled=False` por default. Quando ligado, revisa o signal e retorna ENDORSE/AMEND/REJECT. Critic só pode SUAVIZAR (size menor, leverage menor, SL mais apertado, TP mais perto). Não conta como herói novo no roster — é uma capacidade extra do Vision.
 - **Professor X** — Swarm Coordinator. Runs Layer-1 agents in parallel via `asyncio.gather`, isolates failures, assembles the `MarketAnalysis` bundle for Vision.
 
 ### Layer 3 — Risk & Execution
@@ -23,19 +24,29 @@ Establish an autonomous, modular, and observable trading operating system founda
 - **Iron Man** — Hyperliquid Execution Engineer. Paper-first; live mode uses `hyperliquid-python-sdk` + `eth-account`, IOC entry + reduce-only SL/TP brackets, retentado via tenacity (3 attempts, exponential backoff).
 
 ### Layer 4 — Command & Control
-- **Nick Fury** — Mission Commander. Top-level orchestrator. `run_main_cycle()` (default 4h) executa Portfolio → Análise → Vision → Batman → Iron Man → SQLite por símbolo. `run_monitor_cycle()` (default 5min) heartbeat. `run_forever()` agenda ambos.
+- **Nick Fury** — Mission Commander. Top-level orchestrator. `run_main_cycle()` (default 4h) executa Portfolio → Análise → Vision → Batman → Iron Man → SQLite por símbolo. `run_monitor_cycle()` (default 5min) executa Portfolio → Wolverine. `run_forever()` agenda ambos.
 - **Portfolio Manager** — Read-only equity & open-positions snapshot. Polla Hyperliquid `clearinghouseState` no início de cada cycle, retorna `EquitySnapshot` com fallback paper quando credenciais ausentes ou rede indisponível. Nunca envia ordens.
+- **Wolverine** — Recovery Agent. Read-only monitor sobre posições abertas: classifica por PnL (HOLD/TIGHTEN_STOP/TRAIL_STOP/SCALE_OUT/CLOSE/EMERGENCY_CLOSE), sugere novo SL, e funciona como backstop do kill switch quando intraday drawdown explode entre os ciclos principais. Emite `RecoveryPlan` para audit log; nunca toca a SDK.
 
-### Pending heroes (Story 027+)
-- **Wolverine** — Recovery Agent. Position monitor expandido, gestão dinâmica de SL/TP, recovery plan pós-drawdown.
-- **Flash** — Momentum Scalper. Sub-loop intra-candle para entradas táticas.
-- **Deadpool** — Chaos Simulator. Backtest e stress test sobre histórico persistido.
+### Layer 1.5 — Tactical Sub-Loop
+- **Flash** (Story 033) — Momentum Scalper. Read-only e advisory. Detecta micro-momentum em janela curta usando net price move + volume multiplier. Emite `MomentumSignal` (UP/DOWN/SIDEWAYS + strength 0–1) com VOLUME-CONFIRMED tag. Em v1 nenhum agente downstream consome — está disponível para o operador e Story futura pode plugar como gate de entry timing.
+
+### Layer 2 — Analytics (Python)
+- **Deadpool** (Story 034) — Performance Analytics Agent. Determinístico, sem LLM. Lê o SQLite e computa `PerformanceReport` (win rate, PnL, Sharpe, drawdown, Wolverine endorsement rate, signal actionability, Batman approval). Emite `PerformanceVerdict` (READY / NOT_READY / INSUFFICIENT_DATA). Integrado ao preflight (gate H2 auto-check) e Telegram `/perf` + `/gates`.
 
 ## Squad Baseline
 
 - `alpha-risk-command` — Batman + Nick Fury: governance de risco, kill-switch, validation gates.
 - `hyperliquid-mock-ops` — Iron Man + exchange adapter mock (TS): execution rehearsal e paper-trading.
 - `market-intel-lab` — Superman, Doctor Strange, Black Panther, Thor, Aquaman, Spider-Man, Vision: signal R&D.
+
+## Services (não-agente)
+
+- **DailyPnLWriter** (Story 027) — service que upserta `daily_pnl` no SQLite a cada cycle.
+- **ConsecutiveBreaker** (Story 029) — counter passivo de hits booleanos para safety net (exec error / vision fallback).
+- **UnifiedAuditReader** (Story 032) — leitura unificada SQLite + NDJSON.
+- **TelegramAlerter** (Story 035) — push-only Telegram alerts em eventos críticos. Off por default.
+- **TelegramInboundPoller** (Story 035b + 037) — long-polling de comandos do operador. Comandos: `/status /pnl /pause /resume /positions /perf /gates /help`. `/perf [N]` roda Deadpool (N dias). `/gates` mostra status H1–H6 em tempo real. Requer `TELEGRAM_INBOUND_ENABLED=true`.
 
 ## Hard Rules
 

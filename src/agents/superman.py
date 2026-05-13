@@ -40,8 +40,13 @@ from src.models.market_data import MarketData, Trend
 # Helpers
 # ---------------------------------------------------------------------------
 
-_EXCHANGE_ID = "hyperliquid"  # CCXT exchange id
-_FALLBACK_EXCHANGE_IDS = ["binance", "bybit"]  # fallbacks if HL unavailable
+# Primary exchange is configured via ACTIVE_EXCHANGE env var (settings).
+# Fallback chain: if primary fails, try the others in order.
+_EXCHANGE_FALLBACK_CHAIN: dict[str, list[str]] = {
+    "hyperliquid": ["bybit", "binance"],
+    "bybit":       ["hyperliquid", "binance"],
+    "binance":     ["hyperliquid", "bybit"],
+}
 
 
 def _classify_trend(
@@ -133,49 +138,66 @@ class Superman(BaseAgent[MarketData]):
             role="Chief Market Overseer — multi-asset technical analysis",
         )
         self._exchange: Optional[Any] = None  # CCXT exchange instance, set lazily
+        # [C2] Track which exchange is active to pick the right symbol format.
+        # Hyperliquid: 'BTC/USDC:USDC'; Binance/Bybit perps: 'BTC/USDT:USDT'
+        self._exchange_id: str = ""
 
     # ------------------------------------------------------------------
     # Exchange lifecycle
     # ------------------------------------------------------------------
 
+    def _build_ccxt_config(self, ex_id: str) -> dict:
+        """Return CCXT constructor kwargs for a given exchange id."""
+        import ccxt.async_support as ccxt  # noqa: WPS433
+
+        base_cfg: dict = {"enableRateLimit": True, "options": {"defaultType": "swap"}}
+
+        if ex_id == "hyperliquid":
+            base_cfg["options"]["sandboxMode"] = not settings.is_mainnet
+        elif ex_id == "bybit":
+            if settings.bybit_api_key:
+                base_cfg["apiKey"] = settings.bybit_api_key
+                base_cfg["secret"] = settings.bybit_api_secret
+        elif ex_id == "binance":
+            if settings.binance_api_key:
+                base_cfg["apiKey"] = settings.binance_api_key
+                base_cfg["secret"] = settings.binance_api_secret
+
+        return base_cfg
+
     async def _get_exchange(self) -> Any:
-        """Lazy-init a CCXT async exchange instance."""
+        """Lazy-init a CCXT async exchange instance.
+
+        Respects ``settings.active_exchange`` as primary, falls back through
+        ``_EXCHANGE_FALLBACK_CHAIN`` on connection failure so market data
+        remains available even when the primary exchange is down.
+        """
         if self._exchange is not None:
             return self._exchange
 
         # Lazy import — keeps module import cheap when ccxt isn't installed
         import ccxt.async_support as ccxt  # noqa: WPS433
 
-        # Try Hyperliquid first (testnet / mainnet)
-        try:
-            exchange = ccxt.hyperliquid(
-                {
-                    "enableRateLimit": True,
-                    "options": {
-                        "defaultType": "swap",
-                        "sandboxMode": not settings.is_mainnet,
-                    },
-                }
-            )
-            # Quick connectivity check
-            await exchange.load_markets()
-            self._exchange = exchange
-            self._log.info("Connected to Hyperliquid via CCXT")
-            return exchange
-        except Exception as exc:
-            self._log.warning(
-                f"Hyperliquid CCXT unavailable ({exc}), trying fallbacks"
-            )
+        primary = settings.active_exchange
+        fallbacks = _EXCHANGE_FALLBACK_CHAIN.get(primary, [])
+        all_attempts = [primary] + fallbacks
 
-        # Fallback to Binance (public endpoints, no auth needed)
-        for ex_id in _FALLBACK_EXCHANGE_IDS:
+        for ex_id in all_attempts:
             try:
-                exchange = getattr(ccxt, ex_id)({"enableRateLimit": True})
+                cfg = self._build_ccxt_config(ex_id)
+                exchange = getattr(ccxt, ex_id)(cfg)
                 await exchange.load_markets()
                 self._exchange = exchange
-                self._log.info(f"Connected to {ex_id} via CCXT (fallback)")
+                self._exchange_id = ex_id
+                if ex_id == primary:
+                    self._log.info(f"[Superman] Connected to {ex_id} via CCXT (primary)")
+                else:
+                    self._log.warning(
+                        f"[Superman] Primary '{primary}' failed — connected to {ex_id} (fallback)"
+                    )
                 return exchange
-            except Exception:
+            except Exception as exc:
+                self._log.warning(f"[Superman] {ex_id} CCXT unavailable: {exc}")
                 continue
 
         raise AgentError("Superman", "Could not connect to any exchange")
@@ -185,6 +207,7 @@ class Superman(BaseAgent[MarketData]):
         if self._exchange:
             await self._exchange.close()
             self._exchange = None
+            self._exchange_id = ""
 
     # ------------------------------------------------------------------
     # Core logic
@@ -205,7 +228,6 @@ class Superman(BaseAgent[MarketData]):
         """
         tf = timeframe or settings.primary_timeframe
         limit = settings.candles_lookback
-        ccxt_symbol = f"{symbol}/USDT"
 
         # Lazy imports — pandas-ta registers the `.ta` DataFrame accessor on import
         # and pulls heavy transitive deps. Defer until we actually need to compute.
@@ -213,6 +235,14 @@ class Superman(BaseAgent[MarketData]):
         import pandas_ta as ta  # noqa: F401, WPS433  (registers DataFrame accessor)
 
         exchange = await self._get_exchange()
+
+        # [C2] Perpetual symbol format differs by exchange:
+        #   Hyperliquid: 'BTC/USDC:USDC'  (uses USDC margin, not USDT)
+        #   Binance/Bybit (swap): 'BTC/USDT:USDT'
+        if self._exchange_id in ("binance", "bybit"):
+            ccxt_symbol = f"{symbol}/USDT:USDT"
+        else:
+            ccxt_symbol = f"{symbol}/USDC:USDC"
 
         # --- Fetch OHLCV ---
         try:
@@ -279,15 +309,20 @@ class Superman(BaseAgent[MarketData]):
         volume = float(df["volume"].iloc[-1])
         volume_ma = _safe_float(df.get("VOLUME_MA_20", pd.Series(dtype=float)))
 
+        # [C5] Extract last 20 closes for Flash momentum detection.
+        # Use at most 20 candles to keep the list concise but informative.
+        recent_closes = [float(v) for v in df["close"].iloc[-20:].tolist()]
+
         # --- Classify trend ---
         trend, trend_strength = _classify_trend(
             price, ema20, ema50, rsi, macd_hist
         )
 
+        rsi_display = f"{rsi:.1f}" if rsi is not None else "N/A"
         self._log.info(
             f"[Superman] {symbol} {tf} | price={price:,.4f} "
             f"trend={trend.value}({trend_strength:.2f}) "
-            f"rsi={rsi:.1f if rsi else 'N/A'}"
+            f"rsi={rsi_display}"
         )
 
         return MarketData(
@@ -309,4 +344,5 @@ class Superman(BaseAgent[MarketData]):
             volume_ma=volume_ma,
             trend=trend,
             trend_strength=trend_strength,
+            recent_closes=recent_closes,  # [C5]
         )

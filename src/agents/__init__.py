@@ -14,6 +14,7 @@ Layer 1 — Market Analysis (run in parallel by Professor X):
 Layer 2 — Strategy:
   Vision         → Predictive Analyst (GPT-4o decision maker)
   ProfessorX     → Swarm Coordinator (parallel Layer-1 fan-out)
+  VisionCritic   → Second-look LLM (off by default, Story 031)
 
 Layer 3 — Risk & Execution:
   Batman         → Risk Guardian (deterministic validation gate)
@@ -22,6 +23,10 @@ Layer 3 — Risk & Execution:
 Layer 4 — Command & Control:
   NickFury         → Mission Commander (top-level orchestrator)
   PortfolioManager → Read-only equity & open-positions snapshot
+  Wolverine        → Recovery Agent (monitor cycle + intraday backstop)
+
+Layer 1.5 — Tactical Sub-Loop:
+  Flash            → Momentum Scalper (read-only, advisory)
 
 Imports are lazy to keep optional dependencies (ccxt, openai,
 hyperliquid-python-sdk) from being pulled at package import time.
@@ -42,12 +47,16 @@ __all__ = [
     # Layer 2 — Strategy
     "Vision",
     "ProfessorX",
+    "VisionCritic",
     # Layer 3 — Risk & Execution
     "Batman",
     "IronMan",
     # Layer 4 — Command & Control
     "NickFury",
     "PortfolioManager",
+    "Wolverine",
+    # Layer 1.5 — Tactical
+    "Flash",
 ]
 
 
@@ -83,6 +92,9 @@ def __getattr__(name: str):  # noqa: N807 — module-level __getattr__
     if name == "ProfessorX":
         from src.agents.professor_x import ProfessorX
         return ProfessorX
+    if name == "VisionCritic":
+        from src.agents.vision_critic import VisionCritic
+        return VisionCritic
     if name == "Batman":
         from src.agents.batman import Batman
         return Batman
@@ -95,4 +107,10 @@ def __getattr__(name: str):  # noqa: N807 — module-level __getattr__
     if name == "PortfolioManager":
         from src.agents.portfolio_manager import PortfolioManager
         return PortfolioManager
+    if name == "Wolverine":
+        from src.agents.wolverine import Wolverine
+        return Wolverine
+    if name == "Flash":
+        from src.agents.flash import Flash
+        return Flash
     raise AttributeError(f"module 'src.agents' has no attribute {name!r}")

@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<base href="/office-v2/" />
+<title>Mekka Pixel Office</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #050b18;
+    --panel: #0a1424;
+    --panel-2: #0f1e3a;
+    --line: #1c2c44;
+    --line-2: #2a3e5c;
+    --text: #cfd9ec;
+    --text-dim: #7e90ad;
+    --text-mute: #4d6182;
+    --cyan: #38bdf8;
+    --orange: #fb923c;
+    --green: #22c55e;
+    --purple: #a78bfa;
+    --yellow: #facc15;
+    --red: #ef4444;
+    --pixel: 'Press Start 2P', system-ui, monospace;
+    --mono: 'JetBrains Mono', ui-monospace, monospace;
+    --crt: 'VT323', monospace;
+    --ui: Inter, system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: var(--ui); }
+  canvas { image-rendering: pixelated; image-rendering: crisp-edges; display: block; }
+  button { font-family: inherit; cursor: pointer; }
+
+  body {
+    background:
+      radial-gradient(circle at 20% 0%, rgba(56,189,248,0.06), transparent 40%),
+      radial-gradient(circle at 80% 100%, rgba(251,146,60,0.06), transparent 40%),
+      var(--bg);
+    min-height: 100vh;
+  }
+
+  /* ============ HEADER ============ */
+  .page { max-width: 1840px; margin: 0 auto; padding: 28px 32px 64px; }
+  .hdr {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 24px; padding-bottom: 20px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 24px;
+  }
+  .hdr-eyebrow {
+    font-family: var(--mono);
+    font-size: 11px; font-weight: 600; letter-spacing: 0.18em;
+    color: var(--orange); text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .hdr h1 {
+    margin: 0; font-size: 32px; font-weight: 800; letter-spacing: -0.02em;
+    color: #fff;
+  }
+  .hdr-sub { color: var(--text-dim); font-family: var(--mono); font-size: 13px; margin-top: 6px; }
+  .hdr-r { display: flex; gap: 10px; align-items: center; }
+  .pill {
+    font-family: var(--mono); font-size: 11px; font-weight: 600;
+    padding: 8px 12px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--text-dim);
+    letter-spacing: 0.08em; text-transform: uppercase;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .pill-on { color: var(--green); border-color: rgba(34,197,94,0.4); background: rgba(34,197,94,0.08); }
+  .pill-on .dot { animation: pulse 1.6s infinite; }
+  .pill-off { color: var(--text-dim); }
+  .pill-muted { color: var(--text-dim); }
+  @keyframes pulse { 0%,100% {opacity: 1;} 50% {opacity: 0.35;} }
+
+  /* ============ MAIN GRID ============ */
+  .main {
+    display: grid; grid-template-columns: 1fr 380px; gap: 24px; align-items: flex-start;
+  }
+
+  /* ============ SCENE ============ */
+  .scene-frame {
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .scene-frame-hdr {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; border-bottom: 1px solid var(--line);
+    background: rgba(10,20,36,0.6);
+  }
+  .frame-tabs { display: flex; gap: 0; }
+  .tab {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em;
+    text-transform: uppercase; padding: 6px 12px;
+    color: var(--text-dim); border-bottom: 2px solid transparent;
+  }
+  .tab.active { color: var(--orange); border-color: var(--orange); }
+  .frame-legend { display: flex; gap: 14px; font-family: var(--mono); font-size: 10px; color: var(--text-dim); letter-spacing: 0.06em; }
+  .frame-legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .frame-legend i { width: 8px; height: 8px; border-radius: 1px; display: inline-block; }
+
+  .scene-wrap {
+    position: relative; margin: 18px auto; display: block;
+    background: #050b18;
+    box-shadow: 0 0 0 1px var(--line), 0 20px 60px -20px rgba(0,0,0,0.8);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .scene-wrap canvas { position: absolute; inset: 0; }
+
+  /* Action arrows SVG sits over the canvas */
+  .action-svg {
+    position: absolute; inset: 0; pointer-events: none;
+    filter: drop-shadow(0 0 4px rgba(0,0,0,0.6));
+  }
+
+  /* Floating text labels (above each agent) */
+  .agent-label {
+    position: absolute;
+    transform: translate(-50%, -100%);
+    font-family: var(--pixel); font-size: 7px;
+    background: rgba(5,11,24,0.92);
+    border: 1px solid currentColor;
+    padding: 4px 6px;
+    border-radius: 2px;
+    letter-spacing: 0.04em;
+    line-height: 1; text-transform: uppercase;
+    cursor: pointer; white-space: nowrap;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.6), 0 0 8px rgba(56,189,248,0.15);
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+    z-index: 5;
+  }
+  .agent-label:hover { transform: translate(-50%, -110%); }
+  .agent-label.sel {
+    background: currentColor;
+    color: #050b18 !important;
+    box-shadow: 0 0 0 2px currentColor, 0 0 16px currentColor;
+  }
+  .agent-label.sel { color: #050b18; }
+  .agent-label.sel { background: currentColor; }
+
+  .action-lbl {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    font-family: var(--pixel); font-size: 7px;
+    background: rgba(5,11,24,0.95);
+    border: 1px solid currentColor;
+    padding: 5px 7px;
+    border-radius: 2px;
+    letter-spacing: 0.06em;
+    line-height: 1;
+    pointer-events: none;
+    z-index: 4;
+    box-shadow: 0 0 8px rgba(0,0,0,0.7);
+  }
+
+  .agent-hit {
+    position: absolute; cursor: pointer; z-index: 3;
+    background: transparent;
+    transition: background 0.12s ease;
+  }
+  .agent-hit:hover {
+    background: radial-gradient(circle, rgba(255,255,255,0.18), transparent 70%);
+  }
+
+  .newhire-lbl {
+    position: absolute;
+    transform: translate(-50%, 0);
+    font-family: var(--pixel); font-size: 9px;
+    color: #fde047;
+    background: rgba(5,11,24,0.92);
+    border: 1px solid #fde047;
+    padding: 6px 8px;
+    border-radius: 2px;
+    letter-spacing: 0.08em;
+    box-shadow: 0 0 12px rgba(253,224,71,0.5);
+    animation: bounce 1.4s infinite ease-in-out;
+    z-index: 6;
+  }
+  @keyframes bounce {
+    0%,100% { transform: translate(-50%, 0); }
+    50% { transform: translate(-50%, -4px); }
+  }
+
+  .scene-caption {
+    border-top: 1px solid var(--line);
+    padding: 12px 16px;
+    font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+    display: flex; gap: 10px; align-items: center;
+    background: rgba(5,11,24,0.4);
+  }
+  .cap-key { color: var(--orange); font-weight: 600; letter-spacing: 0.08em; }
+  .cap-sep { color: var(--text-mute); }
+
+  /* ============ TICKER ============ */
+  .ticker {
+    margin-top: 24px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .ticker-hdr {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 16px; border-bottom: 1px solid var(--line);
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.16em;
+    color: var(--orange); text-transform: uppercase;
+    background: rgba(10,20,36,0.6);
+  }
+  .ticker-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 1.6s infinite; }
+  .ticker-spacer { flex: 1; }
+  .ticker-meta { color: var(--text-dim); }
+  .ticker-body { max-height: 220px; overflow: auto; }
+  .ticker-row {
+    display: grid; grid-template-columns: 90px 130px 1fr;
+    gap: 12px; padding: 8px 16px;
+    font-family: var(--mono); font-size: 12px;
+    border-bottom: 1px solid rgba(28,44,68,0.5);
+  }
+  .ticker-row:last-child { border-bottom: 0; }
+  .t-time { color: var(--text-mute); }
+  .t-who { color: var(--cyan); font-weight: 600; }
+  .t-msg { color: var(--text); }
+
+  /* ============ SIDE PANEL ============ */
+  .side { display: flex; flex-direction: column; gap: 16px; }
+  .agent-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-top-width: 3px;
+    border-radius: 6px;
+    padding: 18px;
+  }
+  .agent-card-top { display: flex; gap: 14px; align-items: flex-start; }
+  .agent-portrait {
+    background: linear-gradient(180deg, #0e1a2e, #050b18);
+    border: 1px solid var(--line);
+    padding: 8px 14px;
+    border-radius: 4px;
+    image-rendering: pixelated;
+  }
+  .agent-portrait canvas { image-rendering: pixelated; }
+  .agent-layer {
+    font-family: var(--mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .agent-name {
+    font-family: var(--pixel); font-size: 14px;
+    color: #fff; line-height: 1.2; margin-bottom: 8px;
+  }
+  .agent-status {
+    font-family: var(--mono); font-size: 10px; color: var(--text-dim);
+    letter-spacing: 0.1em; text-transform: uppercase;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .status-dot { width: 6px; height: 6px; border-radius: 50%; animation: pulse 1.6s infinite; }
+  .agent-summary {
+    color: var(--text-dim); font-size: 13px; line-height: 1.5;
+    margin: 14px 0 0;
+  }
+  .agent-task {
+    margin-top: 14px; padding: 12px;
+    background: rgba(5,11,24,0.6);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--orange);
+    border-radius: 3px;
+  }
+  .task-lbl {
+    font-family: var(--mono); font-size: 9px; letter-spacing: 0.16em;
+    color: var(--orange); text-transform: uppercase; margin-bottom: 4px;
+  }
+  .task-val {
+    font-family: var(--mono); font-size: 13px; color: var(--text);
+    line-height: 1.4;
+  }
+  .agent-stats {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+    margin-top: 14px;
+  }
+  .stat {
+    background: rgba(5,11,24,0.6);
+    border: 1px solid var(--line);
+    border-radius: 3px; padding: 10px;
+    text-align: center;
+  }
+  .stat-val {
+    font-family: var(--pixel); font-size: 14px; color: var(--cyan);
+    margin-bottom: 6px;
+  }
+  .stat-lbl {
+    font-family: var(--mono); font-size: 9px; color: var(--text-dim);
+    letter-spacing: 0.08em; text-transform: uppercase;
+  }
+  .agent-actions { display: flex; gap: 8px; margin-top: 14px; }
+  .btn {
+    flex: 1; padding: 9px 12px;
+    font-family: var(--mono); font-size: 11px; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    background: rgba(5,11,24,0.8);
+    border: 1px solid var(--line);
+    color: var(--text); border-radius: 3px;
+    transition: all 0.12s ease;
+  }
+  .btn:hover { border-color: var(--cyan); color: var(--cyan); }
+  .btn-primary { background: var(--orange); border-color: var(--orange); color: #050b18; }
+  .btn-primary:hover { background: #ffa950; border-color: #ffa950; color: #050b18; }
+  .btn-danger { color: var(--red); border-color: rgba(239,68,68,0.3); }
+  .btn-danger:hover { background: var(--red); color: #fff; border-color: var(--red); }
+
+  /* roster */
+  .roster {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .roster-hdr {
+    padding: 10px 14px; font-family: var(--mono);
+    font-size: 11px; letter-spacing: 0.14em;
+    color: var(--orange); text-transform: uppercase;
+    border-bottom: 1px solid var(--line);
+    background: rgba(10,20,36,0.6);
+  }
+  .roster-grid {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px;
+    background: var(--line);
+  }
+  .roster-cell {
+    background: var(--panel);
+    border: 2px solid transparent;
+    padding: 8px; text-align: left;
+    display: flex; gap: 10px; align-items: center;
+    transition: background 0.12s ease;
+    color: var(--text);
+  }
+  .roster-cell:hover { background: rgba(56,189,248,0.06); }
+  .roster-cell.sel { background: rgba(56,189,248,0.1); }
+  .rc-portrait { flex-shrink: 0; }
+  .rc-name { font-family: var(--mono); font-size: 11px; font-weight: 600; }
+  .rc-layer { font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em; margin-top: 3px; }
+
+  .agent-label.sel { color: #050b18; }
+  .agent-label.walking { animation: shake 0.4s infinite ease-in-out; }
+  @keyframes shake { 0%,100% { margin-top: 0; } 50% { margin-top: -1px; } }
+  .poi-lbl {
+    position: absolute;
+    transform: translate(-50%, 0);
+    font-family: var(--mono); font-size: 10px;
+    color: #38bdf8; letter-spacing: 0.16em;
+    text-transform: uppercase;
+    background: rgba(5,11,24,0.7);
+    border: 1px solid rgba(56,189,248,0.4);
+    padding: 2px 6px; border-radius: 2px;
+    pointer-events: none;
+    text-shadow: 0 0 4px rgba(56,189,248,0.5);
+  }
+</style>
+
+<script type="application/json" id="speaker-notes">[]</script>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- React/ReactDOM served locally — no CDN dependency, no SRI mismatch -->
+<script src="react.js"></script>
+<script src="react-dom.js"></script>
+<script>
+  // Loader strategy:
+  //   1) try the pre-built bundle (npm run build:office-v2). Cuts ~700KB
+  //      and runs faster — preferred in production.
+  //   2) on 404 or load error, fall back to Babel-standalone + raw .jsx
+  //      so live-edit dev workflows still work without a build step.
+  (function loadOfficeV2() {
+    const head = document.head;
+    function injectScript(src, opts = {}) {
+      return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = src;
+        if (opts.type) s.type = opts.type;
+        s.onload = resolve;
+        s.onerror = reject;
+        head.appendChild(s);
+      });
+    }
+    injectScript('office_v2.bundle.js')
+      .then(() => console.info('[office-v2] using pre-built bundle'))
+      .catch(() => {
+        console.warn('[office-v2] bundle missing; falling back to Babel-standalone (slow)');
+        // No integrity check — local dev tool, CDN hash changes with minor releases
+        injectScript('https://unpkg.com/@babel/standalone@7.29.0/babel.min.js')
+          .then(() => {
+            for (const f of ['tweaks-panel.jsx','sprites.jsx','props.jsx','scene.jsx','agent-motion.jsx','live-data.jsx','app.jsx']) {
+              const s = document.createElement('script');
+              s.type = 'text/babel';
+              s.src = f;
+              head.appendChild(s);
+            }
+          })
+          .catch(() => console.error('[office-v2] Babel CDN also failed — check network'));
+      });
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,65 @@
+export const AGENTS = [
+  { id: 'superman', name: 'Superman', layer: 'L1', role: 'Market Analysis', color: '#3b82f6', outfit: 'blue_red' },
+  { id: 'doctor_strange', name: 'Doctor Strange', layer: 'L1', role: 'Macro Probability', color: '#a855f7', outfit: 'purple_red' },
+  { id: 'black_panther', name: 'Black Panther', layer: 'L1', role: 'Onchain Intelligence', color: '#64748b', outfit: 'black_vibranium' },
+  { id: 'thor', name: 'Thor', layer: 'L1', role: 'Volatility Engine', color: '#60a5fa', outfit: 'steel_blue' },
+  { id: 'aquaman', name: 'Aquaman', layer: 'L1', role: 'Liquidity Analyst', color: '#14b8a6', outfit: 'green_gold' },
+  { id: 'spider_man', name: 'Spider-Man', layer: 'L1', role: 'Anomaly Detector', color: '#ef4444', outfit: 'red_blue' },
+  { id: 'vision', name: 'Vision', layer: 'L2', role: 'Predictive Analyst', color: '#f59e0b', outfit: 'green_gold' },
+  { id: 'professor_x', name: 'Professor X', layer: 'L2', role: 'Swarm Coordinator', color: '#818cf8', outfit: 'navy_gray' },
+  { id: 'batman', name: 'Batman', layer: 'L3', role: 'Risk Guardian', color: '#fbbf24', outfit: 'dark_yellow' },
+  { id: 'iron_man', name: 'Iron Man', layer: 'L3', role: 'Execution Engineer', color: '#f97316', outfit: 'red_gold' },
+  { id: 'nick_fury', name: 'Nick Fury', layer: 'L4', role: 'Mission Commander', color: '#22c55e', outfit: 'black_trench' },
+  { id: 'portfolio_manager', name: 'Portfolio Manager', layer: 'L4', role: 'Snapshot Service', color: '#16a34a', outfit: 'blue_formal' },
+  { id: 'wolverine', name: 'Wolverine', layer: 'L4', role: 'Recovery Agent', color: '#eab308', outfit: 'yellow_blue' },
+  { id: 'flash', name: 'Flash', layer: 'L1.5', role: 'Momentum Scalper', color: '#ef4444', outfit: 'red_lightning' },
+  { id: 'deadpool', name: 'Deadpool', layer: 'Pending', role: 'Chaos Simulator', color: '#dc2626', outfit: 'red_black' },
+];
+
+export const STATIONS = [
+  { id: 'superman', x: 50, y: 80 },
+  { id: 'doctor_strange', x: 140, y: 80 },
+  { id: 'black_panther', x: 230, y: 80 },
+  { id: 'thor', x: 320, y: 80 },
+  { id: 'aquaman', x: 410, y: 80 },
+  { id: 'spider_man', x: 500, y: 80 },
+  { id: 'vision', x: 95, y: 175 },
+  { id: 'professor_x', x: 185, y: 175 },
+  { id: 'batman', x: 275, y: 175 },
+  { id: 'iron_man', x: 365, y: 175 },
+  { id: 'nick_fury', x: 455, y: 175 },
+  { id: 'portfolio_manager', x: 545, y: 175 },
+  { id: 'wolverine', x: 140, y: 265 },
+  { id: 'flash', x: 320, y: 265 },
+  { id: 'deadpool', x: 500, y: 265 },
+];
+
+export const AGENT_ID_MAP = {
+  superman: 'superman',
+  doctorstrange: 'doctor_strange',
+  doctor_strange: 'doctor_strange',
+  blackpanther: 'black_panther',
+  black_panther: 'black_panther',
+  thor: 'thor',
+  aquaman: 'aquaman',
+  spiderman: 'spider_man',
+  spider_man: 'spider_man',
+  vision: 'vision',
+  professorx: 'professor_x',
+  professor_x: 'professor_x',
+  batman: 'batman',
+  ironman: 'iron_man',
+  iron_man: 'iron_man',
+  nickfury: 'nick_fury',
+  nick_fury: 'nick_fury',
+  portfolio: 'portfolio_manager',
+  portfolio_manager: 'portfolio_manager',
+  wolverine: 'wolverine',
+  flash: 'flash',
+  deadpool: 'deadpool',
+};
+
+export function normalizeAgentId(raw) {
+  const key = String(raw || '').toLowerCase().replace(/[\s-]+/g, '_');
+  return AGENT_ID_MAP[key] || key;
+}

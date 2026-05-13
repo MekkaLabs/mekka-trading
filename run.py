@@ -91,8 +91,12 @@ def main() -> int:
     parser.add_argument(
         "--dashboard-host",
         type=str,
-        default="0.0.0.0",
-        help="Dashboard bind host (default: 0.0.0.0)",
+        default="127.0.0.1",
+        help=(
+            "Dashboard bind host. Defaults to 127.0.0.1 so the UI is only "
+            "reachable from this machine. Use 0.0.0.0 to expose it on the LAN "
+            "(also set DASHBOARD_ALLOWED_ORIGINS to a non-default origin)."
+        ),
     )
     parser.add_argument(
         "--dashboard-port",
@@ -115,13 +119,32 @@ def main() -> int:
             return asyncio.run(_run_once(equity_usd=args.equity))
         if args.dashboard:
             async def _run_both() -> None:
-                await asyncio.gather(
-                    run_forever(equity_usd=args.equity),
-                    run_dashboard_server(
-                        host=args.dashboard_host,
-                        port=args.dashboard_port,
-                    ),
-                )
+                # TaskGroup (Python 3.11+) propagates the first exception and
+                # cancels every sibling task. Without this, a crash inside
+                # run_forever would leave the dashboard running zombie-style
+                # (or vice-versa) — not what an operator expects when one
+                # half of the system dies. We catch the resulting
+                # ExceptionGroup as a plain Exception (it inherits from
+                # Exception on 3.11+) and log every wrapped error.
+                try:
+                    async with asyncio.TaskGroup() as tg:
+                        tg.create_task(run_forever(equity_usd=args.equity))
+                        tg.create_task(
+                            run_dashboard_server(
+                                host=args.dashboard_host,
+                                port=args.dashboard_port,
+                            )
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    sub = getattr(exc, "exceptions", None)
+                    if sub:
+                        for inner in sub:
+                            logger.exception(
+                                "[run] task group failure: {}", inner
+                            )
+                    else:
+                        logger.exception("[run] task group failure: {}", exc)
+                    raise
 
             asyncio.run(_run_both())
             return 0

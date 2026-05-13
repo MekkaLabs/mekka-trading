@@ -49,7 +49,10 @@ from src.models.signal import TradeAction, TradingSignal
 
 class IronMan(BaseAgent[ExecutionResult]):
     """
-    Hyperliquid Execution Engineer.
+    Multi-Exchange Execution Engineer.
+
+    Supports Hyperliquid (native SDK), Bybit, and Binance (CCXT unified API).
+    The active exchange is controlled by ``settings.active_exchange``.
 
     Usage:
         result = await IronMan().run(
@@ -62,14 +65,22 @@ class IronMan(BaseAgent[ExecutionResult]):
     def __init__(self) -> None:
         super().__init__(
             codename="IronMan",
-            role=f"Hyperliquid Execution Engineer ({settings.hyperliquid_network})",
+            role=f"Execution Engineer ({settings.active_exchange} / {settings.hyperliquid_network})",
         )
         self._exchange: Optional[Any] = None  # hyperliquid Exchange instance
         self._info: Optional[Any] = None      # hyperliquid Info instance
+        self._ccxt_exchange: Optional[Any] = None  # CCXT exchange (Bybit/Binance)
+        # [B3] Lock prevents double-init when two coroutines race into _connect_async
+        self._connect_lock: asyncio.Lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # SDK lifecycle (lazy)
     # ------------------------------------------------------------------
+
+    async def _connect_async(self) -> tuple[Any, Any]:
+        """[B3] Async wrapper with Lock to prevent concurrent SDK double-init."""
+        async with self._connect_lock:
+            return self._connect()
 
     def _connect(self) -> tuple[Any, Any]:
         """
@@ -158,20 +169,46 @@ class IronMan(BaseAgent[ExecutionResult]):
         quantity = notional / entry
 
         # --------------------------------------------------------------
+        # [036] Live-execution double-gate
+        # If paper_trading=False but live_trading_confirmed=False the
+        # settings validator already blocks startup — this is a defensive
+        # belt-and-suspenders in case settings are mutated after init.
+        # --------------------------------------------------------------
+        if not settings.paper_trading and not settings.live_trading_confirmed:
+            self._log.error(
+                "[IronMan] BLOCKED: paper_trading=False but live_trading_confirmed=False. "
+                "Set LIVE_TRADING_CONFIRMED=true after operator sign-off."
+            )
+            return ExecutionResult(
+                symbol=symbol,
+                status=ExecutionStatus.REJECTED,
+                is_paper=False,
+                side=side,
+                error="Live execution blocked: LIVE_TRADING_CONFIRMED not set. "
+                      "See docs/MAINNET-AUTHORIZATION.md.",
+            )
+
+        # --------------------------------------------------------------
         # Paper trading branch
         # --------------------------------------------------------------
         if settings.paper_trading:
             order_id = f"PAPER-{uuid.uuid4().hex[:12]}"
             sl_id = f"PAPER-SL-{uuid.uuid4().hex[:8]}"
             tp_id = f"PAPER-TP-{uuid.uuid4().hex[:8]}"
+            # [B5] Apply synthetic slippage so paper metrics reflect real-world
+            # fill costs. LONG fills at slightly higher price, SHORT at lower.
+            slip_pct = settings.paper_slippage_bps / 10_000.0
+            is_long = signal.action == TradeAction.LONG
+            avg_price = round(entry * (1.0 + slip_pct if is_long else 1.0 - slip_pct), 6)
+            paper_notional = round(quantity * avg_price, 2)
             result = ExecutionResult(
                 symbol=symbol,
                 status=ExecutionStatus.PAPER,
                 is_paper=True,
                 side=side,
                 quantity=round(quantity, 8),
-                avg_price=entry,
-                notional_usd=round(notional, 2),
+                avg_price=avg_price,
+                notional_usd=paper_notional,
                 order_id=order_id,
                 sl_order_id=sl_id,
                 tp_order_id=tp_id,
@@ -180,21 +217,33 @@ class IronMan(BaseAgent[ExecutionResult]):
                     "size_pct": size_pct,
                     "stop_loss": signal.stop_loss,
                     "take_profit": signal.take_profit,
+                    "slippage_bps": settings.paper_slippage_bps,
                 },
             )
             self._log.info(result.summary())
             return result
 
         # --------------------------------------------------------------
-        # Live execution branch
+        # Live execution branch — route to correct exchange adapter
         # --------------------------------------------------------------
         try:
-            result = await self._place_live_order(
-                signal=signal,
-                quantity=quantity,
-                leverage=leverage,
-                size_pct=size_pct,
-            )
+            active = settings.active_exchange
+            if active == "hyperliquid":
+                result = await self._place_live_order(
+                    signal=signal,
+                    quantity=quantity,
+                    leverage=leverage,
+                    size_pct=size_pct,
+                )
+            else:
+                # [Bybit/Binance] CCXT unified execution path
+                result = await self._place_ccxt_order(
+                    signal=signal,
+                    quantity=quantity,
+                    leverage=leverage,
+                    size_pct=size_pct,
+                    exchange_id=active,
+                )
             self._log.info(result.summary())
             return result
         except RetryError as exc:
@@ -227,9 +276,42 @@ class IronMan(BaseAgent[ExecutionResult]):
         leverage: int,
         size_pct: float,
     ) -> ExecutionResult:
-        exchange, _info = self._connect()
+        # [B3] Use async-safe connect to avoid double-init under concurrency
+        exchange, info = await self._connect_async()
         symbol = signal.symbol
         is_buy = signal.action == TradeAction.LONG
+
+        # [B4] Pre-flight margin check — reject early if account cannot cover
+        # the required initial margin (notional / leverage) rather than burning
+        # a retry attempt on a predictable rejection.
+        try:
+            state = await asyncio.to_thread(
+                info.user_state, settings.hyperliquid_wallet_address
+            )
+            withdrawable_str = (
+                state.get("withdrawable")
+                or state.get("crossMarginSummary", {}).get("accountValue", "0")
+            )
+            withdrawable = float(withdrawable_str or 0)
+            required_margin = (quantity * signal.entry_price) / max(leverage, 1)
+            if withdrawable < required_margin:
+                return ExecutionResult(
+                    symbol=symbol,
+                    status=ExecutionStatus.REJECTED,
+                    is_paper=False,
+                    side="long" if is_buy else "short",
+                    error=(
+                        f"Insufficient margin: need ~${required_margin:,.2f}, "
+                        f"available ${withdrawable:,.2f}"
+                    ),
+                )
+        except Exception as exc:  # noqa: BLE001
+            # Balance check failure is non-fatal — log and proceed.
+            self._log.warning(f"[IronMan] balance check failed (proceeding): {exc}")
+
+        entry_resp: Any = None
+        sl_resp: Any = None
+        tp_resp: Any = None
 
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
@@ -254,12 +336,29 @@ class IronMan(BaseAgent[ExecutionResult]):
                     False,  # not reduce-only
                 )
 
-                # Stop-loss — reduce-only trigger (opposite side)
+                # [B1/B2] Extract filled quantity BEFORE placing SL/TP.
+                # Use 0 as fallback (not quantity) so that a zero fill is
+                # detected and SL/TP are NOT placed.
+                filled_qty = self._extract_filled_size(entry_resp, fallback=0.0)
+
+                if filled_qty <= 0:
+                    # IOC order filled nothing — abort, no stops needed.
+                    return ExecutionResult(
+                        symbol=symbol,
+                        status=ExecutionStatus.REJECTED,
+                        is_paper=False,
+                        side="long" if is_buy else "short",
+                        error="IOC entry filled 0 units — SL/TP not placed",
+                        metadata={"raw_entry_resp": entry_resp},
+                    )
+
+                # SL and TP use filled_qty (not planned quantity) so they
+                # are correctly sized to the actual position.
                 sl_resp = await asyncio.to_thread(
                     exchange.order,
                     symbol,
                     not is_buy,
-                    quantity,
+                    filled_qty,
                     signal.stop_loss,
                     {"trigger": {"isMarket": True, "triggerPx": signal.stop_loss, "tpsl": "sl"}},
                     True,  # reduce-only
@@ -270,7 +369,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                     exchange.order,
                     symbol,
                     not is_buy,
-                    quantity,
+                    filled_qty,
                     signal.take_profit,
                     {"trigger": {"isMarket": True, "triggerPx": signal.take_profit, "tpsl": "tp"}},
                     True,  # reduce-only
@@ -283,7 +382,6 @@ class IronMan(BaseAgent[ExecutionResult]):
 
         # Estimate avg fill — fallback to entry if not parseable
         avg_price = self._extract_avg_px(entry_resp, fallback=signal.entry_price)
-        filled_qty = self._extract_filled_size(entry_resp, fallback=quantity)
         notional = filled_qty * avg_price
         status = (
             ExecutionStatus.FILLED
@@ -308,6 +406,195 @@ class IronMan(BaseAgent[ExecutionResult]):
                 "stop_loss": signal.stop_loss,
                 "take_profit": signal.take_profit,
                 "raw_entry_resp": entry_resp,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # CCXT unified execution (Bybit / Binance)
+    # ------------------------------------------------------------------
+
+    async def _get_ccxt_exchange(self, exchange_id: str) -> Any:
+        """Lazy-init a CCXT async exchange instance for Bybit or Binance."""
+        if self._ccxt_exchange is not None:
+            return self._ccxt_exchange
+
+        async with self._connect_lock:
+            if self._ccxt_exchange is not None:
+                return self._ccxt_exchange
+
+            import ccxt.async_support as ccxt  # noqa: WPS433
+
+            cfg: dict = {
+                "enableRateLimit": True,
+                "options": {"defaultType": "swap"},
+            }
+            if exchange_id == "bybit":
+                if not settings.bybit_api_key:
+                    raise RuntimeError(
+                        "BYBIT_API_KEY not set. Add it to .env to use Bybit live execution."
+                    )
+                cfg["apiKey"] = settings.bybit_api_key
+                cfg["secret"] = settings.bybit_api_secret
+            elif exchange_id == "binance":
+                if not settings.binance_api_key:
+                    raise RuntimeError(
+                        "BINANCE_API_KEY not set. Add it to .env to use Binance live execution."
+                    )
+                cfg["apiKey"] = settings.binance_api_key
+                cfg["secret"] = settings.binance_api_secret
+
+            exchange = getattr(ccxt, exchange_id)(cfg)
+            await exchange.load_markets()
+            self._ccxt_exchange = exchange
+            self._log.info(f"[IronMan] Connected to {exchange_id} via CCXT")
+            return exchange
+
+    async def _place_ccxt_order(
+        self,
+        signal: Any,
+        quantity: float,
+        leverage: int,
+        size_pct: float,
+        exchange_id: str,
+    ) -> ExecutionResult:
+        """Place a live order via CCXT unified API (Bybit / Binance perps).
+
+        Uses the standard CCXT perp symbol format ``BTC/USDT:USDT`` and
+        the create_order unified API. SL/TP are placed as separate reduce-only
+        stop orders after the entry fills.
+        """
+        exchange = await self._get_ccxt_exchange(exchange_id)
+        symbol = signal.symbol
+        is_buy = signal.action.value.upper() == "LONG"
+        ccxt_symbol = f"{symbol}/USDT:USDT"
+        ccxt_side = "buy" if is_buy else "sell"
+
+        # Set leverage
+        try:
+            await exchange.set_leverage(leverage, ccxt_symbol)
+        except Exception as _exc:
+            self._log.warning(f"[IronMan/{exchange_id}] set_leverage failed (proceeding): {_exc}")
+
+        # Pre-flight margin check via CCXT balance
+        try:
+            bal = await exchange.fetch_balance()
+            free_usdt = float(bal.get("USDT", {}).get("free", 0) or 0)
+            required_margin = (quantity * signal.entry_price) / max(leverage, 1)
+            if free_usdt < required_margin:
+                return ExecutionResult(
+                    symbol=symbol,
+                    status=ExecutionStatus.REJECTED,
+                    is_paper=False,
+                    side="long" if is_buy else "short",
+                    error=(
+                        f"Insufficient USDT margin: need ~${required_margin:,.2f}, "
+                        f"available ${free_usdt:,.2f}"
+                    ),
+                )
+        except Exception as _exc:
+            self._log.warning(f"[IronMan/{exchange_id}] balance check failed: {_exc}")
+
+        # ── Entry order (limit IOC) ──
+        order: Any = None
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1.0, min=1, max=8),
+            retry=retry_if_exception_type((TimeoutError, ConnectionError)),
+            reraise=True,
+        ):
+            with attempt:
+                order = await exchange.create_order(
+                    symbol=ccxt_symbol,
+                    type="limit",
+                    side=ccxt_side,
+                    amount=quantity,
+                    price=signal.entry_price,
+                    params={"timeInForce": "IOC", "reduceOnly": False},
+                )
+
+        if order is None:
+            return ExecutionResult(
+                symbol=symbol,
+                status=ExecutionStatus.REJECTED,
+                is_paper=False,
+                side="long" if is_buy else "short",
+                error="CCXT order returned None",
+            )
+
+        filled = float(order.get("filled") or 0)
+        avg_px = float(order.get("average") or signal.entry_price)
+        order_id = str(order.get("id") or "")
+
+        if filled <= 0:
+            return ExecutionResult(
+                symbol=symbol,
+                status=ExecutionStatus.REJECTED,
+                is_paper=False,
+                side="long" if is_buy else "short",
+                error="IOC order filled 0 units",
+                metadata={"raw_order": order},
+            )
+
+        # ── SL / TP reduce-only ──
+        sl_id: Optional[str] = None
+        tp_id: Optional[str] = None
+        sl_side = "sell" if is_buy else "buy"
+
+        try:
+            sl_order = await exchange.create_order(
+                symbol=ccxt_symbol,
+                type="stop_market",
+                side=sl_side,
+                amount=filled,
+                params={
+                    "stopPrice": signal.stop_loss,
+                    "reduceOnly": True,
+                },
+            )
+            sl_id = str(sl_order.get("id") or "")
+        except Exception as _exc:
+            self._log.warning(f"[IronMan/{exchange_id}] SL placement failed: {_exc}")
+
+        try:
+            tp_order = await exchange.create_order(
+                symbol=ccxt_symbol,
+                type="take_profit_market",
+                side=sl_side,
+                amount=filled,
+                params={
+                    "stopPrice": signal.take_profit,
+                    "reduceOnly": True,
+                },
+            )
+            tp_id = str(tp_order.get("id") or "")
+        except Exception as _exc:
+            self._log.warning(f"[IronMan/{exchange_id}] TP placement failed: {_exc}")
+
+        notional = filled * avg_px
+        status = (
+            ExecutionStatus.FILLED
+            if abs(filled - quantity) / max(quantity, 1e-8) < 0.05
+            else ExecutionStatus.PARTIAL
+        )
+
+        return ExecutionResult(
+            symbol=symbol,
+            status=status,
+            is_paper=False,
+            side="long" if is_buy else "short",
+            quantity=round(filled, 8),
+            avg_price=round(avg_px, 6),
+            notional_usd=round(notional, 2),
+            order_id=order_id,
+            sl_order_id=sl_id,
+            tp_order_id=tp_id,
+            metadata={
+                "exchange": exchange_id,
+                "leverage": leverage,
+                "size_pct": size_pct,
+                "stop_loss": signal.stop_loss,
+                "take_profit": signal.take_profit,
+                "raw_order": order,
             },
         )
 

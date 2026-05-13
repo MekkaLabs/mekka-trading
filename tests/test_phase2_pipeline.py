@@ -428,8 +428,8 @@ async def test_ironman_paper_path_does_not_touch_sdk():
     assert result.order_id is not None and result.order_id.startswith("PAPER-")
     assert result.sl_order_id is not None and result.sl_order_id.startswith("PAPER-SL-")
     assert result.tp_order_id is not None and result.tp_order_id.startswith("PAPER-TP-")
-    # Notional sanity: 10000 * 0.02 * 3 = 600
-    assert result.notional_usd == pytest.approx(600.0, rel=1e-6)
+    # Notional sanity: 10000 * 0.02 * 3 = 600 (±0.5% absorbs B5 3bps slippage)
+    assert result.notional_usd == pytest.approx(600.0, rel=0.005)
 
 
 @pytest.mark.asyncio

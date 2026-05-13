@@ -79,7 +79,9 @@ async def test_peak_is_monotonic_within_day(fake_repo):
     # equity dropped from peak — drawdown shows up
     assert s3.peak_equity == 11_000.0  # peak preserved
     assert s3.pnl_usd == 500.0
-    assert s3.drawdown_pct == pytest.approx(500 / 11_000.0, rel=1e-6)
+    # DailyPnLWriter rounds drawdown_pct to 6 decimals before persisting,
+    # so use absolute tolerance ≥ 1e-6 here.
+    assert s3.drawdown_pct == pytest.approx(500 / 11_000.0, abs=1e-5)
 
 
 @pytest.mark.asyncio

@@ -47,6 +47,7 @@ from src.config.settings import settings
 from src.models.execution import ExecutionResult, ExecutionStatus
 from src.models.orchestration import CycleReport  # re-exported below for back-compat
 from src.models.portfolio import EquitySnapshot, EquitySource
+from src.models.recovery import RecoveryPlan
 from src.models.risk import RiskApproval, RiskVerdict
 from src.models.signal import TradeAction, TradingSignal
 from src.persistence.repository import MekkaRepository
@@ -92,6 +93,15 @@ class NickFury(BaseAgent[list[CycleReport]]):
             name="vision_fallback",
             threshold=settings.max_consecutive_vision_fallbacks,
         )
+        # Story 030 — Wolverine recovery agent (used in monitor cycle)
+        from src.agents.wolverine import Wolverine
+        self._wolverine = Wolverine()
+        # Story 031 — Vision Critic (off by default; used per cycle when on)
+        from src.agents.vision_critic import VisionCritic
+        self._vision_critic = VisionCritic()
+        # Story 035 — Telegram alerter (push only). Toggle via env.
+        from src.services.telegram_alerter import TelegramAlerter
+        self._telegram = TelegramAlerter()
 
     # ------------------------------------------------------------------
     # Public API
@@ -112,6 +122,16 @@ class NickFury(BaseAgent[list[CycleReport]]):
             },
         )
         self._log.info("[NickFury] Pipeline initialized")
+
+    def reset_breakers(self) -> None:
+        """
+        Reset all ConsecutiveBreakers to zero streak.
+        Call after releasing the kill switch (/resume) to prevent immediate
+        retrip due to residual streak from before the halt.
+        """
+        self._exec_error_breaker.reset()
+        self._vision_fallback_breaker.reset()
+        self._log.info("[NickFury] ConsecutiveBreakers reset after kill switch release")
 
     async def shutdown(self) -> None:
         """Close exchange connections held by sub-agents."""
@@ -154,6 +174,32 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 severity="WARNING",
                 message="Kill switch active",
             )
+            # Story 035 — push the kill-switch event so the operator
+            # actually hears about it.
+            await self._telegram.alert(
+                event="RISK_KILL_SWITCH",
+                severity="ERROR",
+                agent="NickFury",
+                message="Kill switch active — main cycle skipped",
+                payload={"source": "pre_cycle_check"},
+            )
+            # [A4] Best-effort equity snapshot while halted so daily_pnl
+            # remains queryable and Batman's next drawdown read sees fresh data.
+            try:
+                ks_snapshot = await self._portfolio.run()
+                ks_trades_today = await MekkaRepository.count_trades_today()
+                ks_equity = (
+                    equity_usd if equity_usd is not None else ks_snapshot.equity_usd
+                )
+                await self._daily_pnl.record_cycle(
+                    equity_usd=ks_equity,
+                    trades_count_today=ks_trades_today,
+                    snapshot=ks_snapshot,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._log.warning(
+                    f"[NickFury] KS: daily_pnl halted-snapshot failed: {exc}"
+                )
             return []
 
         # Read portfolio state for Batman's risk checks
@@ -187,8 +233,12 @@ class NickFury(BaseAgent[list[CycleReport]]):
             p.size * p.entry_price for p in (snapshot.positions or [])
         )
 
+        # Runtime mode — hot-reload trading assets without restart
+        from src.config.runtime_mode import get_params as _get_mode_params
+        _active_assets = _get_mode_params().get("trading_assets", settings.trading_assets)
+
         reports: list[CycleReport] = []
-        for symbol in settings.trading_assets:
+        for symbol in _active_assets:
             try:
                 report = await self._cycle_for_symbol(
                     symbol=symbol,
@@ -216,6 +266,14 @@ class NickFury(BaseAgent[list[CycleReport]]):
                     agent="NickFury",
                     event="CYCLE_ERROR",
                     severity="ERROR",
+                    symbol=symbol,
+                    message=str(exc),
+                )
+                # Story 035 — best-effort Telegram push (filtered internally)
+                await self._telegram.alert(
+                    event="CYCLE_ERROR",
+                    severity="ERROR",
+                    agent="NickFury",
                     symbol=symbol,
                     message=str(exc),
                 )
@@ -253,6 +311,33 @@ class NickFury(BaseAgent[list[CycleReport]]):
 
         # 2. Vision strategic decision
         signal = await self._vision.run(analysis=analysis)
+
+        # 2b. Vision Critic — second-look (Story 031, off by default).
+        # Save the post-critique signal so audit reflects what Batman
+        # actually saw, but log the critique separately.
+        if settings.vision_critic_enabled:
+            try:
+                from src.agents.vision_critic import apply_critique
+                critique = await self._vision_critic.run(
+                    analysis=analysis,
+                    signal=signal,
+                )
+                await MekkaRepository.log_event(
+                    agent="VisionCritic",
+                    event=f"CRITIQUE_{critique.action.value}",
+                    severity="INFO",
+                    symbol=symbol,
+                    message=critique.summary(),
+                    payload=critique.to_audit_payload(),
+                )
+                if critique.is_actionable():
+                    signal = apply_critique(signal=signal, critique=critique)
+            except Exception as exc:  # noqa: BLE001
+                # Critic must NEVER break the cycle. Defensive ENDORSE
+                # via fallback path is already handled inside _run, but
+                # any unexpected error here just logs and continues.
+                self._log.warning(f"[NickFury] critic skipped: {exc}")
+
         signal_id = await MekkaRepository.save_signal(signal)
 
         # 3. Batman risk gate
@@ -278,6 +363,16 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 "breached": approval.breached_limits,
             },
         )
+        # Story 035 — only KILL_SWITCH triggers a push by default
+        if approval.verdict == RiskVerdict.KILL_SWITCH:
+            await self._telegram.alert(
+                event="RISK_KILL_SWITCH",
+                severity="ERROR",
+                agent="Batman",
+                symbol=symbol,
+                message=approval.summary(),
+                payload={"breached": approval.breached_limits},
+            )
 
         if not approval.is_executable:
             return CycleReport(symbol=symbol, signal=signal, approval=approval)
@@ -302,6 +397,19 @@ class NickFury(BaseAgent[list[CycleReport]]):
             message=execution.summary(),
             payload={"is_paper": execution.is_paper},
         )
+        # Story 035 — push on ERROR / REJECTED outcomes
+        if execution.status in (ExecutionStatus.ERROR, ExecutionStatus.REJECTED):
+            await self._telegram.alert(
+                event=f"EXEC_{execution.status.value}",
+                severity="ERROR",
+                agent="IronMan",
+                symbol=symbol,
+                message=execution.summary(),
+                payload={"error": execution.error or "", "is_paper": execution.is_paper},
+            )
+        # Rich trade-opened notification for every FILLED / PAPER execution
+        elif execution.status in (ExecutionStatus.FILLED, ExecutionStatus.PAPER):
+            await self._telegram.trade_opened(execution=execution, signal=signal)
 
         return CycleReport(
             symbol=symbol,
@@ -361,23 +469,272 @@ class NickFury(BaseAgent[list[CycleReport]]):
             )
 
     # ------------------------------------------------------------------
+    # Market price helper (for Wolverine real-time drawdown)
+    # ------------------------------------------------------------------
+
+    async def _fetch_current_mids(self, symbols: list[str]) -> dict[str, float]:
+        """
+        Fetch last mid-prices for ``symbols`` from Hyperliquid public REST.
+        Uses the ``/info`` endpoint (no auth required) so it works in both
+        paper and live modes. Returns an empty dict on any failure — Wolverine
+        degrades gracefully when prices are absent.
+        """
+        if not symbols:
+            return {}
+        try:
+            import aiohttp  # noqa: WPS433
+            url = settings.hyperliquid_base_url + "/info"
+            payload = {"type": "allMids"}
+            timeout = aiohttp.ClientTimeout(total=5.0)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload) as resp:
+                    if resp.status != 200:
+                        return {}
+                    data: dict = await resp.json()
+            result: dict[str, float] = {}
+            for sym in symbols:
+                raw = data.get(sym) or data.get(f"{sym}-USD")
+                if raw is not None:
+                    try:
+                        result[sym] = float(raw)
+                    except (TypeError, ValueError):
+                        pass
+            return result
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(
+                f"[NickFury] _fetch_current_mids failed (Wolverine will use entry_price): {exc}"
+            )
+            return {}
+
+    # ------------------------------------------------------------------
     # Monitor cycle
     # ------------------------------------------------------------------
 
     async def run_monitor_cycle(self) -> dict:
-        """Lightweight position-monitor stub. Will be expanded by Wolverine."""
+        """
+        Monitor cycle (Story 030). Reads current portfolio state via
+        Portfolio Manager and lets Wolverine produce a RecoveryPlan.
+
+        Wolverine is **read-only** on the exchange. The plan is logged
+        to `audit_log` so the operator and the dashboard can see what
+        Wolverine intended; actually modifying SL/TP on Hyperliquid is
+        a future story (Iron Man integration).
+
+        If the kill switch is already engaged, the cycle short-circuits.
+        If Wolverine itself engages the kill switch (intraday drawdown
+        breach), the audit event records that.
+        """
         if is_kill_switch_active():
             return {"status": "halted", "reason": "kill_switch"}
-        # Placeholder: no real position fetch yet — will land with portfolio
-        # manager. For now we just emit a heartbeat audit event.
+
+        # Pull a fresh snapshot so Wolverine sees current positions.
+        try:
+            snapshot = await self._portfolio.run()
+        except Exception as exc:  # noqa: BLE001
+            self._log.error(f"[NickFury] monitor: portfolio.run failed: {exc}")
+            await MekkaRepository.log_event(
+                agent="NickFury",
+                event="CYCLE_ERROR",
+                severity="ERROR",
+                message=f"monitor: portfolio.run failed: {exc}",
+            )
+            return {"status": "error", "reason": str(exc)}
+
+        # [A1] Fetch real-time prices so Wolverine can compute actual
+        # unrealized PnL for each open position (vs. always seeing 0).
+        open_symbols = [p.symbol for p in (snapshot.positions or [])]
+        current_prices = await self._fetch_current_mids(open_symbols)
+
+        # Wolverine reasons over the snapshot with live prices.
+        try:
+            plan = await self._wolverine.run(
+                snapshot=snapshot,
+                current_prices=current_prices or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log.exception(f"[NickFury] monitor: wolverine.run failed: {exc}")
+            await MekkaRepository.log_event(
+                agent="Wolverine",
+                event="CYCLE_ERROR",
+                severity="ERROR",
+                message=f"wolverine.run failed: {exc}",
+            )
+            return {"status": "error", "reason": str(exc)}
+
+        # Persist the plan as an audit event.
         await MekkaRepository.log_event(
-            agent="NickFury",
-            event="MONITOR_HEARTBEAT",
-            severity="DEBUG",
-            message="Monitor cycle ran",
-            payload={"timestamp": datetime.now(timezone.utc).isoformat()},
+            agent="Wolverine",
+            event="MONITOR_RECOVERY_PLAN",
+            severity="WARNING" if plan.kill_switch_engaged else "INFO",
+            message=plan.summary(),
+            payload=plan.to_audit_payload(),
         )
-        return {"status": "ok"}
+        # Story 035 — only push when Wolverine engaged kill switch
+        if plan.kill_switch_engaged:
+            await self._telegram.alert(
+                event="MONITOR_RECOVERY_PLAN",
+                severity="ERROR",
+                agent="Wolverine",
+                message=plan.summary(),
+                payload={
+                    "kill_switch_engaged": True,
+                    "intraday_drawdown_pct": plan.intraday_drawdown_pct,
+                    "positions": len(plan.positions),
+                },
+            )
+
+        # [C1] Execute actionable positions — Wolverine reasons, IronMan acts.
+        actions_taken = 0
+        if plan.needs_action:
+            actions_taken = await self._execute_recovery_plan(plan, current_prices)
+
+        # [C2] Run Cyclops — SL/TP monitor for paper positions
+        cyclops_triggered = 0
+        try:
+            from src.agents.cyclops import Cyclops  # noqa: WPS433
+            cyclops = Cyclops()
+            cyclops_triggered = await cyclops.run(current_prices=current_prices)
+        except Exception as _exc:
+            self._log.warning(f"[NickFury] Cyclops skipped: {_exc}")
+
+        return {
+            "status": "halted" if plan.kill_switch_engaged else "ok",
+            "positions_monitored": len(plan.positions),
+            "intraday_drawdown_pct": plan.intraday_drawdown_pct,
+            "kill_switch_engaged": plan.kill_switch_engaged,
+            "recovery_actions_taken": actions_taken,
+            "cyclops_triggered": cyclops_triggered,
+        }
+
+    async def _execute_recovery_plan(
+        self,
+        plan: RecoveryPlan,
+        current_prices: dict[str, float],
+    ) -> int:
+        """[C1] Execute actionable positions from a Wolverine RecoveryPlan.
+
+        For CLOSE / EMERGENCY_CLOSE: create an offsetting paper trade that
+        nets out the position. For SCALE_OUT: close 50% of the position.
+        TIGHTEN_STOP / TRAIL_STOP are advisory only (no order modification
+        implemented yet — logged for operator awareness).
+
+        Returns the count of positions where an action was taken.
+        """
+        from src.models.recovery import RecoveryAction  # noqa: WPS433
+
+        _ACTIONABLE = {RecoveryAction.CLOSE, RecoveryAction.EMERGENCY_CLOSE, RecoveryAction.SCALE_OUT}
+        actions_taken = 0
+
+        for pos_update in plan.positions:
+            if pos_update.action not in _ACTIONABLE:
+                continue
+
+            symbol = pos_update.symbol.upper()
+            mark = (
+                current_prices.get(symbol)
+                or current_prices.get(symbol.upper())
+                or pos_update.entry_price
+            )
+
+            # Determine close quantity
+            if pos_update.action == RecoveryAction.SCALE_OUT:
+                close_qty = round(pos_update.size * 0.5, 8)  # close half
+            else:
+                close_qty = pos_update.size  # close all
+
+            if close_qty < 1e-8:
+                continue
+
+            # Opposite side = close direction
+            close_side = "short" if pos_update.side.lower() == "long" else "long"
+
+            if settings.paper_trading:
+                # Paper: insert offsetting trade directly
+                import uuid  # noqa: WPS433
+                from src.models.execution import ExecutionResult, ExecutionStatus  # noqa: WPS433
+
+                close_result = ExecutionResult(
+                    symbol=symbol,
+                    status=ExecutionStatus.PAPER,
+                    is_paper=True,
+                    side=close_side,
+                    quantity=close_qty,
+                    avg_price=round(mark, 6),
+                    notional_usd=round(close_qty * mark, 2),
+                    order_id=f"WOLVERINE-CLOSE-{uuid.uuid4().hex[:10]}",
+                    metadata={
+                        "triggered_by": "wolverine",
+                        "action": pos_update.action.value,
+                        "reason": pos_update.reason,
+                        "mark_price": mark,
+                    },
+                )
+                try:
+                    await MekkaRepository.save_trade(execution=close_result)
+                    await MekkaRepository.log_event(
+                        agent="Wolverine",
+                        event="RECOVERY_ACTION_TAKEN",
+                        severity="WARNING",
+                        symbol=symbol,
+                        message=(
+                            f"[C1] {pos_update.action.value}: closed {close_qty:.6f} {symbol} "
+                            f"@ {mark:,.4f} ({pos_update.reason})"
+                        ),
+                        payload={
+                            "action": pos_update.action.value,
+                            "symbol": symbol,
+                            "close_qty": close_qty,
+                            "close_price": mark,
+                            "reason": pos_update.reason,
+                        },
+                    )
+                    actions_taken += 1
+                    self._log.warning(
+                        f"[Wolverine/C1] {pos_update.action.value} executed — "
+                        f"{close_qty:.6f} {symbol} @ {mark:,.4f}"
+                    )
+                except Exception as _exc:  # noqa: BLE001
+                    self._log.error(f"[Wolverine/C1] save_trade failed for {symbol}: {_exc}")
+            else:
+                # Live: delegate to IronMan via a synthetic close signal
+                try:
+                    from src.models.signal import TradeAction, TradingSignal  # noqa: WPS433
+                    from src.models.risk import RiskApproval, RiskVerdict  # noqa: WPS433
+
+                    close_action = (
+                        TradeAction.SHORT if pos_update.side.lower() == "long" else TradeAction.LONG
+                    )
+                    close_signal = TradingSignal(
+                        symbol=symbol,
+                        action=close_action,
+                        confidence=1.0,
+                        entry_price=mark,
+                        stop_loss=mark * (0.99 if close_action == TradeAction.LONG else 1.01),
+                        take_profit=mark * (1.01 if close_action == TradeAction.LONG else 0.99),
+                        size_pct=0.0,
+                        leverage=pos_update.leverage,
+                        reasoning=f"Wolverine {pos_update.action.value}: {pos_update.reason}",
+                    )
+                    approval = RiskApproval(
+                        verdict=RiskVerdict.APPROVED,
+                        adjusted_size_pct=close_qty * mark / max(float(settings.paper_equity_usd), 1),
+                        adjusted_leverage=pos_update.leverage,
+                        reasons=["wolverine_recovery"],
+                        breached_limits=[],
+                    )
+                    exec_result = await self._ironman.run(
+                        signal=close_signal,
+                        approval=approval,
+                        equity_usd=float(settings.paper_equity_usd),
+                    )
+                    await MekkaRepository.save_trade(execution=exec_result)
+                    actions_taken += 1
+                except Exception as _exc:  # noqa: BLE001
+                    self._log.error(
+                        f"[Wolverine/C1] live close failed for {symbol}: {_exc}"
+                    )
+
+        return actions_taken
 
 
 # ---------------------------------------------------------------------------

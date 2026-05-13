@@ -4,8 +4,8 @@
 arquitetural. Stories abaixo são lidas em ordem numérica dentro de cada
 bloco.
 
-Última story entregue: **028** (Contract Hardening).
-Próxima planejada: **029** (Wolverine — Recovery Agent).
+Última story entregue: **046** (Equity dinâmica, Wolverine execution [C1], Cyclops [C2], equity dinâmica [C3], Bybit adapter).
+Pendentes: gates humanos H1, H3, H5, H6 (ação do operador) · H2 auto-monitorado · H4 ✅ entregue.
 
 ---
 
@@ -72,34 +72,55 @@ Hyperliquid clearinghouseState, com fallback paper.
 
 - [026 — Portfolio Manager](story-026-portfolio-manager.md)
 
-## Milestone 8 — Recovery + Daily PnL
-Daily PnL writer fechando o ciclo de drawdown que Batman lê, depois
-contract hardening, depois Wolverine como recovery agent + monitor
-cycle real.
+## Milestone 8 — Daily PnL + Hardening + Safety
+Daily PnL writer fechando o ciclo de drawdown que Batman lê, contract
+hardening uniforme, e a rede de segurança operacional (cap de capital
+total + breakers consecutivos + kill switch script).
 
 - [027 — Daily PnL Writer](story-027-daily-pnl-writer.md)
 - [028 — Contract Hardening](story-028-contract-hardening.md)
-- 029 — Wolverine Recovery Agent (planejada)
+- [029 — Safety Net](story-029-safety-net.md)
 
-## Milestone 9 — LLM Hardening (planned)
-Vision Critic toggle, audit log harmonization TS↔Python.
+## Milestone 9 — Recovery + LLM Hardening
+Wolverine como recovery agent + monitor cycle real, Vision Critic
+opcional, audit log unificado TS↔Python.
 
-- 030 — Vision Critic (planejada)
-- 031 — Audit Single Source of Truth (planejada)
+- [030 — Wolverine Recovery Agent](story-030-wolverine.md)
+- [031 — Vision Critic](story-031-vision-critic.md)
+- [032 — Audit Single Source of Truth (Python reader)](story-032-audit-single-source.md)
+- [032b — TS Audit Shim (SQLite Mirror)](story-032b-ts-audit-shim.md)
 
-## Milestone 10 — Tactical + Simulation (planned)
+## Milestone 10 — Tactical + Simulation
 Flash (sub-loop intra-candle), Deadpool (backtest replay), Telegram bot
 rico.
 
-- 032 — Flash (planejada)
-- 033 — Deadpool (planejada)
-- 034 — Telegram Bot (planejada)
+- [033 — Flash](story-033-flash.md)
+- [034 — Deadpool (Performance Analytics Agent)](story-034-deadpool.md)
+- [035 — Telegram Alerter (push-only)](story-035-telegram-alerter.md)
+- [035b — Telegram Inbound Commands](story-035b-telegram-inbound.md)
 
-## Milestone 11 — Mainnet Readiness (planned)
-Checklist formal, gate humano, cobertura ≥ 80% em Vision/Batman/Iron
-Man, observability harmonizada.
+## Milestone 11 — Mainnet Readiness
+Checklist formal, gate humano duplo (double-gate settings + preflight
+script), template de autorização com assinatura humana obrigatória,
+infra de gates H1–H6 com auto-check H2 via Deadpool e comandos Telegram.
 
-- 035 — Mainnet Readiness (planejada)
+- [036 — Mainnet Readiness](story-036-mainnet-readiness.md)
+- [037 — Gate Infrastructure (H1–H6)](story-037-gate-infra.md)
+
+## Milestone 12 — Dashboard + Analytics
+Dashboard REST API completo, endpoint /api/performance, relatório diário
+automático do Deadpool gravado no banco com audit trail.
+
+- [038 — Dashboard /api/performance](story-038-dashboard-performance.md)
+- [039 — DailyPerformanceWriter](story-039-daily-perf-writer.md)
+
+## Milestone 13 — Operator UX
+
+Dashboard v2 com navegação por páginas, topbar financeiro, blocos
+personalizáveis e botão TradeNow com fluxo completo de análise de agentes,
+confirmação e audit trail. Security fixes from squad reviews (Stories 040+).
+
+- [040 — Dashboard v2: Pages, TopBar, Widgets, TradeNow](story-040-dashboard-v2.md)
 
 ---
 
@@ -113,3 +134,35 @@ Man, observability harmonizada.
    Mantidas · Pipeline End-to-End (se aplicável) · Acceptance ·
    What's Next · Files Changed`.
 4. Não fechar a story sem `pytest -v` verde + `npm test` verde.
+
+## Milestone 14 — Live Execution Pipeline
+
+Fluxo TradeNow completo de ponta a ponta: cache de recomendações, Batman→IronMan
+wired, paper e live mode funcionando. Prefs de widget persistidas no servidor.
+
+- [041 — Broker Adapter: IronMan wired into TradeNow](story-041-broker-adapter.md)
+- [042 — Widget Prefs: /api/prefs server-side](story-042-prefs-endpoint.md)
+- [043 — Paper Trade Persistence & Positions Panel](story-043-paper-trade-persistence.md)
+
+## Milestone 15 — Operator Control
+
+Controle operacional manual: fechar posições individualmente, modos de risco
+configuráveis (Super Agressivo / Altcoins) com toggles persistidos.
+
+- [044 — Trading Modes, Close Position & Re-analyze](story-044-trading-modes-close-position.md)
+
+## Milestone 16 — Exchange-Grade Monitoring
+
+Painel Live Trading estilo exchange: gráfico candlestick (lightweight-charts) com preços
+ao vivo via Hyperliquid WebSocket, posições abertas com PnL em tempo real, e revisão
+arquitetural completa dos 15 agentes AIOS-Core com proposta de 6 novos agentes.
+
+- [045 — Live Trading Panel + Squad Review](story-045-live-trading-panel.md)
+
+## Milestone 17 — Bug Fixes Críticos + Multi-Exchange
+
+Fecha os 3 bugs críticos do Squad Review: equity dinâmica [C3], Wolverine RecoveryPlan
+execution [C1], e agente Cyclops SL/TP monitor [C2]. Adiciona Bybit/Binance como
+exchanges alternativas via CCXT (configurável por env var).
+
+- [046 — Equity Dinâmica, Wolverine Execution, Cyclops & Bybit Adapter](story-046-dynamic-equity-wolverine-cyclops-bybit.md)
