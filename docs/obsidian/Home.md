@@ -4,17 +4,30 @@ type: dashboard
 tags: [dashboard, home, mekka-trading]
 project: mekka-trading
 created: 2026-05-07
-updated: 2026-05-07
+updated: 2026-05-13
 ---
 
 # 🧠 Mekka Trading — Segundo Cérebro
 
-> **Projeto:** `mekka-trading` (independente de `mekkalabs-docs` e `AIOX-Docs`)
+> **Projeto:** `mekka-trading`
 > **Repositório:** https://github.com/labsmekka/mekka-trading
 > **Cópia espelhada no vault Obsidian:** `~/Documents/Obsidian Vault/mekka-trading/`
 
-Sistema de Trading Autônomo orquestrado por IA, baseado em AIOX Core + Hyperliquid (mock).
+Sistema de Trading Autônomo orquestrado por IA, baseado em AIOX Core + Hyperliquid (multi-exchange).
 Este é o vault de conhecimento do projeto: arquitetura, decisões, agentes, runbooks e aprendizados.
+
+---
+
+## 🚀 Estado Atual — 2026-05-13
+
+| Item | Status |
+|---|---|
+| **Última story entregue** | `046 — Equity Dinâmica, Wolverine Execution, Cyclops & Bybit` |
+| **Milestone atual** | `17 — Bug Fixes Críticos + Multi-Exchange` |
+| **Modo padrão** | `PAPER_TRADING=True` |
+| **Exchanges suportadas** | Hyperliquid (primary), Bybit, Binance (via CCXT) |
+| **Dashboard** | `http://localhost:8787` com WebSocket em tempo real |
+| **Agentes ativos** | 16 (inclui Cyclops — novo em Story 046) |
 
 ---
 
@@ -39,7 +52,6 @@ Este é o vault de conhecimento do projeto: arquitetura, decisões, agentes, run
 | [[50 - MOCs]] | Mapas de Conteúdo (índices vivos) |
 | [[60 - Daily]] | Notas diárias / log de trabalho |
 | [[70 - Templates]] | Templates reutilizáveis |
-| [[80 - Attachments]] | Imagens, PDFs, anexos |
 
 ---
 
@@ -54,8 +66,6 @@ FROM "10 - Projects"
 WHERE status != "done" AND status != "archived"
 SORT due ASC
 ```
-
-> *Se a tabela acima estiver vazia, instale o plugin **Dataview** (Settings → Community plugins → Browse → Dataview).*
 
 ---
 
@@ -86,18 +96,9 @@ LIMIT 10
 
 ---
 
-## 📌 Atalhos úteis
-
-- **Captura rápida**: novas notas vão sempre para `00 - Inbox` — depois você move para o lugar certo
-- **Daily Note**: `Ctrl/Cmd + P` → "Daily notes: Open today's daily note"
-- **Templates**: `Ctrl/Cmd + P` → "Templates: Insert template"
-- **Graph view**: `Ctrl/Cmd + G` para ver conexões entre notas
-
----
-
 ## 🔗 Recursos do Projeto
 
-- Repositório: *(adicione a URL após criar o repo no GitHub)*
-- README do projeto: [[../../README|README.md]]
-- Stories: `docs/stories/` (24 stories já implementadas)
-- Squads: `squads/` (14 squads especializadas)
+- Repositório: https://github.com/labsmekka/mekka-trading
+- Stories entregues: 001–046 (17 milestones)
+- Squads baseline: `alpha-risk-command`, `hyperliquid-mock-ops`, `market-intel-lab`
+- Projeto ativo: [[10 - Projects/Projeto - Mekka Trading|Projeto — Mekka Trading]]
