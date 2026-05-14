@@ -161,6 +161,16 @@ class Vision(BaseAgent[TradingSignal]):
 
         prompt = analysis.to_prompt()
 
+        # Story 063 — Episodic Memory: enrich prompt with historical pattern context.
+        # We attempt to fetch LONG and SHORT memories; the LLM receives the one
+        # that is most directionally relevant (both if uncertain). Fails silently.
+        try:
+            memory_block = await self._build_memory_block(analysis)
+            if memory_block:
+                prompt = prompt + "\n\n" + memory_block
+        except Exception as _mem_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision] Episodic memory fetch skipped: {_mem_exc}")
+
         try:
             raw = await self._call_llm(prompt)
         except (APITimeoutError, RateLimitError, APIError) as exc:
@@ -194,6 +204,50 @@ class Vision(BaseAgent[TradingSignal]):
 
         self._log.info(f"[Vision] {signal.summary()}")
         return signal
+
+    # ------------------------------------------------------------------
+    # Story 063 — Episodic Memory helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _build_memory_block(analysis: "MarketAnalysis") -> str:  # type: ignore[name-defined]
+        """
+        Query AgentMemoryStore for similar historical LONG and SHORT patterns
+        and return a compact text block to append to Vision's user prompt.
+
+        Returns an empty string if the DB has no resolved memories yet,
+        or if the import / query fails — Vision always gets a prompt either way.
+        """
+        from src.persistence.agent_memory import AgentMemoryStore  # noqa: WPS433
+
+        chart = analysis.chart
+        symbol = analysis.symbol
+        rsi = chart.rsi_14 if chart else None
+        trend = chart.trend.value if chart else "NEUTRAL"
+
+        # Query both directions so Vision can see context for LONG and SHORT
+        long_ctx = await AgentMemoryStore.query_similar(
+            symbol=symbol, action="LONG", rsi=rsi, trend=trend, limit=12
+        )
+        short_ctx = await AgentMemoryStore.query_similar(
+            symbol=symbol, action="SHORT", rsi=rsi, trend=trend, limit=12
+        )
+
+        snippets: list[str] = []
+        if long_ctx.has_data:
+            snippets.append(AgentMemoryStore.build_context_snippet(long_ctx))
+        if short_ctx.has_data:
+            snippets.append(AgentMemoryStore.build_context_snippet(short_ctx))
+
+        if not snippets:
+            return ""
+
+        return (
+            "=== Historical Pattern Memory ===\n"
+            + "\n\n".join(snippets)
+            + "\n\nUse this historical context to calibrate your confidence. "
+            "Low win-rate patterns warrant higher conservatism or HOLD."
+        )
 
     # ------------------------------------------------------------------
     # LLM call

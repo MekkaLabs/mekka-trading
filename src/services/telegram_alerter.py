@@ -281,6 +281,294 @@ class TelegramAlerter:
             self._log.warning(f"trade_opened alert failed (suppressed): {exc}")
             return False
 
+    async def position_closed(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        close_price: float,
+        avg_entry: float,
+        qty: float,
+        trigger_reason: str,
+        sl_trigger: Optional[float] = None,
+        tp_trigger: Optional[float] = None,
+    ) -> bool:
+        """
+        Rich notification when Cyclops closes a paper position via SL or TP.
+
+        Includes: symbol, side, close price, entry, PnL realizado, trigger type.
+        Never throws.
+        """
+        if not settings.telegram_enabled:
+            return False
+
+        is_sl = "SL" in trigger_reason.upper()
+        is_tp = "TP" in trigger_reason.upper()
+        trigger_emoji = "🛑 STOP LOSS" if is_sl else ("🎯 TAKE PROFIT" if is_tp else "⚡ TRIGGER")
+        side_upper = side.upper()
+
+        # Realized PnL
+        if side_upper == "LONG":
+            pnl_usd = (close_price - avg_entry) * qty
+        else:
+            pnl_usd = (avg_entry - close_price) * qty
+        pnl_pct = (pnl_usd / (avg_entry * qty) * 100) if avg_entry * qty else 0.0
+        pnl_emoji = "🟢" if pnl_usd >= 0 else "🔴"
+
+        # SL/TP distances from entry
+        sl_dist_str = ""
+        if sl_trigger and avg_entry:
+            d = abs(sl_trigger - avg_entry) / avg_entry * 100
+            sl_dist_str = f"  (-{d:.2f}%)"
+        tp_dist_str = ""
+        if tp_trigger and avg_entry:
+            d = abs(tp_trigger - avg_entry) / avg_entry * 100
+            tp_dist_str = f"  (+{d:.2f}%)"
+
+        lines = [
+            f"{trigger_emoji} *Posição Fechada — {symbol}*",
+            "",
+            f"Motivo    : {trigger_reason}",
+            f"Direção   : {'🟢 LONG' if side_upper == 'LONG' else '🔴 SHORT'}",
+            f"Entrada   : ${avg_entry:,.4f}",
+            f"Fechamento: ${close_price:,.4f}",
+            f"Qtd       : {qty:.6f}",
+            "",
+            f"PnL Real. : {pnl_emoji} ${pnl_usd:+,.2f}  ({pnl_pct:+.2f}%)",
+        ]
+        if sl_trigger:
+            lines.append(f"SL nível  : ${sl_trigger:,.4f}{sl_dist_str}")
+        if tp_trigger:
+            lines.append(f"TP nível  : ${tp_trigger:,.4f}{tp_dist_str}")
+        lines += [
+            "",
+            f"Modo      : {settings.mode_label}  (paper)",
+        ]
+
+        text = "\n".join(lines)
+        try:
+            return await self._post(text, parse_mode="Markdown")
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"position_closed alert failed (suppressed): {exc}")
+            return False
+
+    async def scale_out_alert(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        close_price: float,
+        avg_entry: float,
+        closed_qty: float,
+        remaining_qty: float,
+        tp1_trigger: float,
+        tp2_trigger: float,
+        new_sl: float,
+        pnl_usd: float,
+    ) -> bool:
+        """
+        Story 065 — Notification when Cyclops fires a partial TP (scale-out).
+
+        Informs that 50 % of the position was closed at TP1 and the stop
+        was moved to breakeven. Never throws.
+        """
+        if not settings.telegram_enabled:
+            return False
+
+        side_upper = side.upper()
+        pnl_emoji = "🟢" if pnl_usd >= 0 else "🔴"
+        pnl_pct = (pnl_usd / (avg_entry * closed_qty) * 100) if avg_entry * closed_qty else 0.0
+
+        lines = [
+            f"⚡ *Partial TP — Scale-out {symbol}*",
+            "",
+            f"Direção         : {'🟢 LONG' if side_upper == 'LONG' else '🔴 SHORT'}",
+            f"Entrada (avg)   : ${avg_entry:,.4f}",
+            f"Fechado em (TP1): ${close_price:,.4f}",
+            f"Qtd fechada     : {closed_qty:.6f}  (50%)",
+            f"Qtd restante    : {remaining_qty:.6f}  (50%)",
+            "",
+            f"PnL parcial     : {pnl_emoji} ${pnl_usd:+,.2f}  ({pnl_pct:+.2f}%)",
+            "",
+            f"Stop → breakeven: ${new_sl:,.4f}",
+            f"TP2 alvo        : ${tp2_trigger:,.4f}",
+            "",
+            "🏹 Posição restante corre sem risco de perda.",
+            f"Modo            : {settings.mode_label}  (paper)",
+        ]
+        text = "\n".join(lines)
+        try:
+            return await self._post(text, parse_mode="Markdown")
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"scale_out_alert failed (suppressed): {exc}")
+            return False
+
+    async def wolverine_action(
+        self,
+        *,
+        action: str,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        mark_price: float,
+        size: float,
+        unrealized_pnl_usd: float,
+        reason: str,
+        new_sl: Optional[float] = None,
+        new_tp: Optional[float] = None,
+        close_qty: Optional[float] = None,
+        is_paper: bool = True,
+    ) -> bool:
+        """
+        Rich notification when Wolverine takes action on a position.
+
+        Covers: TIGHTEN_STOP, TRAIL_STOP, SCALE_OUT, CLOSE, EMERGENCY_CLOSE.
+        Never throws.
+        """
+        if not settings.telegram_enabled:
+            return False
+
+        action_upper = action.upper()
+
+        # Emoji + label per action
+        _emojis = {
+            "TIGHTEN_STOP":    "🔒",
+            "TRAIL_STOP":      "📈",
+            "SCALE_OUT":       "✂️",
+            "CLOSE":           "🔴",
+            "EMERGENCY_CLOSE": "🚨",
+        }
+        action_emoji = _emojis.get(action_upper, "⚡")
+        tag = "📄 PAPER" if is_paper else "🔴 LIVE"
+        side_emoji = "🟢 LONG" if side.upper() == "LONG" else "🔴 SHORT"
+        pnl_emoji = "🟢" if unrealized_pnl_usd >= 0 else "🔴"
+
+        # PnL % from entry
+        cost_basis = entry_price * size if size and entry_price else 0.0
+        pnl_pct = unrealized_pnl_usd / cost_basis * 100 if cost_basis else 0.0
+
+        lines = [
+            f"{action_emoji} *Wolverine — {action_upper}  [{symbol}]*  {tag}",
+            "",
+            f"Direção   : {side_emoji}",
+            f"Entrada   : ${entry_price:,.4f}",
+            f"Mark      : ${mark_price:,.4f}",
+            f"PnL atual : {pnl_emoji} ${unrealized_pnl_usd:+,.2f}  ({pnl_pct:+.2f}%)",
+        ]
+
+        # SL/TP block (for stop-modification actions)
+        if new_sl is not None:
+            sl_dist = abs(new_sl - entry_price) / entry_price * 100
+            sl_dir = "acima" if new_sl > entry_price else "abaixo"
+            lines += [
+                "",
+                f"Novo SL   : ${new_sl:,.4f}  ({sl_dist:.2f}% {sl_dir} entrada)",
+            ]
+        if new_tp is not None:
+            tp_dist = abs(new_tp - entry_price) / entry_price * 100
+            lines.append(f"TP        : ${new_tp:,.4f}  ({tp_dist:.2f}%)")
+
+        # Close / scale quantity
+        if close_qty is not None:
+            lines += [
+                "",
+                f"Qtd fech. : {close_qty:.6f}",
+            ]
+
+        lines += [
+            "",
+            f"Motivo    : _{reason}_",
+            "",
+            f"Modo      : {settings.mode_label}",
+        ]
+
+        text = "\n".join(lines)
+        try:
+            return await self._post(text, parse_mode="Markdown")
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"wolverine_action alert failed (suppressed): {exc}")
+            return False
+
+    async def wolverine_kill_switch(
+        self,
+        *,
+        intraday_drawdown_pct: float,
+        positions_count: int,
+        notes: str = "",
+        is_paper: bool = True,
+    ) -> bool:
+        """
+        Critical alert when Wolverine engages the kill switch (intraday drawdown breach).
+        Never throws.
+        """
+        if not settings.telegram_enabled:
+            return False
+
+        tag = "📄 PAPER" if is_paper else "🔴 LIVE"
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        lines = [
+            f"🚨 *KILL SWITCH ATIVADO*  {tag} 🚨",
+            "",
+            f"Drawdown  : {intraday_drawdown_pct:.2f}%",
+            f"Posições  : {positions_count} abertas",
+            "",
+            "⛔ *Trading pausado automaticamente até amanhã (UTC).*",
+        ]
+        if notes:
+            short_notes = notes if len(notes) < 400 else notes[:400] + "…"
+            lines += ["", f"Detalhe: _{short_notes}_"]
+        lines += [
+            "",
+            f"Modo      : {settings.mode_label}",
+            f"Hora      : {now}",
+        ]
+
+        text = "\n".join(lines)
+        try:
+            return await self._post(text, parse_mode="Markdown")
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"wolverine_kill_switch alert failed (suppressed): {exc}")
+            return False
+
+    async def drawdown_alert(
+        self,
+        *,
+        current_equity: float,
+        peak_equity: float,
+        drawdown_pct: float,
+        threshold_pct: float,
+    ) -> bool:
+        """
+        Critical alert when daily drawdown breaches `max_daily_drawdown_pct`.
+
+        Fires at most once per UTC day (caller must enforce dedup).
+        Never throws.
+        """
+        if not settings.telegram_enabled:
+            return False
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        lines = [
+            f"🚨 *ALERTA — Drawdown Crítico* 🚨",
+            "",
+            f"Drawdown  : {drawdown_pct:.2f}%  (limite: {threshold_pct:.1f}%)",
+            f"Equity    : ${current_equity:,.2f}",
+            f"Pico dia  : ${peak_equity:,.2f}",
+            f"Perda     : ${peak_equity - current_equity:,.2f}",
+            "",
+            "⚠️ *Trading pausado automaticamente até amanhã (UTC).*",
+            "",
+            f"Modo      : {settings.mode_label}",
+            f"Hora      : {now}",
+        ]
+        text = "\n".join(lines)
+        try:
+            return await self._post(text, parse_mode="Markdown")
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"drawdown_alert failed (suppressed): {exc}")
+            return False
+
     # ------------------------------------------------------------------
     # HTTP
     # ------------------------------------------------------------------

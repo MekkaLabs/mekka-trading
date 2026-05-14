@@ -184,6 +184,21 @@ class Settings(BaseSettings):
         default=0.10,
         description="Halt trading if daily drawdown exceeds this fraction (0.10 = 10%)",
     )
+    # Story 066 — Trailing stop distance after TP1 scale-out
+    trailing_stop_pct: Annotated[float, Field(gt=0.0, le=0.10)] = Field(
+        default=0.015,
+        description="Trailing stop distance after scale-out TP1 (0.015 = 1.5% from current mark)",
+    )
+    # Story 067 — Daily profit target auto-pause
+    daily_profit_target_pct: Annotated[float, Field(gt=0.0, le=1.0)] = Field(
+        default=0.05,
+        description="Pause new signals when daily PnL reaches this fraction of equity (0.05 = 5%)",
+    )
+    # Story 068 — Portfolio exposure cap
+    max_portfolio_exposure_pct: Annotated[float, Field(gt=0.0, le=1.0)] = Field(
+        default=0.20,
+        description="Block new entries if total open notional exceeds this fraction of equity (0.20 = 20%)",
+    )
 
     # --------------------------------------------------------------------------
     # Timing (seconds)

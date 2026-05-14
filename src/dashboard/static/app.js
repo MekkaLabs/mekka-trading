@@ -3317,6 +3317,17 @@ let _liveCurrentTf      = '15m';
 let _liveLastPrice      = null;
 let _liveChartBooted    = false;
 
+// ── Technical Indicator state ────────────────────────────────
+const _liveIndActive  = { bb: false, rsi: false, macd: false };
+// BB series (on main chart)
+let _liveBbUpper  = null, _liveBbMiddle = null, _liveBbLower = null;
+// RSI sub-chart
+let _liveRsiChart = null, _liveRsiSeries = null;
+// MACD sub-chart
+let _liveMacdChart = null, _liveMacdLine = null, _liveMacdSignal = null, _liveMacdHist = null;
+// Time scale sync unsubscribe handles
+let _liveRsiUnsub = null, _liveMacdUnsub = null;
+
 // DOM refs (resolved in _bootLiveChart)
 let _liveDot, _livePriceEl, _liveChangeEl, _liveStatusEl,
     _livePosList, _livePosCount, _liveEquityStrip,
@@ -3377,7 +3388,7 @@ function _initLightweightChart() {
       timeVisible: true,
       secondsVisible: false,
     },
-    width:  container.clientWidth,
+    width:  container.offsetWidth || container.clientWidth || 800,
     height: container.clientHeight || 500,
   });
 
@@ -3415,31 +3426,346 @@ function _initLightweightChart() {
 }
 
 // ── Fetch OHLCV and render ───────────────────────────────────
+// tf → milliseconds (used to compute startTime)
+const _LIVE_TF_MS = {
+  '1m':60000,'3m':180000,'5m':300000,'15m':900000,'30m':1800000,
+  '1h':3600000,'2h':7200000,'4h':14400000,'8h':28800000,'12h':43200000,
+  '1d':86400000,'1w':604800000
+};
+
+function _liveParseCandlesHL(raw) {
+  // Hyperliquid candleSnapshot fields: t=open_ms, o, h, l, c, v
+  return (raw || []).filter(r => r && r.t != null).map(r => ({
+    time:   Math.floor(Number(r.t) / 1000),
+    open:   parseFloat(r.o),
+    high:   parseFloat(r.h),
+    low:    parseFloat(r.l),
+    close:  parseFloat(r.c),
+    volume: parseFloat(r.v),
+  })).filter(c => !isNaN(c.open) && c.time > 0);
+}
+
+function _liveParseCandlesServer(data) {
+  // Server /api/hl/candles response: { candles: [{time,open,high,low,close,volume}] }
+  return (data && data.candles) ? data.candles : [];
+}
+
+function _liveRenderCandleData(candles, symbol, tf, lastPrice) {
+  if (!candles || !candles.length) return false;
+  _liveLastCandles = candles;
+  _liveCandleSeries.setData(candles);
+  _liveVolumeSeries.setData(candles.map(c => ({
+    time:  c.time,
+    value: c.volume,
+    color: c.close >= c.open ? 'rgba(38,208,124,0.35)' : 'rgba(233,69,96,0.35)',
+  })));
+  _liveChart.timeScale().fitContent();
+  const last = candles[candles.length - 1];
+  _liveRenderLegend(last);
+  _liveUpdateTickerPrice(lastPrice || last.close);
+  _liveSetStatus('Hyperliquid · ' + symbol + ' ' + tf);
+  // Re-render active indicators with fresh candle data
+  _liveRenderIndicators(candles);
+  return true;
+}
+
+// ════════════════════════════════════════════════════════════════
+// Technical Indicators — Story 060
+// ════════════════════════════════════════════════════════════════
+
+// ── Math helpers ─────────────────────────────────────────────
+function _indSMA(closes, period) {
+  const out = [];
+  for (let i = 0; i < closes.length; i++) {
+    if (i < period - 1) { out.push(null); continue; }
+    let sum = 0;
+    for (let j = i - period + 1; j <= i; j++) sum += closes[j];
+    out.push(sum / period);
+  }
+  return out;
+}
+
+function _indEMA(data, period) {
+  const k = 2 / (period + 1);
+  const out = [data[0]];
+  for (let i = 1; i < data.length; i++) {
+    out.push(data[i] * k + out[i - 1] * (1 - k));
+  }
+  return out;
+}
+
+function _calcBB(candles, period = 20, mult = 2) {
+  const closes = candles.map(c => c.close);
+  const sma = _indSMA(closes, period);
+  const result = [];
+  candles.forEach((c, i) => {
+    if (sma[i] === null) return;
+    const slice = closes.slice(Math.max(0, i - period + 1), i + 1);
+    const mean = sma[i];
+    const std = Math.sqrt(slice.reduce((s, v) => s + (v - mean) ** 2, 0) / slice.length);
+    result.push({ time: c.time, upper: mean + mult * std, middle: mean, lower: mean - mult * std });
+  });
+  return result;
+}
+
+function _calcRSI(candles, period = 14) {
+  const closes = candles.map(c => c.close);
+  const result = [];
+  let avgGain = 0, avgLoss = 0;
+
+  // Seed average gains/losses
+  for (let i = 1; i <= period; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d > 0) avgGain += d; else avgLoss -= d;
+  }
+  avgGain /= period; avgLoss /= period;
+
+  for (let i = 0; i < candles.length; i++) {
+    if (i < period) continue;
+    if (i === period) {
+      const rs = avgGain / (avgLoss || 1e-10);
+      result.push({ time: candles[i].time, value: 100 - 100 / (1 + rs) });
+      continue;
+    }
+    const d = closes[i] - closes[i - 1];
+    const g = d > 0 ? d : 0, l = d < 0 ? -d : 0;
+    avgGain = (avgGain * (period - 1) + g) / period;
+    avgLoss = (avgLoss * (period - 1) + l) / period;
+    const rs = avgGain / (avgLoss || 1e-10);
+    result.push({ time: candles[i].time, value: 100 - 100 / (1 + rs) });
+  }
+  return result;
+}
+
+function _calcMACD(candles, fast = 12, slow = 26, sig = 9) {
+  const closes = candles.map(c => c.close);
+  const emaF = _indEMA(closes, fast);
+  const emaS = _indEMA(closes, slow);
+  const macdLine = emaF.map((v, i) => v - emaS[i]);
+  const sigLine = _indEMA(macdLine.slice(slow - 1), sig);
+  const result = [];
+  candles.slice(slow - 1).forEach((c, i) => {
+    if (i < sig - 1) return;
+    const macd = macdLine[slow - 1 + i];
+    const signal = sigLine[i];
+    result.push({ time: c.time, macd, signal, hist: macd - signal });
+  });
+  return result;
+}
+
+// ── Sub-chart factory ─────────────────────────────────────────
+function _createSubChart(containerId, height = 100) {
+  const el = document.getElementById(containerId);
+  if (!el) return null;
+  el.innerHTML = '';
+  return LightweightCharts.createChart(el, {
+    layout: { background: { type: 'solid', color: '#060d1c' }, textColor: '#7a90bb', fontSize: 10 },
+    grid: { vertLines: { color: '#0e1a30' }, horzLines: { color: '#0e1a30' } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: '#1a2540', scaleMargins: { top: 0.1, bottom: 0.1 }, minimumWidth: 60 },
+    timeScale: { borderColor: '#1a2540', timeVisible: true, secondsVisible: false },
+    width: el.offsetWidth || el.parentElement.clientWidth || 700,
+    height,
+    handleScroll: false,
+    handleScale:  false,
+  });
+}
+
+function _syncSubChart(subChart, unsub) {
+  // Unsubscribe previous listener
+  if (unsub) { try { unsub(); } catch (_) {} }
+  return _liveChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+    if (range && subChart) {
+      try { subChart.timeScale().setVisibleLogicalRange(range); } catch (_) {}
+    }
+  });
+}
+
+// ── Init RSI sub-chart ────────────────────────────────────────
+function _initRsiChart() {
+  _liveRsiChart = _createSubChart('live-rsi-chart', 100);
+  if (!_liveRsiChart) return;
+
+  // RSI line
+  _liveRsiSeries = _liveRsiChart.addLineSeries({ color: '#c47bff', lineWidth: 1, priceFormat: { type: 'price', precision: 1, minMove: 0.1 } });
+
+  // Overbought / oversold reference lines (using priceLine API)
+  _liveRsiSeries.createPriceLine({ price: 70, color: 'rgba(233,69,96,0.5)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'OB' });
+  _liveRsiSeries.createPriceLine({ price: 30, color: 'rgba(38,208,124,0.5)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'OS' });
+
+  // Crosshair → update label
+  _liveRsiChart.subscribeCrosshairMove(({ seriesData }) => {
+    const d = seriesData.get(_liveRsiSeries);
+    const el = document.getElementById('live-rsi-val');
+    if (el && d) {
+      const v = d.value.toFixed(1);
+      el.textContent = v;
+      el.style.color = d.value > 70 ? '#e94560' : d.value < 30 ? '#26d07c' : '#c47bff';
+    }
+  });
+
+  // Sync timescale with main chart
+  _liveRsiUnsub = _syncSubChart(_liveRsiChart, _liveRsiUnsub);
+
+  // Resize observer
+  new ResizeObserver(() => {
+    const el = document.getElementById('live-rsi-chart');
+    if (_liveRsiChart && el) _liveRsiChart.applyOptions({ width: el.clientWidth });
+  }).observe(document.getElementById('live-rsi-chart'));
+}
+
+// ── Init MACD sub-chart ───────────────────────────────────────
+function _initMacdChart() {
+  _liveMacdChart = _createSubChart('live-macd-chart', 100);
+  if (!_liveMacdChart) return;
+
+  _liveMacdHist   = _liveMacdChart.addHistogramSeries({ priceFormat: { type: 'price', precision: 4, minMove: 0.0001 } });
+  _liveMacdLine   = _liveMacdChart.addLineSeries({ color: '#38bdf8', lineWidth: 1, priceFormat: { type: 'price', precision: 4, minMove: 0.0001 } });
+  _liveMacdSignal = _liveMacdChart.addLineSeries({ color: '#fb923c', lineWidth: 1, priceFormat: { type: 'price', precision: 4, minMove: 0.0001 } });
+
+  // Zero line
+  _liveMacdLine.createPriceLine({ price: 0, color: 'rgba(122,144,187,0.3)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: false });
+
+  // Crosshair → update label
+  _liveMacdChart.subscribeCrosshairMove(({ seriesData }) => {
+    const d = seriesData.get(_liveMacdLine);
+    const el = document.getElementById('live-macd-val');
+    if (el && d) el.textContent = d.value.toFixed(4);
+  });
+
+  _liveMacdUnsub = _syncSubChart(_liveMacdChart, _liveMacdUnsub);
+
+  new ResizeObserver(() => {
+    const el = document.getElementById('live-macd-chart');
+    if (_liveMacdChart && el) _liveMacdChart.applyOptions({ width: el.clientWidth });
+  }).observe(document.getElementById('live-macd-chart'));
+}
+
+// ── Render helpers ────────────────────────────────────────────
+function _renderLiveBB(candles) {
+  if (!_liveBbUpper) {
+    _liveBbUpper  = _liveChart.addLineSeries({ color: 'rgba(96,165,250,0.6)',  lineWidth: 1, priceScaleId: 'right', lastValueVisible: false, priceLineVisible: false });
+    _liveBbMiddle = _liveChart.addLineSeries({ color: 'rgba(251,191,36,0.55)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceScaleId: 'right', lastValueVisible: false, priceLineVisible: false });
+    _liveBbLower  = _liveChart.addLineSeries({ color: 'rgba(96,165,250,0.6)',  lineWidth: 1, priceScaleId: 'right', lastValueVisible: false, priceLineVisible: false });
+  }
+  const bb = _calcBB(candles);
+  _liveBbUpper.setData(bb.map(d => ({ time: d.time, value: d.upper  })));
+  _liveBbMiddle.setData(bb.map(d => ({ time: d.time, value: d.middle })));
+  _liveBbLower.setData(bb.map(d => ({ time: d.time, value: d.lower  })));
+}
+
+function _clearLiveBB() {
+  if (_liveBbUpper)  { try { _liveChart.removeSeries(_liveBbUpper);  } catch (_) {} _liveBbUpper  = null; }
+  if (_liveBbMiddle) { try { _liveChart.removeSeries(_liveBbMiddle); } catch (_) {} _liveBbMiddle = null; }
+  if (_liveBbLower)  { try { _liveChart.removeSeries(_liveBbLower);  } catch (_) {} _liveBbLower  = null; }
+}
+
+function _renderLiveRSI(candles) {
+  if (!_liveRsiChart) _initRsiChart();
+  if (!_liveRsiSeries) return;
+  _liveRsiSeries.setData(_calcRSI(candles));
+  _liveRsiChart.timeScale().fitContent();
+}
+
+function _renderLiveMACD(candles) {
+  if (!_liveMacdChart) _initMacdChart();
+  if (!_liveMacdLine) return;
+  const data = _calcMACD(candles);
+  _liveMacdLine.setData(data.map(d => ({ time: d.time, value: d.macd   })));
+  _liveMacdSignal.setData(data.map(d => ({ time: d.time, value: d.signal })));
+  _liveMacdHist.setData(data.map(d => ({
+    time: d.time, value: d.hist,
+    color: d.hist >= 0 ? 'rgba(38,208,124,0.55)' : 'rgba(233,69,96,0.55)',
+  })));
+  _liveMacdChart.timeScale().fitContent();
+}
+
+// ── Master render (called after every candle load) ────────────
+function _liveRenderIndicators(candles) {
+  if (!candles || candles.length < 30) return;
+  if (_liveIndActive.bb)   _renderLiveBB(candles);
+  if (_liveIndActive.rsi)  _renderLiveRSI(candles);
+  if (_liveIndActive.macd) _renderLiveMACD(candles);
+}
+
+// ── Toggle handler (called by HTML onclick) ───────────────────
+function _liveToggleIndicator(ind) {
+  _liveIndActive[ind] = !_liveIndActive[ind];
+  const btn = document.getElementById('ind-btn-' + ind);
+  if (btn) btn.classList.toggle('active', _liveIndActive[ind]);
+
+  if (ind === 'bb') {
+    if (_liveIndActive.bb) { if (_liveLastCandles.length) _renderLiveBB(_liveLastCandles); }
+    else                    _clearLiveBB();
+  }
+
+  if (ind === 'rsi') {
+    const wrap = document.getElementById('live-rsi-wrap');
+    if (wrap) wrap.classList.toggle('hidden', !_liveIndActive.rsi);
+    if (_liveIndActive.rsi && _liveLastCandles.length) {
+      requestAnimationFrame(() => _renderLiveRSI(_liveLastCandles));
+    } else if (!_liveIndActive.rsi && _liveRsiUnsub) {
+      try { _liveRsiUnsub(); } catch (_) {}
+      _liveRsiUnsub = null;
+      _liveRsiChart = null; _liveRsiSeries = null;
+    }
+  }
+
+  if (ind === 'macd') {
+    const wrap = document.getElementById('live-macd-wrap');
+    if (wrap) wrap.classList.toggle('hidden', !_liveIndActive.macd);
+    if (_liveIndActive.macd && _liveLastCandles.length) {
+      requestAnimationFrame(() => _renderLiveMACD(_liveLastCandles));
+    } else if (!_liveIndActive.macd && _liveMacdUnsub) {
+      try { _liveMacdUnsub(); } catch (_) {}
+      _liveMacdUnsub = null;
+      _liveMacdChart = null; _liveMacdLine = null; _liveMacdSignal = null; _liveMacdHist = null;
+    }
+  }
+}
+
 async function _liveLoadCandles(symbol, tf) {
   _liveSetStatus('Carregando candles…');
+  const limit = 200;
+  const nowMs = Date.now();
+  const startMs = nowMs - limit * (_LIVE_TF_MS[tf] || 900000);
+
+  // ── Attempt 1: direct Hyperliquid REST API (browser → Hyperliquid, no server hop) ──
   try {
-    const res = await fetch(`/api/hl/candles?symbol=${encodeURIComponent(symbol)}&tf=${tf}&limit=200`);
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-    if (!data.candles || !data.candles.length) throw new Error('Sem dados');
-    _liveLastCandles = data.candles;
-    _liveCandleSeries.setData(data.candles);
-    _liveVolumeSeries.setData(data.candles.map(c => ({
-      time:  c.time,
-      value: c.volume,
-      color: c.close >= c.open ? 'rgba(38,208,124,0.35)' : 'rgba(233,69,96,0.35)',
-    })));
-    _liveChart.timeScale().fitContent();
-    const last = data.candles[data.candles.length - 1];
-    _liveRenderLegend(last);
-    const lp = data.last_price || last.close;
-    _liveUpdateTickerPrice(lp);
-    _liveSetStatus('Hyperliquid · ' + symbol + ' ' + tf);
-    return data.candles;
-  } catch (err) {
-    _liveSetStatus('Erro ao carregar: ' + err.message, false);
-    return [];
-  }
+    const res = await fetch('https://api.hyperliquid.xyz/info', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'candleSnapshot',
+        req: { coin: symbol, interval: tf, startTime: startMs, endTime: nowMs },
+      }),
+    });
+    if (res.ok) {
+      const raw = await res.json();
+      const candles = _liveParseCandlesHL(raw);
+      if (candles.length) {
+        _liveRenderCandleData(candles, symbol, tf, null);
+        return candles;
+      }
+    }
+  } catch (_) { /* fallback below */ }
+
+  // ── Attempt 2: server-side proxy endpoint (/api/hl/candles) ──
+  try {
+    const res2 = await fetch(`/api/hl/candles?symbol=${encodeURIComponent(symbol)}&tf=${tf}&limit=${limit}`);
+    if (res2.ok) {
+      const data = await res2.json();
+      const candles = _liveParseCandlesServer(data);
+      if (candles.length) {
+        _liveRenderCandleData(candles, symbol, tf, data.last_price);
+        return candles;
+      }
+    }
+  } catch (_) { /* fallback below */ }
+
+  // ── Both failed ──
+  _liveSetStatus('Sem dados de candles — aguardando WS…', false);
+  return [];
 }
 
 // ── Update last candle with live tick price ──────────────────
@@ -3473,7 +3799,7 @@ function _liveUpdateTickerPrice(price) {
   }
 }
 
-// ── Draw position entry lines on chart ──────────────────────
+// ── Draw position entry + SL/TP lines on chart ──────────────
 function _liveDrawPositionLines(positions) {
   if (!_liveCandleSeries) return;
   // Remove previous lines
@@ -3485,17 +3811,56 @@ function _liveDrawPositionLines(positions) {
     if (!p.is_paper && !p.entry_price) return;
     const sym = (p.symbol || '').toUpperCase();
     if (sym !== _liveCurrentSymbol) return;
+    const entry = Number(p.entry_price || 0);
+    const isShort = String(p.side || '').toUpperCase() === 'SHORT';
+    const entryColor = isShort ? '#e94560' : '#26d07c';
+
+    // ── Linha de entrada ──
     try {
-      const line = _liveCandleSeries.createPriceLine({
-        price: p.entry_price,
-        color: p.side === 'SHORT' ? '#e94560' : '#26d07c',
+      const entryLine = _liveCandleSeries.createPriceLine({
+        price: entry,
+        color: entryColor,
         lineWidth: 1,
         lineStyle: LightweightCharts.LineStyle.Dashed,
         axisLabelVisible: true,
         title: `${p.side} entry`,
       });
-      _livePositionLines[sym + '_' + p.side] = line;
+      _livePositionLines[sym + '_' + p.side + '_entry'] = entryLine;
     } catch (_) {}
+
+    // ── Linha de Stop Loss (vermelha pontilhada) ──
+    const sl = Number(p.sl_price || p.stop_loss || 0);
+    if (sl > 0) {
+      const slDistPct = entry > 0 ? Math.abs((sl - entry) / entry * 100).toFixed(2) : '';
+      try {
+        const slLine = _liveCandleSeries.createPriceLine({
+          price: sl,
+          color: '#ff4757',
+          lineWidth: 2,
+          lineStyle: LightweightCharts.LineStyle.Dotted,
+          axisLabelVisible: true,
+          title: `SL${slDistPct ? ' −' + slDistPct + '%' : ''}`,
+        });
+        _livePositionLines[sym + '_' + p.side + '_sl'] = slLine;
+      } catch (_) {}
+    }
+
+    // ── Linha de Take Profit (verde pontilhada) ──
+    const tp = Number(p.tp_price || p.take_profit || 0);
+    if (tp > 0) {
+      const tpDistPct = entry > 0 ? Math.abs((tp - entry) / entry * 100).toFixed(2) : '';
+      try {
+        const tpLine = _liveCandleSeries.createPriceLine({
+          price: tp,
+          color: '#2ed573',
+          lineWidth: 2,
+          lineStyle: LightweightCharts.LineStyle.Dotted,
+          axisLabelVisible: true,
+          title: `TP${tpDistPct ? ' +' + tpDistPct + '%' : ''}`,
+        });
+        _livePositionLines[sym + '_' + p.side + '_tp'] = tpLine;
+      } catch (_) {}
+    }
   });
 }
 
@@ -3530,6 +3895,16 @@ function _liveRenderPositions(positions) {
       <div class="live-pos-row"><span>Entrada</span><span>$${_liveFmtMoney(entry)}</span></div>
       <div class="live-pos-row"><span>Mark</span><span>$${_liveFmtMoney(mark)}</span></div>
       <div class="live-pos-row"><span>Tamanho</span><span>${Number(p.size).toFixed(6)}</span></div>
+      ${(() => {
+        const sl = Number(p.sl_price || p.stop_loss || 0);
+        const tp = Number(p.tp_price || p.take_profit || 0);
+        const slDist = (sl > 0 && entry > 0) ? Math.abs((sl - entry) / entry * 100).toFixed(2) : null;
+        const tpDist = (tp > 0 && entry > 0) ? Math.abs((tp - entry) / entry * 100).toFixed(2) : null;
+        let rows = '';
+        if (sl > 0) rows += `<div class="live-pos-row live-pos-sl"><span>🛑 SL${slDist ? ' (−'+slDist+'%)' : ''}</span><span>$${_liveFmtMoney(sl)}</span></div>`;
+        if (tp > 0) rows += `<div class="live-pos-row live-pos-tp"><span>🎯 TP${tpDist ? ' (+'+tpDist+'%)' : ''}</span><span>$${_liveFmtMoney(tp)}</span></div>`;
+        return rows;
+      })()}
       ${p.is_paper ? `<div class="live-pos-actions"><button class="live-pos-close-btn" data-sym="${escapeHtml(p.symbol)}" data-side="${escapeHtml(p.side || 'LONG')}">✕ Fechar</button></div>` : ''}
     </div>`;
   }).join('');
@@ -3569,10 +3944,16 @@ function _liveConnectWs() {
   // If global WS is already alive, reuse it — no second connection needed.
   // Register the live-page handler via _liveChartBooted flag (checked in _gWs.onmessage).
   if (_gWs && _gWs.readyState < 2) {
-    _liveWsActive = true;
-    if (_liveDot) _liveDot.classList.remove('disconnected');
-    _liveSetStatus('Conectado — Hyperliquid ao vivo');
     _liveWs = _gWs; // keep reference for legacy code that checks _liveWs
+    if (_gWs.readyState === WebSocket.OPEN) {
+      // Already connected — update live status immediately
+      _liveWsActive = true;
+      if (_liveDot) _liveDot.classList.remove('disconnected');
+      _liveSetStatus('Conectado — Hyperliquid ao vivo');
+    } else {
+      // Still connecting (readyState=0) — wait for onopen to fire
+      _liveSetStatus('Conectando…');
+    }
     return;
   }
 
@@ -3631,6 +4012,10 @@ async function _bootLiveChart() {
   _liveLegend      = document.getElementById('live-legend');
 
   if (!document.getElementById('live-chart')) return;
+
+  // Wait one animation frame so the browser paints the section before
+  // measuring container.offsetWidth (avoids width=0 when section was display:none)
+  await new Promise(r => requestAnimationFrame(r));
 
   // Init chart
   if (!_initLightweightChart()) return;
@@ -3746,6 +4131,7 @@ async function _bootTradingModes() {
 // ── Global Live WebSocket — sempre conectado (topbar + posições + live page) ──
 let _gWs = null;
 let _gWsOn = false;
+let _gWsPositionsLoading = false; // debounce para evitar loadPositions em loop
 
 function _gWsSetBadge(on) {
   const el = document.getElementById('ftb-live-badge');
@@ -3777,6 +4163,14 @@ function _gWsUpdateTopBar(positions, equity) {
 function _gWsUpdatePositionsPanel(positions, prices) {
   if (!positionsBody) return;
   const tbody = positionsBody.querySelector('tbody');
+  // Se chegaram posições mas a tabela ainda não tem linhas → monta ela via REST
+  if (positions.length > 0 && (!tbody || !tbody.rows.length)) {
+    if (!_gWsPositionsLoading) {
+      _gWsPositionsLoading = true;
+      loadPositions().finally(() => { _gWsPositionsLoading = false; });
+    }
+    return;
+  }
   if (!tbody) return;
   positions.forEach((p) => {
     const sym = String(p.symbol || '').toUpperCase();
@@ -3809,6 +4203,12 @@ function _bootGlobalWs() {
   _gWs.onopen = () => {
     _gWsOn = true;
     _gWsSetBadge(true);
+    // Update live page status/dot when chart page is active
+    if (_liveChartBooted) {
+      _liveWsActive = true;
+      if (_liveDot) _liveDot.classList.remove('disconnected');
+      _liveSetStatus('Conectado — Hyperliquid ao vivo');
+    }
   };
 
   _gWs.onmessage = (ev) => {
@@ -3820,7 +4220,13 @@ function _bootGlobalWs() {
       const equity = data.equity || {};
       _gWsUpdateTopBar(positions, equity);
       _gWsUpdatePositionsPanel(positions, prices);
-      // Feed live chart page if active
+      // Feed live page ticker + positions panel (always, regardless of chart state)
+      // Render positions panel whenever the Live page has been booted
+      // (decoupled from chart state so positions appear even if chart fails)
+      if (_liveChartBooted || _livePosList) {
+        _liveRenderPositions(positions);
+      }
+      // Feed live chart page price/candle/lines only when chart is ready
       if (_liveChartBooted) {
         _livePrices = prices;
         const price = prices[_liveCurrentSymbol];
@@ -3828,7 +4234,6 @@ function _bootGlobalWs() {
           _liveUpdateTickerPrice(price);
           _liveUpdateLastCandle(price);
         }
-        _liveRenderPositions(positions);
         _liveDrawPositionLines(positions);
       }
     } catch (_) {}
@@ -3871,6 +4276,131 @@ function _mkBootDashboardV2() {
   try { _bootGlobalWs(); } catch (e) { console.error('[v2] _bootGlobalWs failed:', e); }
 }
 
+// ── Story 064 — Episodic Memory Panel ────────────────────────────────────────
+
+async function loadMemory() {
+  const grid  = document.getElementById('memory-grid');
+  const feed  = document.getElementById('memory-feed');
+  const chips = document.getElementById('memory-summary-chips');
+  const meta  = document.getElementById('memory-meta');
+  if (!grid) return;
+
+  try {
+    const res = await fetch('/api/memory/stats', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`http ${res.status}`);
+    const d = await res.json();
+
+    // Summary chips
+    if (chips) {
+      chips.innerHTML = `
+        <span class="mem-chip mem-chip-total">📦 Total <strong>${d.total}</strong></span>
+        <span class="mem-chip mem-chip-resolved">✅ Resolvidos <strong>${d.resolved}</strong></span>
+        <span class="mem-chip mem-chip-pending">⏳ Pendentes <strong>${d.pending}</strong></span>
+      `;
+    }
+    if (meta) {
+      const ts = d.generated_at ? new Date(d.generated_at).toLocaleTimeString('pt-BR') : '—';
+      meta.textContent = `Atualizado às ${ts}`;
+    }
+
+    // Cards grid — one card per (symbol, action)
+    if (!d.by_symbol || d.by_symbol.length === 0) {
+      grid.innerHTML = '<p class="mem-empty">Nenhum trade resolvido ainda. A memória começa a se formar após os primeiros SL/TP fechados.</p>';
+    } else {
+      grid.innerHTML = d.by_symbol.map((row) => {
+        const wr = row.win_rate != null ? `${row.win_rate.toFixed(1)}%` : '—';
+        const wrClass = row.win_rate == null ? '' : row.win_rate >= 55 ? 'wr-good' : row.win_rate >= 40 ? 'wr-mid' : 'wr-bad';
+        const pnlSign = row.avg_pnl >= 0 ? '+' : '';
+        const pnlClass = row.avg_pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+        const holdStr = row.avg_hold_h != null ? `${row.avg_hold_h.toFixed(1)}h` : '—';
+        const dirClass = row.action === 'LONG' ? 'mem-long' : 'mem-short';
+        const dirIcon  = row.action === 'LONG' ? '▲' : '▼';
+
+        const recentHtml = (row.recent || []).map((r) => {
+          const cls = r.outcome === 'WIN' ? 'mem-win' : r.outcome === 'LOSS' ? 'mem-loss' : 'mem-neutral';
+          const sign = r.pnl_usd >= 0 ? '+' : '';
+          const ago  = r.hours_ago != null ? `${r.hours_ago.toFixed(0)}h atrás` : '';
+          return `<span class="mem-pill ${cls}" title="${ago}">${r.outcome} ${sign}$${r.pnl_usd.toFixed(2)}</span>`;
+        }).join('');
+
+        // Batman veto warning
+        const vetoWarn = (row.win_rate != null && row.win_rate < 30 && row.total >= 8)
+          ? '<div class="mem-veto">⚠️ Batman VETO ativo (win rate &lt; 30%)</div>'
+          : (row.win_rate != null && row.win_rate < 45 && row.total >= 5)
+          ? '<div class="mem-caution">⚠️ Batman CAUTION: size −20%</div>'
+          : '';
+
+        return `
+          <div class="mem-card">
+            <div class="mem-card-header">
+              <span class="mem-symbol">${escapeHtml(row.symbol)}</span>
+              <span class="mem-dir ${dirClass}">${dirIcon} ${row.action}</span>
+              <span class="mem-total">${row.total} trades</span>
+            </div>
+            <div class="mem-stats">
+              <div class="mem-stat">
+                <span class="mem-label">Win Rate</span>
+                <span class="mem-value ${wrClass}">${wr}</span>
+              </div>
+              <div class="mem-stat">
+                <span class="mem-label">W/L/N</span>
+                <span class="mem-value">${row.wins}/${row.losses}/${row.neutrals}</span>
+              </div>
+              <div class="mem-stat">
+                <span class="mem-label">Avg PnL</span>
+                <span class="mem-value ${pnlClass}">${pnlSign}$${row.avg_pnl.toFixed(2)}</span>
+              </div>
+              <div class="mem-stat">
+                <span class="mem-label">Avg Hold</span>
+                <span class="mem-value">${holdStr}</span>
+              </div>
+            </div>
+            ${vetoWarn}
+            <div class="mem-recent">${recentHtml || '<span class="muted-line">sem histórico recente</span>'}</div>
+          </div>`;
+      }).join('');
+    }
+
+    // Recent outcomes feed — flatten all entries, sort by hours_ago
+    if (feed) {
+      const allRecent = [];
+      (d.by_symbol || []).forEach((row) => {
+        (row.recent || []).forEach((r) => {
+          allRecent.push({ ...r, symbol: row.symbol, action: row.action });
+        });
+      });
+      allRecent.sort((a, b) => (a.hours_ago ?? 9999) - (b.hours_ago ?? 9999));
+      if (allRecent.length === 0) {
+        feed.innerHTML = '<span class="muted-line">Sem outcomes ainda.</span>';
+      } else {
+        feed.innerHTML = allRecent.slice(0, 20).map((r) => {
+          const cls = r.outcome === 'WIN' ? 'mem-win' : r.outcome === 'LOSS' ? 'mem-loss' : 'mem-neutral';
+          const sign = r.pnl_usd >= 0 ? '+' : '';
+          const ago  = r.hours_ago != null ? `${r.hours_ago.toFixed(0)}h atrás` : '';
+          const dir  = r.action === 'LONG' ? '▲' : '▼';
+          return `<div class="mem-feed-row ${cls}">
+            <span class="mem-feed-sym">${escapeHtml(r.symbol)} ${dir}</span>
+            <span class="mem-feed-outcome">${r.outcome}</span>
+            <span class="mem-feed-pnl">${sign}$${r.pnl_usd.toFixed(2)}</span>
+            <span class="mem-feed-ago">${ago}</span>
+          </div>`;
+        }).join('');
+      }
+    }
+  } catch (err) {
+    if (grid) grid.innerHTML = `<p class="mem-empty">Erro ao carregar memória: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function bootMemory() {
+  loadMemory();
+  // Refresh every 60 s when memory page is visible
+  setInterval(() => {
+    const sec = document.getElementById('sec-memory');
+    if (sec && !sec.classList.contains('hidden')) loadMemory();
+  }, 60_000);
+}
+
 // Chart.js is loaded with `defer`, so wait for DOMContentLoaded once.
 function _mkRunAllBoots() {
   const safeBoot = (fn, label) => {
@@ -3886,6 +4416,7 @@ function _mkRunAllBoots() {
   safeBoot(bootInternals,       'bootInternals');
   safeBoot(bootTradesTimeline,  'bootTradesTimeline');
   safeBoot(bootFunding,         'bootFunding');
+  safeBoot(bootMemory,          'bootMemory');
   // v2 must always run — page isolation, topbar, TradeNow
   _mkBootDashboardV2();
 }

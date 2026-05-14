@@ -106,6 +106,9 @@ class DailyPnLRecord(Base):
     ending_equity: Mapped[float] = mapped_column(Float, default=0.0)
     pnl_usd: Mapped[float] = mapped_column(Float, default=0.0)
     pnl_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    # Persisted so that a process restart mid-day does not reset the peak
+    # and hide intra-day drawdown from Batman's daily drawdown guard.
+    peak_equity_usd: Mapped[float] = mapped_column(Float, default=0.0)
     drawdown_pct: Mapped[float] = mapped_column(Float, default=0.0)
     trades_count: Mapped[int] = mapped_column(Integer, default=0)
     wins: Mapped[int] = mapped_column(Integer, default=0)
@@ -127,6 +130,60 @@ class AuditRecord(Base):
     severity: Mapped[str] = mapped_column(String(16), default="INFO")
     message: Mapped[str] = mapped_column(Text, default="")
     payload: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+
+class AgentMemoryRecord(Base):
+    """
+    Episodic memory for Vision and Batman (Story 063).
+
+    One row per actionable signal Vision produced. Stores the pattern
+    fingerprint extracted from MarketAnalysis at decision time so that
+    future cycles can query "what happened last N times this pattern
+    appeared?" and use that historical win-rate to calibrate confidence.
+
+    Lifecycle
+    ---------
+    1. Vision calls AgentMemoryStore.record_signal() after producing a
+       non-HOLD signal — creates a row with outcome='PENDING'.
+    2. Cyclops calls AgentMemoryStore.resolve_outcome() when SL/TP
+       triggers — fills outcome, pnl_usd, holding_hours.
+    3. Vision / Batman call AgentMemoryStore.query_similar() at the
+       start of each cycle to receive a human-readable context snippet.
+
+    Pattern fingerprint columns
+    ---------------------------
+    rsi_bucket   : RSI-14 rounded to nearest 10 (e.g. 67 → 70).
+                   Queried with a ±10 tolerance.
+    trend        : BULLISH / BEARISH / NEUTRAL from MarketAnalysis.
+    volume_elevated : True when volume > 1.5× volume_ma (volume spike).
+    """
+
+    __tablename__ = "agent_memories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, index=True
+    )
+
+    # --- Pattern fingerprint ---
+    symbol: Mapped[str] = mapped_column(String(16), index=True)
+    action: Mapped[str] = mapped_column(String(8))           # LONG / SHORT
+    rsi_bucket: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)   # 10..90
+    trend: Mapped[str] = mapped_column(String(16), default="NEUTRAL")
+    volume_elevated: Mapped[bool] = mapped_column(Boolean, default=False)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # --- Signal link ---
+    signal_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+
+    # --- Outcome (filled by Cyclops on close) ---
+    outcome: Mapped[str] = mapped_column(String(8), default="PENDING", index=True)
+    # PENDING → not yet closed | WIN | LOSS | NEUTRAL (|pnl| < 0.1%)
+    pnl_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    holding_hours: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class PerfReportRecord(Base):

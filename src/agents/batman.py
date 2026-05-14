@@ -39,8 +39,30 @@ from typing import Optional
 from src.agents.base import BaseAgent
 from src.config.settings import settings
 from src.models.market_data import LiquidityData, VolatilityData, VolatilityRegime
+from src.models.portfolio import PositionSummary
 from src.models.risk import RiskApproval, RiskVerdict
 from src.models.signal import TradeAction, TradingSignal
+
+
+# ---------------------------------------------------------------------------
+# Correlation groups — assets that tend to move together in crypto cycles.
+# A signal in a LONG direction with N already-open LONGs in the same group
+# is flagged as a correlated directional bet.
+# ---------------------------------------------------------------------------
+_CORRELATION_GROUPS: list[frozenset[str]] = [
+    # Majors (BTC + large-caps highly correlated in bull/bear regimes)
+    frozenset({"BTC", "ETH", "SOL", "BNB", "AVAX", "MATIC", "ARB", "OP", "APT", "SUI"}),
+    # Meme/speculative coins (move together during risk-on episodes)
+    frozenset({"DOGE", "SHIB", "PEPE", "WIF", "BONK", "FLOKI"}),
+]
+
+
+def _find_correlation_group(symbol: str) -> frozenset[str] | None:
+    """Return the correlation group containing ``symbol``, or None."""
+    for group in _CORRELATION_GROUPS:
+        if symbol in group:
+            return group
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +152,7 @@ class Batman(BaseAgent[RiskApproval]):
         trades_today: int = 0,
         running_notional_usd: float = 0.0,
         equity_usd: float = 0.0,
+        current_positions: Optional[list[PositionSummary]] = None,
     ) -> RiskApproval:
         symbol = signal.symbol
         reasons: list[str] = []
@@ -249,6 +272,168 @@ class Batman(BaseAgent[RiskApproval]):
                     reasons=reasons,
                     breached_limits=breached,
                 )
+
+        # ---------------------------------------------------------------
+        # 3c. Correlation gate — Story 057
+        #
+        # Prevents the system from building a stack of same-direction
+        # positions in highly correlated crypto assets (e.g. 3× LONG in
+        # BTC, ETH, SOL simultaneously = a single unhedged market bet).
+        #
+        # Logic:
+        #   - Find how many OPEN positions share the new signal's direction
+        #     AND belong to the same correlation group.
+        #   - If count ≥ reject_threshold  → hard REJECT
+        #   - If count ≥ penalty_threshold → REDUCED with 50/60% size cut
+        # ---------------------------------------------------------------
+        if current_positions:
+            from src.config.runtime_mode import get_params as _get_mode_params  # noqa: WPS433
+            _mp = _get_mode_params()
+            _penalty_threshold: int = int(_mp.get("correlation_penalty_threshold", 1))
+            _reject_threshold: int = int(_mp.get("correlation_reject_threshold", 2))
+
+            _group = _find_correlation_group(signal.symbol)
+            _new_side = signal.action.value.lower()  # "long" or "short"
+
+            # Count open positions that are same-direction AND in the same group,
+            # excluding the signal's own symbol (already checked by max_open_positions).
+            _corr_count = 0
+            for _pos in current_positions:
+                _pos_sym = _pos.symbol.upper()
+                if _pos_sym == signal.symbol:
+                    continue  # same asset — not a correlation risk
+                _pos_side = _pos.side.lower()
+                if _pos_side != _new_side:
+                    continue  # opposite direction — not correlated risk
+                if _group and _pos_sym in _group:
+                    _corr_count += 1
+
+            _mode_label = _mp.get("label", "")
+            if _corr_count >= _reject_threshold:
+                reasons.append(
+                    f"Correlation gate: {_corr_count} same-direction positions already open "
+                    f"in correlated group (≥ reject threshold {_reject_threshold}) [{_mode_label}]"
+                )
+                breached.append("correlation_reject")
+                return RiskApproval(
+                    symbol=symbol,
+                    verdict=RiskVerdict.REJECTED,
+                    reasons=reasons,
+                    breached_limits=breached,
+                )
+            elif _corr_count >= _penalty_threshold:
+                # Apply size reduction — severity increases with count
+                _penalty_mult = max(0.4, 1.0 - (_corr_count * 0.3))
+                _prev_size = signal.size_pct
+                signal = signal.model_copy(
+                    update={"size_pct": round(signal.size_pct * _penalty_mult, 6)}
+                )
+                reasons.append(
+                    f"Correlation penalty: {_corr_count} same-direction position(s) in correlated "
+                    f"group → size × {_penalty_mult:.0%} ({_prev_size:.4f} → {signal.size_pct:.4f}) "
+                    f"[{_mode_label}]"
+                )
+                breached.append("correlation_penalty")
+
+        # ---------------------------------------------------------------
+        # 3d. Episodic Memory gate — Story 063
+        #
+        # Query AgentMemoryStore for resolved historical patterns that match
+        # the signal's fingerprint (symbol + direction + RSI bucket + trend).
+        # Rules:
+        #   - <  5 resolved memories → skip (insufficient data)
+        #   - win_rate < 30% AND total ≥ 8 → hard REJECT (strong historical failure)
+        #   - win_rate < 45% AND total ≥ 5 → add warning note, reduce size 20%
+        #   - win_rate > 65% AND total ≥ 5 → add positive note (no override)
+        # Never blocks on DB error — fails open (APPROVED).
+        # ---------------------------------------------------------------
+        try:
+            from src.persistence.agent_memory import AgentMemoryStore as _AMS  # noqa: WPS433
+            _rsi_raw = signal.metadata.get("rsi") if signal.metadata else None
+            _trend_raw = signal.metadata.get("trend", "NEUTRAL") if signal.metadata else "NEUTRAL"
+            _mem_ctx = await _AMS.query_similar(
+                symbol=symbol,
+                action=signal.action.value,
+                rsi=float(_rsi_raw) if _rsi_raw is not None else None,
+                trend=str(_trend_raw),
+                limit=15,
+            )
+            _wr = _mem_ctx.win_rate_pct  # None if no decided trades
+
+            if _mem_ctx.total >= 5 and _wr is not None:
+                _snippet = _AMS.build_context_snippet(_mem_ctx)
+                if _wr < 30.0 and _mem_ctx.total >= 8:
+                    reasons.append(
+                        f"Episodic memory VETO: win rate {_wr:.1f}% "
+                        f"({_mem_ctx.wins}W/{_mem_ctx.losses}L) "
+                        f"over {_mem_ctx.total} similar patterns — "
+                        f"historical performance too weak to proceed."
+                    )
+                    breached.append("memory_veto")
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        breached_limits=breached,
+                        metadata={"memory_context": _snippet},
+                    )
+                elif _wr < 45.0:
+                    _size_before = adjusted_size if "adjusted_size" in dir() else signal.size_pct
+                    signal = signal.model_copy(
+                        update={"size_pct": round(signal.size_pct * 0.80, 6)}
+                    )
+                    reasons.append(
+                        f"Episodic memory WARNING: win rate {_wr:.1f}% "
+                        f"({_mem_ctx.wins}W/{_mem_ctx.losses}L / {_mem_ctx.total} patterns) "
+                        f"→ size reduced 20%."
+                    )
+                    breached.append("memory_caution")
+                else:
+                    reasons.append(
+                        f"Episodic memory OK: win rate {_wr:.1f}% "
+                        f"({_mem_ctx.wins}W/{_mem_ctx.losses}L / {_mem_ctx.total} patterns)."
+                    )
+        except Exception as _mem_exc:  # noqa: BLE001
+            self._log.debug(f"[Batman] Episodic memory gate skipped: {_mem_exc}")
+
+        # ---------------------------------------------------------------
+        # 3e. Portfolio Exposure Cap — Story 068
+        #
+        # Prevents over-exposure across multiple simultaneous positions.
+        # If the sum of ALL open paper positions' notional (size × entry)
+        # already exceeds max_portfolio_exposure_pct of equity, block the
+        # new entry regardless of individual signal quality.
+        #
+        # Uses current_positions from NickFury's cycle snapshot — same data
+        # as the correlation gate (3c).  Falls open on any error.
+        # ---------------------------------------------------------------
+        if equity_usd > 0 and current_positions:
+            try:
+                _open_notional = sum(
+                    abs(p.size * p.entry_price) for p in current_positions
+                )
+                _cap_usd = equity_usd * settings.max_portfolio_exposure_pct
+                if _open_notional >= _cap_usd:
+                    reasons.append(
+                        f"Portfolio exposure cap: open notional "
+                        f"${_open_notional:,.2f} ≥ "
+                        f"{settings.max_portfolio_exposure_pct:.0%} of equity "
+                        f"(${_cap_usd:,.2f}) — new entry blocked"
+                    )
+                    breached.append("max_portfolio_exposure_pct")
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        breached_limits=breached,
+                        metadata={
+                            "open_notional_usd": round(_open_notional, 2),
+                            "cap_usd": round(_cap_usd, 2),
+                            "equity_usd": round(equity_usd, 2),
+                        },
+                    )
+            except Exception as _exp_exc:  # noqa: BLE001
+                self._log.debug(f"[Batman] Portfolio exposure gate skipped: {_exp_exc}")
 
         # ---------------------------------------------------------------
         # 4. Confidence and R:R quality gates

@@ -172,7 +172,127 @@ class Cyclops:
                 tp_trigger = max(tp_values) if tp_values else None
 
             # ----------------------------------------------------------------
-            # Check triggers
+            # Story 065 — Scale-out (Partial TP at 50% of move)
+            # ----------------------------------------------------------------
+            # Detect if a scale-out trade has already been recorded for this
+            # symbol. If so, we activate breakeven SL for the remaining half.
+            scale_out_done = any(
+                (getattr(t, "raw", {}) or {}).get("metadata", {}).get("triggered_by")
+                == "cyclops_scale_out"
+                for t in trades
+                if t.symbol.upper() == symbol
+            )
+
+            # Calculate TP1 (midpoint between entry and TP2)
+            tp1_trigger: Optional[float] = None
+            if tp_trigger and avg_entry and not scale_out_done:
+                if side == "long":
+                    tp1_trigger = avg_entry + 0.5 * (tp_trigger - avg_entry)
+                else:
+                    tp1_trigger = avg_entry - 0.5 * (avg_entry - tp_trigger)
+
+            # Story 066 — Trailing Stop: after scale-out, trail instead of
+            # fixed breakeven. SL = max(avg_entry, mark*(1-trail)) for LONG.
+            # This rises with price but never falls below breakeven.
+            if scale_out_done and avg_entry and mark:
+                trail_pct = settings.trailing_stop_pct  # default 1.5%
+                if side == "long":
+                    trail_sl = round(mark * (1.0 - trail_pct), 6)
+                    dynamic_sl = max(avg_entry, trail_sl)
+                    sl_trigger = (
+                        max(sl_trigger, dynamic_sl) if sl_trigger is not None
+                        else dynamic_sl
+                    )
+                else:
+                    trail_sl = round(mark * (1.0 + trail_pct), 6)
+                    dynamic_sl = min(avg_entry, trail_sl)
+                    sl_trigger = (
+                        min(sl_trigger, dynamic_sl) if sl_trigger is not None
+                        else dynamic_sl
+                    )
+
+            # Check TP1 trigger (scale-out: close 50%, keep rest risk-free)
+            if tp1_trigger is not None:
+                tp1_hit = (
+                    (side == "long" and mark >= tp1_trigger)
+                    or (side == "short" and mark <= tp1_trigger)
+                )
+                if tp1_hit:
+                    scale_qty = round(open_qty * 0.5, 8)
+                    scale_pnl = round(
+                        (mark - avg_entry) * scale_qty if side == "long"
+                        else (avg_entry - mark) * scale_qty,
+                        4,
+                    )
+                    close_side_scale = "short" if side == "long" else "long"
+                    scale_result = ExecutionResult(
+                        symbol=symbol,
+                        status=ExecutionStatus.PAPER,
+                        is_paper=True,
+                        side=close_side_scale,
+                        quantity=scale_qty,
+                        avg_price=round(mark, 6),
+                        notional_usd=round(scale_qty * mark, 2),
+                        order_id=f"CYCLOPS-SCALEOUT-{uuid.uuid4().hex[:10]}",
+                        metadata={
+                            "triggered_by": "cyclops_scale_out",
+                            "trigger_reason": f"TP1 scale-out: mark {mark:,.4f} hit tp1 {tp1_trigger:,.4f}",
+                            "avg_entry": avg_entry,
+                            "tp1_trigger": tp1_trigger,
+                            "tp2_trigger": tp_trigger,
+                            "new_sl_breakeven": avg_entry,
+                            "pnl_usd": scale_pnl,
+                        },
+                    )
+                    try:
+                        from src.persistence.repository import MekkaRepository  # noqa: WPS433
+                        await MekkaRepository.save_trade(
+                            execution=scale_result, pnl_usd=scale_pnl
+                        )
+                        await MekkaRepository.log_event(
+                            agent="Cyclops",
+                            event="SCALE_OUT_TRIGGERED",
+                            severity="INFO",
+                            symbol=symbol,
+                            message=(
+                                f"[C2][ScaleOut] TP1 hit {tp1_trigger:,.4f} — closed 50% "
+                                f"({scale_qty:.6f} {symbol}) @ {mark:,.4f} "
+                                f"pnl={scale_pnl:+.4f} | stop→breakeven {avg_entry:,.4f}"
+                            ),
+                            payload={
+                                "symbol": symbol, "side": side,
+                                "scale_qty": scale_qty, "close_price": mark,
+                                "avg_entry": avg_entry, "tp1_trigger": tp1_trigger,
+                                "tp2_trigger": tp_trigger, "pnl_usd": scale_pnl,
+                            },
+                        )
+                        triggered += 1
+                        logger.info(
+                            "[Cyclops] SCALE-OUT %s — TP1=%.4f mark=%.4f qty=%.6f pnl=%+.4f",
+                            symbol, tp1_trigger, mark, scale_qty, scale_pnl,
+                        )
+                        # Telegram — scale-out alert
+                        try:
+                            from src.services.telegram_alerter import TelegramAlerter  # noqa: WPS433
+                            await TelegramAlerter().scale_out_alert(
+                                symbol=symbol, side=side,
+                                close_price=mark, avg_entry=avg_entry,
+                                closed_qty=scale_qty,
+                                remaining_qty=round(open_qty - scale_qty, 8),
+                                tp1_trigger=tp1_trigger,
+                                tp2_trigger=tp_trigger or mark * 1.02,
+                                new_sl=avg_entry,
+                                pnl_usd=scale_pnl,
+                            )
+                        except Exception as _tg_exc:  # noqa: BLE001
+                            logger.debug("[Cyclops] scale-out telegram skipped: %s", _tg_exc)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("[Cyclops] scale-out save failed %s: %s", symbol, exc)
+                    # Skip full-close this cycle — next cycle handles remaining half
+                    continue
+
+            # ----------------------------------------------------------------
+            # Check triggers (full close — SL or full TP)
             # ----------------------------------------------------------------
             trigger_reason: Optional[str] = None
 
@@ -199,6 +319,14 @@ class Cyclops:
                 continue
 
             # ----------------------------------------------------------------
+            # Compute realized PnL for this close
+            # ----------------------------------------------------------------
+            if side == "long":
+                pnl_usd = round((mark - avg_entry) * open_qty, 4)
+            else:
+                pnl_usd = round((avg_entry - mark) * open_qty, 4)
+
+            # ----------------------------------------------------------------
             # Insert offsetting paper close trade
             # ----------------------------------------------------------------
             close_side = "short" if side == "long" else "long"
@@ -217,12 +345,13 @@ class Cyclops:
                     "avg_entry": avg_entry,
                     "sl_trigger": sl_trigger,
                     "tp_trigger": tp_trigger,
+                    "pnl_usd": pnl_usd,
                 },
             )
 
             try:
                 from src.persistence.repository import MekkaRepository  # noqa: WPS433
-                await MekkaRepository.save_trade(execution=close_result)
+                await MekkaRepository.save_trade(execution=close_result, pnl_usd=pnl_usd)
                 await MekkaRepository.log_event(
                     agent="Cyclops",
                     event="SL_TP_TRIGGERED",
@@ -230,7 +359,7 @@ class Cyclops:
                     symbol=symbol,
                     message=(
                         f"[C2] {trigger_reason} — closed {open_qty:.6f} {symbol} "
-                        f"@ {mark:,.4f} (entry {avg_entry:,.4f})"
+                        f"@ {mark:,.4f} (entry {avg_entry:,.4f}) pnl={pnl_usd:+.4f}"
                     ),
                     payload={
                         "symbol": symbol,
@@ -241,6 +370,7 @@ class Cyclops:
                         "trigger_reason": trigger_reason,
                         "sl_trigger": sl_trigger,
                         "tp_trigger": tp_trigger,
+                        "pnl_usd": pnl_usd,
                     },
                 )
                 triggered += 1
@@ -248,6 +378,48 @@ class Cyclops:
                     "[Cyclops] %s — %s (qty=%.6f, close_price=%.4f)",
                     symbol, trigger_reason, open_qty, mark,
                 )
+                # Story 063 — Episodic Memory: resolve outcome for this position.
+                # Compute holding_hours from opening trade timestamp.
+                try:
+                    from src.persistence.agent_memory import AgentMemoryStore as _AMS  # noqa: WPS433
+                    _holding_h: float | None = None
+                    try:
+                        # Best effort: look for the opening trade to compute duration
+                        _open_trades = await MekkaRepository.list_open_paper_trades()
+                        _op = next(
+                            (t for t in _open_trades if t.symbol == symbol),
+                            None,
+                        )
+                        if _op and hasattr(_op, "timestamp") and _op.timestamp:
+                            from datetime import datetime, timezone  # noqa: WPS433
+                            _now = datetime.now(timezone.utc)
+                            _delta = _now - _op.timestamp.replace(tzinfo=timezone.utc) if _op.timestamp.tzinfo is None else _now - _op.timestamp
+                            _holding_h = round(_delta.total_seconds() / 3600, 2)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    await _AMS.resolve_outcome(
+                        symbol=symbol,
+                        pnl_usd=pnl_usd,
+                        holding_hours=_holding_h,
+                    )
+                except Exception as _mem_exc:  # noqa: BLE001
+                    logger.debug("[Cyclops] memory resolve skipped: %s", _mem_exc)
+
+                # Telegram — fire-and-forget, never raises
+                try:
+                    from src.services.telegram_alerter import TelegramAlerter  # noqa: WPS433
+                    await TelegramAlerter().position_closed(
+                        symbol=symbol,
+                        side=side,
+                        close_price=mark,
+                        avg_entry=avg_entry,
+                        qty=open_qty,
+                        trigger_reason=trigger_reason,
+                        sl_trigger=sl_trigger,
+                        tp_trigger=tp_trigger,
+                    )
+                except Exception as _tg_exc:  # noqa: BLE001
+                    logger.debug("[Cyclops] telegram alert skipped: %s", _tg_exc)
             except Exception as exc:  # noqa: BLE001
                 logger.error("[Cyclops] save_trade failed for %s: %s", symbol, exc)
 

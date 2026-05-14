@@ -298,6 +298,10 @@ class MekkaDashboardServer:
         self._hl_prices: dict[str, float] = {}      # coin → mark price
         self._hl_pump_task: asyncio.Task[Any] | None = None
         self._live_bcast_task: asyncio.Task[Any] | None = None
+        # Drawdown monitor state (reset each UTC day)
+        self._dd_peak_equity: float = 0.0           # highest equity seen today
+        self._dd_alert_date: str = ""               # last UTC date alert fired
+        self._dd_alerted: bool = False              # fired today?
         self._last_snapshot_minute: str | None = None
         # Kill-switch dedup: only persist a new incident bundle when the
         # state transitions from "no kill" to "kill" OR a new wall-clock
@@ -378,6 +382,7 @@ class MekkaDashboardServer:
         self._app.router.add_post("/api/settings", self._handle_settings_set)
         self._app.router.add_get("/api/agents/tasks", self._handle_agents_tasks)
         self._app.router.add_get("/api/audit/feed", self._handle_audit_feed)
+        self._app.router.add_get("/api/memory/stats", self._handle_memory_stats)  # Story 064
         self._app.router.add_post("/api/trade/analyze", self._handle_trade_analyze)
         self._app.router.add_post("/api/trade/execute", self._handle_trade_execute)
         self._app.router.add_get("/api/prefs", self._handle_prefs_get)
@@ -1525,6 +1530,135 @@ class MekkaDashboardServer:
             return web.json_response({"items": []})
         return web.json_response(build_audit_feed_payload(audits))
 
+    # ------------------------------------------------------------------
+    # Story 064 — Memory Stats  GET /api/memory/stats
+    # ------------------------------------------------------------------
+
+    async def _handle_memory_stats(self, _: web.Request) -> web.Response:
+        """
+        GET /api/memory/stats
+
+        Returns aggregated episodic memory statistics from the
+        agent_memories table (Story 063).
+
+        Response shape
+        --------------
+        {
+          "total": int,           // total memory entries
+          "pending": int,         // awaiting resolution
+          "resolved": int,        // WIN + LOSS + NEUTRAL
+          "by_symbol": [          // one row per (symbol, action) combo
+            {
+              "symbol": str,
+              "action": "LONG"|"SHORT",
+              "total": int,
+              "wins": int,
+              "losses": int,
+              "neutrals": int,
+              "win_rate": float | null,  // wins / (wins+losses) * 100
+              "avg_pnl": float,
+              "avg_hold_h": float | null,
+              "recent": [         // last 5 resolved entries
+                {"outcome": str, "pnl_usd": float, "hours_ago": float|null}
+              ]
+            }
+          ],
+          "generated_at": str     // ISO-8601 UTC
+        }
+        """
+        from datetime import datetime, timezone  # noqa: WPS433
+        from sqlalchemy import select, func  # noqa: WPS433
+        from src.persistence.db import get_session  # noqa: WPS433
+        from src.persistence.models import AgentMemoryRecord  # noqa: WPS433
+
+        now_utc = datetime.now(timezone.utc)
+
+        try:
+            async with get_session() as session:
+                # --- totals ---
+                total_q = await session.execute(
+                    select(func.count()).select_from(AgentMemoryRecord)
+                )
+                total: int = total_q.scalar_one() or 0
+
+                pending_q = await session.execute(
+                    select(func.count()).select_from(AgentMemoryRecord).where(
+                        AgentMemoryRecord.outcome == "PENDING"
+                    )
+                )
+                pending: int = pending_q.scalar_one() or 0
+
+                # --- by (symbol, action) ---
+                rows_q = await session.execute(
+                    select(AgentMemoryRecord)
+                    .where(AgentMemoryRecord.outcome.in_(["WIN", "LOSS", "NEUTRAL"]))
+                    .order_by(AgentMemoryRecord.timestamp.desc())
+                    .limit(2000)
+                )
+                rows: list[AgentMemoryRecord] = list(rows_q.scalars().all())
+
+            # group in Python
+            groups: dict[tuple[str, str], list[AgentMemoryRecord]] = {}
+            for r in rows:
+                key = (r.symbol, r.action)
+                groups.setdefault(key, []).append(r)
+
+            by_symbol = []
+            for (sym, act), grp in sorted(groups.items()):
+                wins = sum(1 for r in grp if r.outcome == "WIN")
+                losses = sum(1 for r in grp if r.outcome == "LOSS")
+                neutrals = sum(1 for r in grp if r.outcome == "NEUTRAL")
+                decided = wins + losses
+                win_rate = round(100.0 * wins / decided, 1) if decided > 0 else None
+                pnls = [r.pnl_usd for r in grp if r.pnl_usd is not None]
+                avg_pnl = round(sum(pnls) / len(pnls), 4) if pnls else 0.0
+                holds = [r.holding_hours for r in grp if r.holding_hours is not None]
+                avg_hold = round(sum(holds) / len(holds), 1) if holds else None
+                recent = []
+                for r in grp[:5]:
+                    hours_ago: float | None = None
+                    if r.resolved_at:
+                        ts = r.resolved_at
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        hours_ago = round((now_utc - ts).total_seconds() / 3600, 1)
+                    recent.append({
+                        "outcome": r.outcome,
+                        "pnl_usd": round(r.pnl_usd or 0.0, 4),
+                        "hours_ago": hours_ago,
+                    })
+                by_symbol.append({
+                    "symbol": sym,
+                    "action": act,
+                    "total": len(grp),
+                    "wins": wins,
+                    "losses": losses,
+                    "neutrals": neutrals,
+                    "win_rate": win_rate,
+                    "avg_pnl": avg_pnl,
+                    "avg_hold_h": avg_hold,
+                    "recent": recent,
+                })
+
+            # sort by most active first
+            by_symbol.sort(key=lambda x: x["total"], reverse=True)
+
+            return web.json_response({
+                "total": total,
+                "pending": pending,
+                "resolved": total - pending,
+                "by_symbol": by_symbol,
+                "generated_at": now_utc.isoformat(),
+            })
+
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[MemoryStats] query failed: %s", exc)
+            return web.json_response({
+                "total": 0, "pending": 0, "resolved": 0,
+                "by_symbol": [], "generated_at": now_utc.isoformat(),
+                "error": str(exc),
+            })
+
     async def _handle_positions(self, _: web.Request) -> web.Response:
         """Open positions read via the Hyperliquid `info.user_state` endpoint.
 
@@ -1753,6 +1887,7 @@ class MekkaDashboardServer:
             _fetch_paper_positions,
             get_paper_equity_summary,
         )
+        from src.services.telegram_alerter import TelegramAlerter  # noqa: WPS433
         while True:
             try:
                 await asyncio.sleep(1.0)
@@ -1796,6 +1931,46 @@ class MekkaDashboardServer:
                         equity_summary = await get_paper_equity_summary(mark_prices=prices)
                     except Exception:
                         equity_summary = {}
+
+                # ── Drawdown circuit-breaker monitor ──────────────────────
+                # Fires a Telegram alert at most once per UTC day when
+                # equity drops > max_daily_drawdown_pct from the day's peak.
+                try:
+                    _eq_now = float(equity_summary.get("equity_usd") or 0)
+                    if _eq_now > 0:
+                        _today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                        # Reset dedup on new UTC day
+                        if self._dd_alert_date != _today_utc:
+                            self._dd_alert_date = _today_utc
+                            self._dd_alerted = False
+                            self._dd_peak_equity = _eq_now
+                        # Update peak
+                        if _eq_now > self._dd_peak_equity:
+                            self._dd_peak_equity = _eq_now
+                        # Check threshold
+                        if (
+                            not self._dd_alerted
+                            and self._dd_peak_equity > 0
+                        ):
+                            _dd_pct = (self._dd_peak_equity - _eq_now) / self._dd_peak_equity * 100
+                            _threshold = settings.max_daily_drawdown_pct * 100
+                            if _dd_pct >= _threshold:
+                                self._dd_alerted = True  # dedup before async call
+                                asyncio.create_task(
+                                    TelegramAlerter().drawdown_alert(
+                                        current_equity=_eq_now,
+                                        peak_equity=self._dd_peak_equity,
+                                        drawdown_pct=_dd_pct,
+                                        threshold_pct=_threshold,
+                                    )
+                                )
+                                logger.warning(
+                                    "[DrawdownMonitor] ALERT fired — dd=%.2f%% peak=%.2f eq=%.2f",
+                                    _dd_pct, self._dd_peak_equity, _eq_now,
+                                )
+                except Exception as _dd_exc:
+                    logger.debug("drawdown monitor error: %s", _dd_exc)
+
                 _payload = json.dumps({
                     "type": "live_tick",
                     "prices": prices,
@@ -1860,7 +2035,8 @@ class MekkaDashboardServer:
     async def _handle_hl_candles(self, request: web.Request) -> web.Response:
         """GET /api/hl/candles?symbol=BTC&tf=15m&limit=200
 
-        Returns OHLCV from Hyperliquid via ccxt.async_support.hyperliquid.
+        Returns OHLCV from the Hyperliquid public REST API (no CCXT needed).
+        Uses POST /info with type=candleSnapshot — no auth required.
         Lightweight-charts expects { time, open, high, low, close, volume }.
         """
         _sym = str(request.query.get("symbol") or "BTC").strip().upper()
@@ -1874,36 +2050,62 @@ class MekkaDashboardServer:
                 status=400,
             )
 
+        # ms per candle — used to compute startTime
+        _tf_ms: dict[str, int] = {
+            "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000,
+            "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000,
+            "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000, "1w": 604_800_000,
+        }
+        import time as _time  # noqa: WPS433
+        import aiohttp as _aiohttp  # noqa: WPS433
+        _now_ms = int(_time.time() * 1000)
+        _start_ms = _now_ms - _limit * _tf_ms.get(_tf, 900_000)
+
+        _hl_api = "https://api.hyperliquid.xyz/info"
+        _payload = {
+            "type": "candleSnapshot",
+            "req": {"coin": _sym, "interval": _tf, "startTime": _start_ms, "endTime": _now_ms},
+        }
         try:
-            import ccxt.async_support as _ccxt  # noqa: WPS433
-            _exchange = _ccxt.hyperliquid({
-                "walletAddress": (settings.hyperliquid_wallet_address or "0x0000000000000000000000000000000000000000"),
-                "enableRateLimit": True,
-            })
-            _hl_sym = f"{_sym}/USDT:USDT"
-            _raw = await asyncio.wait_for(
-                _exchange.fetch_ohlcv(_hl_sym, _tf, limit=_limit),
-                timeout=12.0,
-            )
-            await _exchange.close()
+            async with _aiohttp.ClientSession() as _sess:
+                async with _sess.post(
+                    _hl_api,
+                    json=_payload,
+                    timeout=_aiohttp.ClientTimeout(total=12),
+                ) as _resp:
+                    if _resp.status != 200:
+                        _body = await _resp.text()
+                        logger.warning("hl_candles API %d for %s: %s", _resp.status, _sym, _body[:200])
+                        return web.json_response(
+                            {"error": f"Hyperliquid API returned {_resp.status}", "detail": _body[:200]},
+                            status=502,
+                        )
+                    _raw: list = await _resp.json(content_type=None)
         except asyncio.TimeoutError:
             return web.json_response({"error": "Hyperliquid OHLCV timeout"}, status=504)
         except Exception as _exc:
             logger.warning("hl_candles fetch error %s: %s", _sym, _exc)
             return web.json_response({"error": str(_exc)}, status=502)
 
-        _candles = [
-            {
-                "time": int(_r[0] // 1000),
-                "open":   float(_r[1]),
-                "high":   float(_r[2]),
-                "low":    float(_r[3]),
-                "close":  float(_r[4]),
-                "volume": float(_r[5]),
-            }
-            for _r in (_raw or [])
-            if _r and len(_r) >= 6
-        ]
+        # Hyperliquid candleSnapshot response fields:
+        #   t=open_time_ms, T=close_time_ms, s=coin, i=interval,
+        #   o=open, h=high, l=low, c=close, v=volume, n=num_trades
+        _candles = []
+        for _r in (_raw or []):
+            if not isinstance(_r, dict):
+                continue
+            try:
+                _candles.append({
+                    "time":   int(_r["t"]) // 1000,
+                    "open":   float(_r["o"]),
+                    "high":   float(_r["h"]),
+                    "low":    float(_r["l"]),
+                    "close":  float(_r["c"]),
+                    "volume": float(_r["v"]),
+                })
+            except (KeyError, TypeError, ValueError):
+                continue
+
         _last_price = self._hl_prices.get(_sym) or (_candles[-1]["close"] if _candles else 0.0)
         return web.json_response({
             "symbol": _sym,
@@ -2992,6 +3194,12 @@ class MekkaDashboardServer:
             # Persist trade to DB so it appears in the trades panel and positions
             try:
                 _signal_id = cached_rec.get("signal_id") if cached_rec else None
+                # Store SL/TP in metadata so positions_provider can surface them on the chart
+                result.metadata = {
+                    **(result.metadata or {}),
+                    "stop_loss": float(cached_rec.get("stop_loss") or 0),
+                    "take_profit": float(cached_rec.get("take_profit") or 0),
+                }
                 _trade_db_id = await MekkaRepository.save_trade(result, signal_id=_signal_id)
                 logger.info(
                     "trade persisted: db_id=%d order_id=%s symbol=%s",
@@ -2999,6 +3207,15 @@ class MekkaDashboardServer:
                 )
             except Exception as _save_exc:
                 logger.warning("save_trade failed (non-fatal): %s", _save_exc)
+
+            # Telegram — trade_opened para TradeNow (fire-and-forget)
+            try:
+                from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+                asyncio.create_task(
+                    _TA().trade_opened(execution=result, signal=signal)
+                )
+            except Exception:
+                pass
 
             order_id = result.order_id
             exec_status = "submitted"

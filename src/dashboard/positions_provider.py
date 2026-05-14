@@ -148,6 +148,8 @@ async def _fetch_paper_positions() -> dict[str, Any]:
         if net > 0:
             side = "LONG"
             open_qty = net
+            open_trades = longs
+            total_qty = long_qty
             avg_px = (
                 sum(t.quantity * t.avg_price for t in longs) / long_qty
                 if long_qty > 0 else 0.0
@@ -155,10 +157,30 @@ async def _fetch_paper_positions() -> dict[str, Any]:
         else:
             side = "SHORT"
             open_qty = abs(net)
+            open_trades = shorts
+            total_qty = short_qty
             avg_px = (
                 sum(t.quantity * t.avg_price for t in shorts) / short_qty
                 if short_qty > 0 else 0.0
             )
+
+        # Weighted average SL/TP — read from trade.raw['metadata'] (stored at execution time)
+        def _get_sl(t: Any) -> float:
+            meta = (t.raw or {}).get("metadata") or {} if t.raw else {}
+            return float(meta.get("stop_loss") or 0)
+
+        def _get_tp(t: Any) -> float:
+            meta = (t.raw or {}).get("metadata") or {} if t.raw else {}
+            return float(meta.get("take_profit") or 0)
+
+        avg_sl = (
+            sum(t.quantity * _get_sl(t) for t in open_trades) / total_qty
+            if total_qty > 0 else 0.0
+        )
+        avg_tp = (
+            sum(t.quantity * _get_tp(t) for t in open_trades) / total_qty
+            if total_qty > 0 else 0.0
+        )
 
         items.append(
             {
@@ -171,6 +193,8 @@ async def _fetch_paper_positions() -> dict[str, Any]:
                 "leverage": None,
                 "liq_price": None,
                 "is_paper": True,
+                "sl_price": round(avg_sl, 2) if avg_sl > 0 else None,
+                "tp_price": round(avg_tp, 2) if avg_tp > 0 else None,
             }
         )
 

@@ -140,8 +140,14 @@ class MekkaRepository:
         wins: int,
         losses: int,
         starting_equity: Optional[float] = None,
+        peak_equity_usd: Optional[float] = None,
     ) -> int:
-        """Insert or update the row for a given UTC date."""
+        """Insert or update the row for a given UTC date.
+
+        ``peak_equity_usd`` is the highest equity seen during the day.
+        Persisting it ensures that a process restart does not reset the
+        drawdown calculation and hide intra-day losses from Batman.
+        """
         async with get_session() as session:
             existing = (
                 await session.execute(
@@ -157,6 +163,7 @@ class MekkaRepository:
                     ending_equity=ending_equity,
                     pnl_usd=pnl_usd,
                     pnl_pct=pnl_pct,
+                    peak_equity_usd=peak_equity_usd or ending_equity,
                     drawdown_pct=drawdown_pct,
                     trades_count=trades_count,
                     wins=wins,
@@ -174,8 +181,30 @@ class MekkaRepository:
             existing.trades_count = trades_count
             existing.wins = wins
             existing.losses = losses
+            # Only update peak if the new value is higher — never lower.
+            if peak_equity_usd and peak_equity_usd > (existing.peak_equity_usd or 0.0):
+                existing.peak_equity_usd = peak_equity_usd
             await session.commit()
             return existing.id
+
+    @staticmethod
+    async def get_today_peak_equity() -> float:
+        """Read today's persisted peak_equity_usd, or 0.0 if no row yet.
+
+        Called at NickFury startup to restore the drawdown baseline after a
+        process restart mid-day, preventing Batman from reading drawdown_pct=0
+        when real intra-day losses have already occurred.
+        """
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    select(DailyPnLRecord.peak_equity_usd).where(
+                        DailyPnLRecord.date_utc == today
+                    )
+                )
+            ).scalar_one_or_none()
+            return float(row) if row else 0.0
 
     # ------------------------------------------------------------------
     # Read queries
@@ -189,6 +218,20 @@ class MekkaRepository:
             row = (
                 await session.execute(
                     select(DailyPnLRecord.drawdown_pct).where(
+                        DailyPnLRecord.date_utc == today
+                    )
+                )
+            ).scalar_one_or_none()
+            return float(row) if row is not None else 0.0
+
+    @staticmethod
+    async def get_today_pnl_usd() -> float:
+        """Return today's cumulative realized PnL in USD. Story 067."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    select(DailyPnLRecord.pnl_usd).where(
                         DailyPnLRecord.date_utc == today
                     )
                 )
@@ -253,6 +296,44 @@ class MekkaRepository:
                 )
             ).scalars().all()
             return list(rows)
+
+    @staticmethod
+    async def update_trade_sl_tp(
+        symbol: str,
+        new_sl: float,
+        new_tp: Optional[float] = None,
+    ) -> int:
+        """Update SL/TP in the raw metadata of open paper trades for a symbol.
+
+        Cyclops reads SL/TP from ``raw["metadata"]["stop_loss"]`` and
+        ``raw["metadata"]["take_profit"]``. Calling this method causes the new
+        stop price to be honoured on the next Cyclops monitor cycle without any
+        other changes to the position.
+
+        Returns the count of trade records updated.
+        """
+        updated = 0
+        async with get_session() as session:
+            rows = (
+                await session.execute(
+                    select(TradeRecord)
+                    .where(TradeRecord.symbol == symbol)
+                    .where(TradeRecord.is_paper == True)  # noqa: E712
+                    .where(TradeRecord.status.in_(["FILLED", "PAPER"]))
+                )
+            ).scalars().all()
+            for row in rows:
+                raw: dict = dict(row.raw or {})
+                meta: dict = dict(raw.get("metadata") or {})
+                meta["stop_loss"] = new_sl
+                if new_tp is not None:
+                    meta["take_profit"] = new_tp
+                raw["metadata"] = meta
+                row.raw = raw
+                updated += 1
+            if updated:
+                await session.commit()
+        return updated
 
     @staticmethod
     async def list_recent_audit(limit: int = 50) -> list[AuditRecord]:

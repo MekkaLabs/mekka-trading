@@ -102,6 +102,9 @@ class NickFury(BaseAgent[list[CycleReport]]):
         # Story 035 — Telegram alerter (push only). Toggle via env.
         from src.services.telegram_alerter import TelegramAlerter
         self._telegram = TelegramAlerter()
+        # Story 049 — DailyPerformanceWriter: once-per-day Deadpool snapshot
+        from src.services.daily_performance_writer import DailyPerformanceWriter
+        self._perf_writer = DailyPerformanceWriter()
 
     # ------------------------------------------------------------------
     # Public API
@@ -110,6 +113,19 @@ class NickFury(BaseAgent[list[CycleReport]]):
     async def initialize(self) -> None:
         """Start the persistence layer and emit a boot audit event."""
         await MekkaRepository.initialize()
+
+        # Restore peak_equity from DB so a mid-day restart does not hide
+        # intra-day drawdown from Batman's daily drawdown guard (Story 057).
+        try:
+            persisted_peak = await MekkaRepository.get_today_peak_equity()
+            if persisted_peak > 0:
+                self._daily_pnl._peak_equity = persisted_peak
+                self._log.info(
+                    f"[NickFury] Restored peak_equity from DB: ${persisted_peak:,.2f}"
+                )
+        except Exception as _exc:
+            self._log.warning(f"[NickFury] Could not restore peak_equity: {_exc}")
+
         await MekkaRepository.log_event(
             agent="NickFury",
             event="BOOT",
@@ -206,6 +222,86 @@ class NickFury(BaseAgent[list[CycleReport]]):
         drawdown = await MekkaRepository.get_today_drawdown_pct()
         trades_today = await MekkaRepository.count_trades_today()
 
+        # ── Story 067 — Daily PnL Auto-pause / Auto-kill ──────────────────
+        # Check today's realized PnL against profit target and drawdown cap.
+        try:
+            today_pnl_usd = await MekkaRepository.get_today_pnl_usd()
+            _equity_for_pct = equity_usd or settings.paper_initial_equity
+            if _equity_for_pct and _equity_for_pct > 0:
+                today_pnl_pct = today_pnl_usd / _equity_for_pct
+
+                # Auto-pause: daily profit target reached → stop new signals
+                if today_pnl_pct >= settings.daily_profit_target_pct:
+                    self._log.warning(
+                        f"[NickFury] Daily profit target reached "
+                        f"({today_pnl_pct*100:.2f}% ≥ {settings.daily_profit_target_pct*100:.1f}%) "
+                        "— pausing new signals for today"
+                    )
+                    await MekkaRepository.log_event(
+                        agent="NickFury",
+                        event="DAILY_PROFIT_TARGET_REACHED",
+                        severity="INFO",
+                        message=(
+                            f"Daily PnL +${today_pnl_usd:.2f} ({today_pnl_pct*100:.2f}%) "
+                            f"≥ target {settings.daily_profit_target_pct*100:.1f}% — cycle skipped"
+                        ),
+                        payload={"today_pnl_usd": today_pnl_usd, "today_pnl_pct": today_pnl_pct},
+                    )
+                    try:
+                        await self._telegram.alert(
+                            event="DAILY_PROFIT_TARGET_REACHED",
+                            severity="INFO",
+                            agent="NickFury",
+                            message=(
+                                f"🎯 Meta diária atingida: +${today_pnl_usd:.2f} "
+                                f"({today_pnl_pct*100:.2f}%). "
+                                "Novos sinais pausados pelo restante do dia."
+                            ),
+                            payload={},
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return []
+
+                # Auto-kill: daily drawdown cap triggered → engage kill switch
+                if drawdown >= settings.max_daily_drawdown_pct:
+                    self._log.error(
+                        f"[NickFury] Daily drawdown cap hit "
+                        f"({drawdown*100:.2f}% ≥ {settings.max_daily_drawdown_pct*100:.1f}%) "
+                        "— engaging kill switch"
+                    )
+                    await MekkaRepository.log_event(
+                        agent="NickFury",
+                        event="DAILY_DRAWDOWN_KILL_SWITCH",
+                        severity="CRITICAL",
+                        message=(
+                            f"Daily drawdown {drawdown*100:.2f}% ≥ cap "
+                            f"{settings.max_daily_drawdown_pct*100:.1f}% — kill switch engaged"
+                        ),
+                        payload={"drawdown_pct": drawdown},
+                    )
+                    try:
+                        await self._telegram.alert(
+                            event="DAILY_DRAWDOWN_KILL_SWITCH",
+                            severity="CRITICAL",
+                            agent="NickFury",
+                            message=(
+                                f"🛑 DRAWDOWN DIÁRIO: {drawdown*100:.2f}% ≥ "
+                                f"{settings.max_daily_drawdown_pct*100:.1f}%. "
+                                "Kill switch acionado automaticamente."
+                            ),
+                            payload={},
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        engage_kill_switch()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return []
+        except Exception as _pnl_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury] Daily PnL gate skipped: {_pnl_exc}")
+
         # Snapshot account equity + open positions once per cycle
         snapshot: EquitySnapshot = await self._portfolio.run()
         await MekkaRepository.log_event(
@@ -237,6 +333,33 @@ class NickFury(BaseAgent[list[CycleReport]]):
         from src.config.runtime_mode import get_params as _get_mode_params
         _active_assets = _get_mode_params().get("trading_assets", settings.trading_assets)
 
+        # Story 050 — Altcoins validation: filter out symbols not available on
+        # the current exchange (prevents CYCLE_ERROR spam for unknown pairs).
+        try:
+            _validated = await self._professor.validate_symbols(_active_assets)
+            if len(_validated) < len(_active_assets):
+                _skipped = [s for s in _active_assets if s not in _validated]
+                self._log.warning(
+                    f"[NickFury] Symbols not available on exchange — skipping: {_skipped}"
+                )
+                await MekkaRepository.log_event(
+                    agent="NickFury",
+                    event="SYMBOLS_SKIPPED",
+                    severity="WARNING",
+                    message=f"Not available on exchange: {_skipped}",
+                    payload={"skipped": _skipped, "active": _validated},
+                )
+            _active_assets = _validated
+        except Exception as _val_exc:  # noqa: BLE001
+            self._log.warning(
+                f"[NickFury] Symbol validation failed (using full list): {_val_exc}"
+            )
+
+        # [Story 057] Snapshot of current positions for Batman's correlation gate.
+        # Updated intra-cycle as new positions are opened so Batman sees the
+        # running state, not just the state at cycle start.
+        _current_positions = list(snapshot.positions or [])
+
         reports: list[CycleReport] = []
         for symbol in _active_assets:
             try:
@@ -247,6 +370,7 @@ class NickFury(BaseAgent[list[CycleReport]]):
                     trades_today=trades_today,
                     open_positions=open_positions,
                     running_notional_usd=running_notional_usd,
+                    current_positions=_current_positions,  # [Story 057]
                 )
                 reports.append(report)
                 if report.is_executed():
@@ -256,6 +380,19 @@ class NickFury(BaseAgent[list[CycleReport]]):
                     open_positions += 1
                     if report.execution is not None:
                         running_notional_usd += report.execution.notional_usd
+                    # [Story 057] Update correlation snapshot so the next symbol
+                    # in this cycle sees the newly opened position.
+                    try:
+                        from src.models.portfolio import PositionSummary as _PS  # noqa: WPS433
+                        _new_pos = _PS(
+                            symbol=symbol,
+                            side=report.signal.action.value.lower() if report.signal else "long",
+                            size=report.execution.quantity if report.execution else 0.0,
+                            entry_price=report.execution.avg_price if report.execution else 0.0,
+                        )
+                        _current_positions.append(_new_pos)
+                    except Exception:
+                        pass  # correlation gate degrades gracefully
 
                 # Story 029a — observe safety-net breakers per cycle outcome
                 await self._check_breakers(report=report)
@@ -292,6 +429,13 @@ class NickFury(BaseAgent[list[CycleReport]]):
             # Persistence failure must not break the main cycle return value.
             self._log.error(f"[NickFury] daily_pnl record_cycle failed: {exc}")
 
+        # Story 049 — fire DailyPerformanceWriter once per UTC day (no-op if already ran)
+        try:
+            import asyncio as _asyncio  # noqa: WPS433
+            _asyncio.create_task(self._perf_writer.maybe_run(), name="daily_perf_writer")
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"[NickFury] daily_perf_writer task failed to start: {exc}")
+
         return reports
 
     async def _cycle_for_symbol(
@@ -302,6 +446,7 @@ class NickFury(BaseAgent[list[CycleReport]]):
         trades_today: int,
         open_positions: int = 0,
         running_notional_usd: float = 0.0,
+        current_positions: list | None = None,  # [Story 057] correlation gate
     ) -> CycleReport:
         # 1. Analysis fan-out
         try:
@@ -340,6 +485,37 @@ class NickFury(BaseAgent[list[CycleReport]]):
 
         signal_id = await MekkaRepository.save_signal(signal)
 
+        # Story 063 — Episodic Memory: record actionable signals so Batman/Vision
+        # can query historical win-rates for similar patterns in future cycles.
+        # Only record LONG/SHORT (not HOLD). Fails silently — never breaks cycle.
+        if signal.action != TradeAction.HOLD and signal.is_actionable:
+            try:
+                from src.persistence.agent_memory import AgentMemoryStore as _AMS  # noqa: WPS433
+                _chart = analysis.chart if analysis else None
+                _rsi = _chart.rsi_14 if _chart else None
+                _trend = _chart.trend.value if _chart else "NEUTRAL"
+                _vol_elev = bool(_chart.volume_spike) if _chart else False
+                # Cache RSI + trend into signal metadata so Batman can re-read them
+                if signal.metadata is None:
+                    signal = signal.model_copy(update={"metadata": {}})
+                _meta_update = dict(signal.metadata)
+                _meta_update.update({
+                    "rsi": round(_rsi, 1) if _rsi is not None else None,
+                    "trend": _trend,
+                })
+                signal = signal.model_copy(update={"metadata": _meta_update})
+                await _AMS.record_signal(
+                    symbol=symbol,
+                    action=signal.action.value,
+                    rsi=_rsi,
+                    trend=_trend,
+                    volume_elevated=_vol_elev,
+                    confidence=signal.confidence,
+                    signal_id=signal_id,
+                )
+            except Exception as _mem_exc:  # noqa: BLE001
+                self._log.debug(f"[NickFury] Episodic memory record skipped: {_mem_exc}")
+
         # 3. Batman risk gate
         approval = await self._batman.run(
             signal=signal,
@@ -350,6 +526,7 @@ class NickFury(BaseAgent[list[CycleReport]]):
             trades_today=trades_today,
             running_notional_usd=running_notional_usd,
             equity_usd=equity_usd,
+            current_positions=current_positions or [],  # [Story 057] correlation gate
         )
 
         await MekkaRepository.log_event(
@@ -569,19 +746,14 @@ class NickFury(BaseAgent[list[CycleReport]]):
             message=plan.summary(),
             payload=plan.to_audit_payload(),
         )
-        # Story 035 — only push when Wolverine engaged kill switch
+        # Stories 035 / 059 — rich Telegram alert when kill switch fires
         if plan.kill_switch_engaged:
-            await self._telegram.alert(
-                event="MONITOR_RECOVERY_PLAN",
-                severity="ERROR",
-                agent="Wolverine",
-                message=plan.summary(),
-                payload={
-                    "kill_switch_engaged": True,
-                    "intraday_drawdown_pct": plan.intraday_drawdown_pct,
-                    "positions": len(plan.positions),
-                },
-            )
+            asyncio.create_task(self._telegram.wolverine_kill_switch(
+                intraday_drawdown_pct=plan.intraday_drawdown_pct,
+                positions_count=len(plan.positions),
+                notes=plan.notes,
+                is_paper=settings.paper_trading,
+            ))
 
         # [C1] Execute actionable positions — Wolverine reasons, IronMan acts.
         actions_taken = 0
@@ -615,14 +787,22 @@ class NickFury(BaseAgent[list[CycleReport]]):
 
         For CLOSE / EMERGENCY_CLOSE: create an offsetting paper trade that
         nets out the position. For SCALE_OUT: close 50% of the position.
-        TIGHTEN_STOP / TRAIL_STOP are advisory only (no order modification
-        implemented yet — logged for operator awareness).
+        For TIGHTEN_STOP / TRAIL_STOP (Story 058): modify the stop-loss (and
+        optionally take-profit) on the exchange (live) or in the DB (paper,
+        so Cyclops honours the new price on the next monitor cycle).
 
         Returns the count of positions where an action was taken.
         """
         from src.models.recovery import RecoveryAction  # noqa: WPS433
 
-        _ACTIONABLE = {RecoveryAction.CLOSE, RecoveryAction.EMERGENCY_CLOSE, RecoveryAction.SCALE_OUT}
+        _SL_MODIFY_ACTIONS = {RecoveryAction.TIGHTEN_STOP, RecoveryAction.TRAIL_STOP}
+        _ACTIONABLE = {
+            RecoveryAction.CLOSE,
+            RecoveryAction.EMERGENCY_CLOSE,
+            RecoveryAction.SCALE_OUT,
+            RecoveryAction.TIGHTEN_STOP,
+            RecoveryAction.TRAIL_STOP,
+        }
         actions_taken = 0
 
         for pos_update in plan.positions:
@@ -635,6 +815,85 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 or current_prices.get(symbol.upper())
                 or pos_update.entry_price
             )
+
+            # ----------------------------------------------------------------
+            # [Story 058] TIGHTEN_STOP / TRAIL_STOP — modify SL/TP in place
+            # ----------------------------------------------------------------
+            if pos_update.action in _SL_MODIFY_ACTIONS:
+                new_sl = pos_update.new_stop_loss
+                new_tp = pos_update.new_take_profit
+
+                if new_sl is None:
+                    self._log.warning(
+                        f"[Wolverine/C1] {pos_update.action.value} for {symbol}: "
+                        "no new_stop_loss provided — skipping"
+                    )
+                    continue
+
+                try:
+                    if settings.paper_trading:
+                        # Paper: update raw metadata so Cyclops uses the new SL
+                        updated = await MekkaRepository.update_trade_sl_tp(
+                            symbol=symbol, new_sl=new_sl, new_tp=new_tp
+                        )
+                        status_msg = f"paper_updated_{updated}_records"
+                    else:
+                        # Live: cancel old bracket orders and place new ones via IronMan
+                        modify_result = await self._ironman.modify_sl_tp(
+                            symbol=symbol,
+                            side=pos_update.side,
+                            quantity=pos_update.size,
+                            new_sl=new_sl,
+                            new_tp=new_tp,
+                        )
+                        status_msg = modify_result.get("status", "unknown")
+
+                    await MekkaRepository.log_event(
+                        agent="Wolverine",
+                        event="SL_MODIFIED",
+                        severity="INFO",
+                        symbol=symbol,
+                        message=(
+                            f"[C1] {pos_update.action.value}: SL→{new_sl:,.4f} "
+                            f"{'TP→' + f'{new_tp:,.4f}' if new_tp else ''} "
+                            f"({pos_update.reason}) [{status_msg}]"
+                        ),
+                        payload={
+                            "action": pos_update.action.value,
+                            "symbol": symbol,
+                            "new_sl": new_sl,
+                            "new_tp": new_tp,
+                            "reason": pos_update.reason,
+                            "mark_price": mark,
+                            "status": status_msg,
+                        },
+                    )
+                    actions_taken += 1
+                    self._log.info(
+                        f"[Wolverine/C1] {pos_update.action.value} executed — "
+                        f"{symbol} SL→{new_sl:,.4f}"
+                        + (f" TP→{new_tp:,.4f}" if new_tp else "")
+                    )
+                    # [Story 059] Telegram alert
+                    from src.services.telegram_alerter import TelegramAlerter  # noqa: WPS433
+                    asyncio.create_task(TelegramAlerter().wolverine_action(
+                        action=pos_update.action.value,
+                        symbol=symbol,
+                        side=pos_update.side,
+                        entry_price=pos_update.entry_price,
+                        mark_price=mark,
+                        size=pos_update.size,
+                        unrealized_pnl_usd=pos_update.unrealized_pnl_usd,
+                        reason=pos_update.reason,
+                        new_sl=new_sl,
+                        new_tp=new_tp,
+                        is_paper=settings.paper_trading,
+                    ))
+                except Exception as _exc:  # noqa: BLE001
+                    self._log.error(
+                        f"[Wolverine/C1] {pos_update.action.value} failed for {symbol}: {_exc}"
+                    )
+                continue  # don't fall through to the close/scale-out branch
 
             # Determine close quantity
             if pos_update.action == RecoveryAction.SCALE_OUT:
@@ -693,6 +952,20 @@ class NickFury(BaseAgent[list[CycleReport]]):
                         f"[Wolverine/C1] {pos_update.action.value} executed — "
                         f"{close_qty:.6f} {symbol} @ {mark:,.4f}"
                     )
+                    # [Story 059] Telegram alert
+                    from src.services.telegram_alerter import TelegramAlerter  # noqa: WPS433
+                    asyncio.create_task(TelegramAlerter().wolverine_action(
+                        action=pos_update.action.value,
+                        symbol=symbol,
+                        side=pos_update.side,
+                        entry_price=pos_update.entry_price,
+                        mark_price=mark,
+                        size=pos_update.size,
+                        unrealized_pnl_usd=pos_update.unrealized_pnl_usd,
+                        reason=pos_update.reason,
+                        close_qty=close_qty,
+                        is_paper=True,
+                    ))
                 except Exception as _exc:  # noqa: BLE001
                     self._log.error(f"[Wolverine/C1] save_trade failed for {symbol}: {_exc}")
             else:
@@ -729,6 +1002,20 @@ class NickFury(BaseAgent[list[CycleReport]]):
                     )
                     await MekkaRepository.save_trade(execution=exec_result)
                     actions_taken += 1
+                    # [Story 059] Telegram alert
+                    from src.services.telegram_alerter import TelegramAlerter  # noqa: WPS433
+                    asyncio.create_task(TelegramAlerter().wolverine_action(
+                        action=pos_update.action.value,
+                        symbol=symbol,
+                        side=pos_update.side,
+                        entry_price=pos_update.entry_price,
+                        mark_price=mark,
+                        size=pos_update.size,
+                        unrealized_pnl_usd=pos_update.unrealized_pnl_usd,
+                        reason=pos_update.reason,
+                        close_qty=close_qty,
+                        is_paper=False,
+                    ))
                 except Exception as _exc:  # noqa: BLE001
                     self._log.error(
                         f"[Wolverine/C1] live close failed for {symbol}: {_exc}"

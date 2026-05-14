@@ -63,6 +63,10 @@
           <li><a href="#sec-signals">Vision Signals</a></li>
           <li><a href="#sec-trades">Iron Man Executions</a></li>
         </ul>
+        <button class="page-nav-btn" data-page="memory">🧠 Memory</button>
+        <ul class="page-nav-sub">
+          <li><a href="#sec-memory">Episodic Memory</a></li>
+        </ul>
         <button class="page-nav-btn" data-page="risk">Risk</button>
         <ul class="page-nav-sub">
           <li><a href="#sec-risk">Risk Heatmap</a></li>
@@ -571,6 +575,26 @@
         </table>
       </section>
 
+      <!-- ── Episodic Memory Panel (Story 064) ──────────────────────────── -->
+      <section class="panel full memory-panel" id="sec-memory" data-page="memory">
+        <div class="memory-header">
+          <h2>🧠 Episodic Memory — O que os Agentes Aprenderam</h2>
+          <div class="memory-meta" id="memory-meta">Carregando...</div>
+        </div>
+        <div class="memory-summary-row" id="memory-summary-chips">
+          <!-- chips: total / resolved / pending -->
+        </div>
+        <div class="memory-grid" id="memory-grid">
+          <!-- cards por símbolo+direção -->
+        </div>
+        <div class="memory-feed-wrap">
+          <h3 class="memory-feed-title">Últimos Outcomes Resolvidos</h3>
+          <div class="memory-feed" id="memory-feed">
+            <!-- recent outcomes stream -->
+          </div>
+        </div>
+      </section>
+
       <section class="panel full" id="sec-audit" data-page="logs">
         <h2>Hero Audit Stream</h2>
         <div class="log" id="audit-log"></div>
@@ -611,6 +635,12 @@
               <option value="1d">1d</option>
             </select>
           </div>
+          <!-- Indicator toggles -->
+          <div class="live-ctrl live-ind-toggles">
+            <button class="live-ind-btn" id="ind-btn-bb"   title="Bollinger Bands (20,2)" onclick="_liveToggleIndicator('bb')">BB</button>
+            <button class="live-ind-btn" id="ind-btn-rsi"  title="RSI (14)"               onclick="_liveToggleIndicator('rsi')">RSI</button>
+            <button class="live-ind-btn" id="ind-btn-macd" title="MACD (12,26,9)"          onclick="_liveToggleIndicator('macd')">MACD</button>
+          </div>
           <!-- Ticker strip -->
           <div class="live-ticker" id="live-ticker">
             <span class="live-ticker-price" id="live-price">—</span>
@@ -621,10 +651,20 @@
 
         <!-- Main split: chart | positions -->
         <div class="live-split">
-          <!-- Candlestick chart -->
+          <!-- Candlestick chart + indicator sub-panels -->
           <div class="live-chart-wrap">
             <div id="live-chart" class="live-chart"></div>
             <div class="live-chart-legend" id="live-legend"></div>
+            <!-- RSI sub-panel -->
+            <div id="live-rsi-wrap" class="live-sub-wrap hidden">
+              <span class="live-sub-label">RSI <span class="live-sub-label-val" id="live-rsi-val">—</span></span>
+              <div id="live-rsi-chart" class="live-sub-chart"></div>
+            </div>
+            <!-- MACD sub-panel -->
+            <div id="live-macd-wrap" class="live-sub-wrap hidden">
+              <span class="live-sub-label">MACD <span class="live-sub-label-val" id="live-macd-val">—</span></span>
+              <div id="live-macd-chart" class="live-sub-chart"></div>
+            </div>
           </div>
 
           <!-- Open positions sidebar -->
