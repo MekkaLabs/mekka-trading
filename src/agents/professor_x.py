@@ -151,6 +151,21 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
         return analysis
 
     # ------------------------------------------------------------------
+    # Story 050 — Symbol validation (Altcoins toggle safety net)
+    # ------------------------------------------------------------------
+
+    async def validate_symbols(self, symbols: list[str]) -> list[str]:
+        """
+        Delegate to Superman to filter ``symbols`` against exchange markets.
+
+        Lazily inits Superman if not yet connected. Never raises — returns
+        the original list unchanged on any failure so the cycle continues.
+        """
+        if self._superman is None:
+            self._superman = Superman()
+        return await self._superman.validate_symbols(symbols)
+
+    # ------------------------------------------------------------------
     # Helper
     # ------------------------------------------------------------------
 

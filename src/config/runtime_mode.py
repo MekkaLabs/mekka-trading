@@ -46,6 +46,12 @@ PRESETS: dict[str, dict[str, Any]] = {
         "max_trades_per_day": 3,
         "trading_assets": ["BTC"],
         "min_risk_reward_ratio": 2.0,
+        # Story 050 — VisionCritic threshold: lower = critic fires more easily (fewer trades)
+        "vision_critic_min_disagreement": 0.20,
+        # Story 057 — Correlation gate: apply size penalty after N same-dir positions
+        # and hard-reject after M. Conservative = tightest limits.
+        "correlation_penalty_threshold": 1,   # 1st same-dir → 60% size reduction
+        "correlation_reject_threshold": 2,    # 2nd same-dir → REJECT
     },
     "balanced": {
         "label": "⚖️ Balanceado",
@@ -58,6 +64,11 @@ PRESETS: dict[str, dict[str, Any]] = {
         "max_trades_per_day": 10,
         "trading_assets": ["BTC", "ETH", "SOL"],
         "min_risk_reward_ratio": 1.5,
+        # Story 050 — VisionCritic threshold: matches current settings default
+        "vision_critic_min_disagreement": 0.30,
+        # Story 057 — Correlation gate
+        "correlation_penalty_threshold": 1,   # 1st same-dir → 50% size reduction
+        "correlation_reject_threshold": 2,    # 2nd same-dir → REJECT
     },
     "aggressive": {
         "label": "⚡ Agressivo",
@@ -70,6 +81,11 @@ PRESETS: dict[str, dict[str, Any]] = {
         "max_trades_per_day": 20,
         "trading_assets": ["BTC", "ETH", "SOL", "AVAX"],
         "min_risk_reward_ratio": 1.2,
+        # Story 050 — VisionCritic threshold: higher = critic rarely overrides (more trades)
+        "vision_critic_min_disagreement": 0.45,
+        # Story 057 — Correlation gate: relaxed in aggressive mode
+        "correlation_penalty_threshold": 2,   # 2nd same-dir → 40% size reduction
+        "correlation_reject_threshold": 3,    # 3rd same-dir → REJECT
     },
 }
 

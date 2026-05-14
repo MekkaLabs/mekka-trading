@@ -23,6 +23,7 @@ Hard rules
 
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 from src.agents.base import BaseAgent
@@ -37,6 +38,9 @@ _BURST_PCT_UP = 0.005             # +0.5% net move = up burst
 _BURST_PCT_DOWN = -0.005          # -0.5% net move = down burst
 _VOLUME_SPIKE_THRESHOLD = 1.5     # current volume / avg ≥ this → spike
 _DEFAULT_WINDOW_SECONDS = 300     # default 5-min window
+# Story 050 — Circuit breaker: minimum seconds between runs for the same symbol.
+# Prevents audit log spam and redundant computations in fast cycles.
+_CACHE_TTL_SECONDS = 60           # 1 minute cool-down per symbol
 
 
 def _safe_div(num: float, den: float) -> float:
@@ -86,6 +90,10 @@ class Flash(BaseAgent[MomentumSignal]):
             codename="Flash",
             role="Momentum Scalper — intra-candle burst detector",
         )
+        # Story 050 — per-symbol result cache: {symbol: (timestamp, MomentumSignal)}
+        # Acts as a circuit breaker: if called again within _CACHE_TTL_SECONDS,
+        # returns the cached result without recomputing or logging.
+        self._cache: dict[str, tuple[float, MomentumSignal]] = {}
 
     async def _run(  # type: ignore[override]
         self,
@@ -107,6 +115,17 @@ class Flash(BaseAgent[MomentumSignal]):
                          into the output `entry_window_seconds` so a future
                          consumer knows how fresh the signal is.
         """
+        # Story 050 — Circuit breaker: return cached result if still fresh
+        now = time.monotonic()
+        cached = self._cache.get(symbol)
+        if cached is not None:
+            ts_cached, sig_cached = cached
+            if now - ts_cached < _CACHE_TTL_SECONDS:
+                self._log.debug(
+                    f"[Flash] {symbol} — cache hit ({now - ts_cached:.0f}s < {_CACHE_TTL_SECONDS}s TTL)"
+                )
+                return sig_cached
+
         prices = list(recent_prices or [])
         volumes = list(recent_volumes or [])
 
@@ -122,6 +141,7 @@ class Flash(BaseAgent[MomentumSignal]):
                 notes=f"Insufficient price history ({len(prices)} < {_MIN_HISTORY})",
             )
             self._log.info(sig.summary())
+            self._cache[symbol] = (now, sig)
             return sig
 
         first = float(prices[0])
@@ -158,4 +178,5 @@ class Flash(BaseAgent[MomentumSignal]):
             notes=" | ".join(notes_bits),
         )
         self._log.info(sig.summary())
+        self._cache[symbol] = (now, sig)  # Story 050 — update circuit breaker cache
         return sig

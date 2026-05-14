@@ -32,11 +32,14 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
 from src.persistence.repository import MekkaRepository
+
+if TYPE_CHECKING:
+    from src.models.performance import PerformanceReport
 
 logger = logging.getLogger("mekka.dashboard.daily_reporter")
 
@@ -75,8 +78,17 @@ def _dd_emoji(dd: float) -> str:
     return "✅"
 
 
-def build_telegram_message(today: dict, all_time: dict, date_str: str) -> str:
-    """Build Telegram Markdown (v1) text for the daily report."""
+def build_telegram_message(
+    today: dict,
+    all_time: dict,
+    date_str: str,
+    perf: "PerformanceReport | None" = None,
+) -> str:
+    """Build Telegram Markdown (v1) text for the daily report.
+
+    ``perf`` is an optional Deadpool PerformanceReport that, when present,
+    adds Sortino, streaks, expectancy and the verdict to the message.
+    """
     pnl = today.get("pnl_usd", 0.0)
     equity = today.get("latest_equity_usd", 0.0)
     trades = today.get("trades", 0)
@@ -107,6 +119,38 @@ def build_telegram_message(today: dict, all_time: dict, date_str: str) -> str:
         f"Trades total: {at_trades}",
         f"Win rate    : {_win_rate_str(at_wr)}",
     ]
+
+    # ── Deadpool advanced metrics (Story 062) ────────────────────────
+    if perf is not None:
+        adv: list[str] = []
+
+        sharpe_str = f"{perf.sharpe_estimate:.2f}" if perf.sharpe_estimate is not None else "n/a"
+        sortino_str = f"{perf.sortino_estimate:.2f}" if perf.sortino_estimate is not None else "n/a"
+        adv.append(f"Sharpe      : {sharpe_str}   Sortino: {sortino_str}")
+
+        exp_str = f"${perf.expectancy_usd:+.2f}/trade" if perf.expectancy_usd is not None else "n/a"
+        avg_w_str = f"${perf.avg_win_usd:.2f}" if perf.avg_win_usd is not None else "n/a"
+        avg_l_str = f"${perf.avg_loss_usd:.2f}" if perf.avg_loss_usd is not None else "n/a"
+        adv.append(f"Expectancy  : {exp_str}  (W avg:{avg_w_str}  L avg:{avg_l_str})")
+
+        streak_cur = perf.current_streak
+        if streak_cur > 0:
+            streak_str = f"🟢 {streak_cur} vitórias seguidas"
+        elif streak_cur < 0:
+            streak_str = f"🔴 {abs(streak_cur)} perdas seguidas"
+        else:
+            streak_str = "neutro"
+        adv.append(f"Streak atual: {streak_str}")
+        adv.append(f"Máx. win streak: {perf.max_winning_streak}   Máx. loss streak: {perf.max_losing_streak}")
+
+        # Verdict
+        _VERDICT_EMOJI = {"READY": "✅", "NOT_READY": "⚠️", "INSUFFICIENT_DATA": "⏳"}
+        v_emoji = _VERDICT_EMOJI.get(perf.verdict, "❓")
+        adv.append(f"Veredicto   : {v_emoji} {perf.verdict}")
+
+        if adv:
+            lines += ["", "─── Deadpool Analytics ───"] + adv
+
     return "\n".join(lines)
 
 
@@ -268,6 +312,16 @@ class DailyReporter:
         today_data = summary.get("window", {})
         all_time_data = summary.get("all_time", {})
 
+        # ── Deadpool advanced metrics (Story 062) ──────────────────────────
+        perf: "PerformanceReport | None" = None
+        try:
+            from src.agents.deadpool import Deadpool  # noqa: WPS433
+            perf = await asyncio.wait_for(
+                Deadpool(self._repo).run(window_days=30), timeout=10.0
+            )
+        except Exception as _exc:  # noqa: BLE001
+            logger.warning("daily_reporter: Deadpool run failed (proceeding without): %s", _exc)
+
         sent_slack = False
         sent_telegram = False
 
@@ -282,7 +336,7 @@ class DailyReporter:
 
         # ── Telegram ───────────────────────────────────────────────────────
         if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-            text = build_telegram_message(today_data, all_time_data, date_str)
+            text = build_telegram_message(today_data, all_time_data, date_str, perf=perf)
             tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             sent_telegram = await self._post_with_retry(
                 tg_url,

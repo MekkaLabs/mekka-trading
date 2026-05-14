@@ -24,6 +24,7 @@ from loguru import logger
 from src.agents.nick_fury import NickFury, run_forever
 from src.config.settings import settings
 from src.dashboard.server import run_dashboard_server
+from src.persistence.repository import MekkaRepository
 
 
 def _configure_logger() -> None:
@@ -49,6 +50,51 @@ def _configure_logger() -> None:
         ),
         filter=lambda r: "agent" not in r["extra"],
     )
+
+
+async def _run_forever_with_inbound(equity_usd: float | None = None) -> None:
+    """
+    Like nick_fury.run_forever but also starts TelegramInboundPoller when
+    ``settings.telegram_inbound_enabled`` is True.
+
+    Creates NickFury directly (instead of delegating to the module-level
+    run_forever) so the fury instance can be injected into the poller.
+    """
+    fury = NickFury()
+    await fury.initialize()
+
+    # Story 049 — start Telegram inbound command poller (fire-and-forget task)
+    if settings.telegram_inbound_enabled:
+        try:
+            from src.services.telegram_inbound import TelegramInboundPoller  # noqa: WPS433
+            poller = TelegramInboundPoller(
+                nick_fury=fury,
+                portfolio=fury._portfolio,
+                repo=MekkaRepository,
+            )
+            asyncio.create_task(poller.run_forever(), name="telegram_inbound")
+            logger.info("[run] TelegramInboundPoller started")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[run] TelegramInboundPoller failed to start (non-fatal): {}", exc)
+
+    monitor_interval = settings.monitor_interval_seconds
+    main_interval = settings.main_loop_interval_seconds
+    last_main_at = 0.0
+
+    try:
+        while True:
+            now = asyncio.get_event_loop().time()
+            if now - last_main_at >= main_interval:
+                logger.info("[NickFury] Starting main cycle")
+                await fury.run_main_cycle(equity_usd=equity_usd)
+                last_main_at = now
+            else:
+                await fury.run_monitor_cycle()
+            await asyncio.sleep(monitor_interval)
+    except asyncio.CancelledError:
+        logger.info("[NickFury] Loop cancelled — shutting down")
+    finally:
+        await fury.shutdown()
 
 
 async def _run_once(equity_usd: float) -> int:
@@ -128,7 +174,7 @@ def main() -> int:
                 # Exception on 3.11+) and log every wrapped error.
                 try:
                     async with asyncio.TaskGroup() as tg:
-                        tg.create_task(run_forever(equity_usd=args.equity))
+                        tg.create_task(_run_forever_with_inbound(equity_usd=args.equity))
                         tg.create_task(
                             run_dashboard_server(
                                 host=args.dashboard_host,
@@ -148,7 +194,7 @@ def main() -> int:
 
             asyncio.run(_run_both())
             return 0
-        asyncio.run(run_forever(equity_usd=args.equity))
+        asyncio.run(_run_forever_with_inbound(equity_usd=args.equity))
         return 0
     except KeyboardInterrupt:
         logger.info("[run] Interrupted by user")

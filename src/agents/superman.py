@@ -210,6 +210,102 @@ class Superman(BaseAgent[MarketData]):
             self._exchange_id = ""
 
     # ------------------------------------------------------------------
+    # Story 050 — Symbol validation for Altcoins toggle
+    # ------------------------------------------------------------------
+
+    async def validate_symbols(self, symbols: list[str]) -> list[str]:
+        """
+        Filter ``symbols`` to only those available on the active exchange.
+
+        Returns a list preserving the original order, dropping any symbol
+        whose perpetual contract is not in the exchange's market list.
+        Never raises — on any error returns the original list unchanged so
+        the cycle continues with best-effort assets.
+        """
+        try:
+            exchange = await self._get_exchange()
+            markets = exchange.markets or {}
+            available: list[str] = []
+            for sym in symbols:
+                if self._exchange_id in ("binance", "bybit"):
+                    ccxt_sym = f"{sym}/USDT:USDT"
+                else:
+                    ccxt_sym = f"{sym}/USDC:USDC"
+                if ccxt_sym in markets:
+                    available.append(sym)
+                else:
+                    self._log.warning(
+                        f"[Superman] {sym} ({ccxt_sym}) not in {self._exchange_id} markets — skipped"
+                    )
+            return available if available else symbols
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(
+                f"[Superman] validate_symbols failed (using full list): {exc}"
+            )
+            return symbols
+
+    # ------------------------------------------------------------------
+    # Story 050 — Retry helper for OHLCV fetches
+    # ------------------------------------------------------------------
+
+    async def _fetch_ohlcv_with_retry(
+        self,
+        exchange: Any,
+        ccxt_symbol: str,
+        timeframe: str,
+        limit: int,
+    ) -> list:
+        """
+        Fetch OHLCV with exponential backoff for rate-limit and network errors.
+
+        Retries up to ``settings.superman_max_retries`` times (default 3)
+        with backoff of 1s → 2s → 4s.  Other errors propagate immediately.
+        """
+        import asyncio as _aio  # noqa: WPS433
+
+        try:
+            import ccxt  # noqa: WPS433
+            _RateLimitExceeded = ccxt.RateLimitExceeded
+            _NetworkError = ccxt.NetworkError
+        except (ImportError, AttributeError):
+            _RateLimitExceeded = Exception  # type: ignore[assignment,misc]
+            _NetworkError = Exception  # type: ignore[assignment,misc]
+
+        max_retries: int = getattr(settings, "superman_max_retries", 3)
+        base_backoff = 1.0
+
+        for attempt in range(max_retries + 1):
+            try:
+                return await exchange.fetch_ohlcv(ccxt_symbol, timeframe, limit=limit)
+            except _RateLimitExceeded as exc:
+                if attempt < max_retries:
+                    wait = base_backoff * (2 ** attempt)
+                    self._log.warning(
+                        f"[Superman] RateLimitExceeded for {ccxt_symbol} — "
+                        f"retry {attempt + 1}/{max_retries} in {wait:.0f}s"
+                    )
+                    await _aio.sleep(wait)
+                else:
+                    raise AgentError(
+                        "Superman",
+                        f"RateLimitExceeded after {max_retries} retries for {ccxt_symbol}: {exc}",
+                    ) from exc
+            except _NetworkError as exc:
+                if attempt < max_retries:
+                    wait = base_backoff
+                    self._log.warning(
+                        f"[Superman] NetworkError for {ccxt_symbol} — "
+                        f"retry {attempt + 1}/{max_retries} in {wait:.0f}s"
+                    )
+                    await _aio.sleep(wait)
+                else:
+                    raise AgentError(
+                        "Superman",
+                        f"NetworkError after {max_retries} retries for {ccxt_symbol}: {exc}",
+                    ) from exc
+        return []  # unreachable but satisfies type-checkers
+
+    # ------------------------------------------------------------------
     # Core logic
     # ------------------------------------------------------------------
 
@@ -244,9 +340,11 @@ class Superman(BaseAgent[MarketData]):
         else:
             ccxt_symbol = f"{symbol}/USDC:USDC"
 
-        # --- Fetch OHLCV ---
+        # --- Fetch OHLCV (Story 050 — with exponential backoff retry) ---
         try:
-            raw = await exchange.fetch_ohlcv(ccxt_symbol, tf, limit=limit)
+            raw = await self._fetch_ohlcv_with_retry(exchange, ccxt_symbol, tf, limit)
+        except AgentError:
+            raise
         except Exception as exc:
             raise AgentError(
                 "Superman",

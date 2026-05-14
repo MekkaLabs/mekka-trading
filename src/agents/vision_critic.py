@@ -161,9 +161,20 @@ class VisionCritic(BaseAgent[VisionCritique]):
             return self._fallback_endorse(symbol, reason=f"Parse error: {exc}")
 
         # Disagreement floor: small deltas downgrade to ENDORSE.
+        # Story 050 — threshold is now mode-aware: conservative=0.20,
+        # balanced=0.30, aggressive=0.45. Falls back to settings value.
+        try:
+            from src.config.runtime_mode import get_params as _get_mode_params  # noqa: WPS433
+            _min_disagreement = _get_mode_params().get(
+                "vision_critic_min_disagreement",
+                settings.vision_critic_min_disagreement,
+            )
+        except Exception:  # noqa: BLE001
+            _min_disagreement = settings.vision_critic_min_disagreement
+
         if (
             critique.action != CritiqueAction.ENDORSE
-            and critique.confidence_delta < settings.vision_critic_min_disagreement
+            and critique.confidence_delta < _min_disagreement
         ):
             critique.action = CritiqueAction.ENDORSE
             critique.amended_size_pct = None
@@ -173,7 +184,7 @@ class VisionCritic(BaseAgent[VisionCritique]):
             critique.reasoning = (
                 f"{critique.reasoning} (downgraded to ENDORSE: delta "
                 f"{critique.confidence_delta:.2f} < threshold "
-                f"{settings.vision_critic_min_disagreement:.2f})"
+                f"{_min_disagreement:.2f} [{_get_mode_params().get('label', '?')}])"
             )
 
         self._log.info(critique.summary())

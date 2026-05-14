@@ -69,6 +69,21 @@ class PerformanceReport(BaseModel):
     max_drawdown_pct: float = Field(default=0.0, ge=0.0)
     sharpe_estimate: Optional[float] = Field(default=None)  # None = insufficient data
 
+    # ---- Story 062 — advanced metrics ---------------------------------
+    # Sortino ratio: like Sharpe but penalises only downside volatility.
+    sortino_estimate: Optional[float] = Field(default=None)
+
+    # Trade-level consecutive streaks (positive wins / negative = losses).
+    max_winning_streak: int = Field(default=0, ge=0)
+    max_losing_streak: int = Field(default=0, ge=0)
+    # current_streak > 0 = N consecutive wins; < 0 = N consecutive losses.
+    current_streak: int = Field(default=0)
+
+    # Expectancy = win_rate × avg_win − loss_rate × avg_loss (USD per trade).
+    expectancy_usd: Optional[float] = Field(default=None)
+    avg_win_usd: Optional[float] = Field(default=None)
+    avg_loss_usd: Optional[float] = Field(default=None)  # stored as positive number
+
     # ---- Agent-quality metrics ----------------------------------------
     # Wolverine: proportion of MONITOR_RECOVERY_PLAN cycles where action == HOLD
     # (proxy for "Wolverine agrees the position is healthy and doesn't need rescue").

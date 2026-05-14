@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from src.config.settings import settings
@@ -53,7 +54,23 @@ async def init_engine() -> AsyncEngine:
         url,
         echo=False,
         future=True,
+        # aiosqlite serializes writes to the event loop — pool_size is 1
+        pool_pre_ping=True,
     )
+
+    # WAL mode: allows concurrent reads while a write is in progress.
+    # Critical for production: dashboard (reads) + NickFury (writes) run in
+    # separate processes and share the same SQLite file. Without WAL the
+    # default DELETE journal causes OperationalError: database is locked.
+    @event.listens_for(_engine.sync_engine, "connect")
+    def _set_sqlite_pragmas(dbapi_conn, _connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")   # safe with WAL
+        cursor.execute("PRAGMA foreign_keys=ON")       # enforce FK integrity
+        cursor.execute("PRAGMA busy_timeout=5000")     # wait 5s on lock instead of fail
+        cursor.close()
+
     _sessionmaker = async_sessionmaker(
         _engine, expire_on_commit=False, class_=AsyncSession
     )

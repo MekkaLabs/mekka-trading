@@ -153,6 +153,7 @@ class Deadpool:
         # Sharpe values for the same strategy run at different equity levels.
         # Annualised with sqrt(252) trading-day convention.
         sharpe_estimate: Optional[float] = None
+        daily_returns: list[float] = []
         if days_with_data >= 5:
             daily_returns = [float(r.pnl_pct or 0) for r in daily_rows]
             mean_r = sum(daily_returns) / len(daily_returns)
@@ -160,6 +161,19 @@ class Deadpool:
             std_r = math.sqrt(variance)
             if std_r > 0:
                 sharpe_estimate = round((mean_r / std_r) * math.sqrt(252), 4)
+
+        # ---- Sortino estimate ----------------------------------------
+        # Penalises only downside (negative) daily returns.
+        # Annualised with sqrt(252) convention.
+        sortino_estimate: Optional[float] = None
+        if days_with_data >= 5 and daily_returns:
+            mean_r = sum(daily_returns) / len(daily_returns)
+            downside = [r for r in daily_returns if r < 0]
+            if downside:
+                ds_variance = sum(r ** 2 for r in downside) / len(daily_returns)
+                ds_std = math.sqrt(ds_variance)
+                if ds_std > 0:
+                    sortino_estimate = round((mean_r / ds_std) * math.sqrt(252), 4)
 
         # ---- Wolverine SL endorsement rate ---------------------------
         wolverine_sl_endorse_rate_pct = self._wolverine_endorse_rate(audit_rows, notes)
@@ -184,6 +198,11 @@ class Deadpool:
                 100.0 * approved / len(signal_rows), 2
             )
 
+        # ---- Trade streaks + expectancy (Story 062) ------------------
+        max_win_streak, max_loss_streak, current_streak, \
+            expectancy_usd, avg_win_usd, avg_loss_usd = \
+            self._trade_stats(trade_rows)
+
         # ---- Per-symbol breakdown ------------------------------------
         top_symbols, bottom_symbols = self._symbol_breakdown(trade_rows)
 
@@ -207,6 +226,13 @@ class Deadpool:
             avg_daily_pnl_usd=round(avg_daily_pnl, 4),
             max_drawdown_pct=round(max_drawdown, 4),
             sharpe_estimate=sharpe_estimate,
+            sortino_estimate=sortino_estimate,
+            max_winning_streak=max_win_streak,
+            max_losing_streak=max_loss_streak,
+            current_streak=current_streak,
+            expectancy_usd=expectancy_usd,
+            avg_win_usd=avg_win_usd,
+            avg_loss_usd=avg_loss_usd,
             wolverine_sl_endorse_rate_pct=wolverine_sl_endorse_rate_pct,
             signal_actionable_rate_pct=signal_actionable_rate_pct,
             batman_approval_rate_pct=batman_approval_rate_pct,
@@ -271,6 +297,70 @@ class Deadpool:
             return None
 
         return round(100.0 * endorsed / total_cycles, 2)
+
+    @staticmethod
+    def _trade_stats(
+        trade_rows: list,
+    ) -> tuple[int, int, int, Optional[float], Optional[float], Optional[float]]:
+        """Compute streak and expectancy metrics from individual trade records.
+
+        Returns (max_win_streak, max_loss_streak, current_streak,
+                 expectancy_usd, avg_win_usd, avg_loss_usd).
+
+        Streaks are computed from chronologically ordered resolved trades
+        (those with a non-None pnl_usd). current_streak is positive for a
+        winning streak and negative for a losing streak.
+
+        Expectancy = win_rate × avg_win − loss_rate × avg_loss (in USD).
+        avg_loss_usd is stored as a positive number.
+        """
+        # Filter to resolved trades with PnL, sort chronologically
+        resolved = [
+            (getattr(r, "timestamp", None), float(getattr(r, "pnl_usd", 0) or 0))
+            for r in trade_rows
+            if getattr(r, "pnl_usd", None) is not None
+            and (getattr(r, "status", "") or "").upper() in ("FILLED", "PAPER")
+        ]
+        resolved.sort(key=lambda x: x[0] or "")
+
+        if not resolved:
+            return 0, 0, 0, None, None, None
+
+        # ---- Streaks ----
+        max_w = max_l = 0
+        cur_w = cur_l = 0
+        for _, pnl in resolved:
+            if pnl > 0:
+                cur_w += 1
+                cur_l = 0
+                max_w = max(max_w, cur_w)
+            elif pnl < 0:
+                cur_l += 1
+                cur_w = 0
+                max_l = max(max_l, cur_l)
+            # pnl == 0: neutral — break neither streak
+        current_streak = cur_w if cur_w > 0 else -cur_l
+
+        # ---- Expectancy ----
+        pnls = [pnl for _, pnl in resolved]
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p < 0]
+        n_total = len(wins) + len(losses)
+
+        expectancy_usd: Optional[float] = None
+        avg_win_usd: Optional[float] = None
+        avg_loss_usd: Optional[float] = None
+
+        if n_total > 0:
+            wr = len(wins) / n_total
+            lr = 1.0 - wr
+            avg_w = sum(wins) / len(wins) if wins else 0.0
+            avg_l = abs(sum(losses) / len(losses)) if losses else 0.0
+            avg_win_usd = round(avg_w, 4)
+            avg_loss_usd = round(avg_l, 4)
+            expectancy_usd = round(wr * avg_w - lr * avg_l, 4)
+
+        return max_w, max_l, current_streak, expectancy_usd, avg_win_usd, avg_loss_usd
 
     @staticmethod
     def _symbol_breakdown(

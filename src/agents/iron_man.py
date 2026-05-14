@@ -599,6 +599,183 @@ class IronMan(BaseAgent[ExecutionResult]):
         )
 
     # ------------------------------------------------------------------
+    # Story 058 — SL/TP modification (TIGHTEN_STOP / TRAIL_STOP)
+    # ------------------------------------------------------------------
+
+    async def modify_sl_tp(
+        self,
+        symbol: str,
+        side: str,          # 'long' or 'short'
+        quantity: float,
+        new_sl: float,
+        new_tp: Optional[float] = None,
+    ) -> dict:
+        """Cancel the existing bracket orders and place new SL (and optionally TP).
+
+        In paper mode this is a no-op at the exchange level — the caller must
+        update the DB record so Cyclops picks up the new stop price.
+        In live mode the method cancels all open reduce-only orders for the
+        symbol and re-submits fresh bracket orders at the new prices.
+
+        Returns a dict with at minimum ``{"status": ..., "symbol": ...}``.
+        """
+        if settings.paper_trading:
+            return {"status": "paper_noop", "symbol": symbol, "new_sl": new_sl, "new_tp": new_tp}
+
+        # Live-trading guard (mirrors _run)
+        if not settings.live_trading_confirmed:
+            self._log.error("[IronMan/modify_sl_tp] BLOCKED: live_trading_confirmed=False")
+            return {"status": "blocked", "symbol": symbol, "error": "live_trading_confirmed=False"}
+
+        try:
+            active = settings.active_exchange
+            if active == "hyperliquid":
+                return await self._modify_sl_tp_hyperliquid(symbol, side, quantity, new_sl, new_tp)
+            else:
+                return await self._modify_sl_tp_ccxt(symbol, side, quantity, new_sl, new_tp, active)
+        except Exception as exc:  # noqa: BLE001
+            self._log.error(f"[IronMan/modify_sl_tp] {symbol} failed: {exc}")
+            return {"status": "error", "symbol": symbol, "error": str(exc)}
+
+    async def _modify_sl_tp_hyperliquid(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        new_sl: float,
+        new_tp: Optional[float],
+    ) -> dict:
+        """Hyperliquid: cancel open reduce-only orders for symbol, place new bracket."""
+        exchange, info = await self._connect_async()
+        is_buy = side.lower() == "long"
+
+        # 1. Cancel existing bracket orders (all open reduce-only orders for symbol)
+        try:
+            open_orders = await asyncio.to_thread(
+                info.open_orders, settings.hyperliquid_wallet_address
+            )
+            for order in open_orders:
+                if order.get("coin") == symbol:
+                    try:
+                        await asyncio.to_thread(exchange.cancel, symbol, order["oid"])
+                    except Exception as _ce:  # noqa: BLE001
+                        self._log.debug(f"[IronMan/HL] cancel oid={order.get('oid')} failed: {_ce}")
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"[IronMan/HL] open_orders query failed (proceeding): {exc}")
+
+        # 2. Place new SL (reduce-only)
+        sl_resp: Any = await asyncio.to_thread(
+            exchange.order,
+            symbol,
+            not is_buy,     # opposite side closes the position
+            quantity,
+            new_sl,
+            {"trigger": {"isMarket": True, "triggerPx": new_sl, "tpsl": "sl"}},
+            True,           # reduce-only
+        )
+        sl_id = self._extract_oid(sl_resp)
+
+        # 3. Place new TP (reduce-only) if provided
+        tp_id: Optional[str] = None
+        if new_tp is not None:
+            tp_resp: Any = await asyncio.to_thread(
+                exchange.order,
+                symbol,
+                not is_buy,
+                quantity,
+                new_tp,
+                {"trigger": {"isMarket": True, "triggerPx": new_tp, "tpsl": "tp"}},
+                True,
+            )
+            tp_id = self._extract_oid(tp_resp)
+
+        self._log.info(
+            f"[IronMan/HL] modify_sl_tp {symbol} SL→{new_sl} TP→{new_tp} "
+            f"sl_oid={sl_id} tp_oid={tp_id}"
+        )
+        return {
+            "status": "modified",
+            "exchange": "hyperliquid",
+            "symbol": symbol,
+            "new_sl": new_sl,
+            "new_tp": new_tp,
+            "sl_order_id": sl_id,
+            "tp_order_id": tp_id,
+        }
+
+    async def _modify_sl_tp_ccxt(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        new_sl: float,
+        new_tp: Optional[float],
+        exchange_id: str,
+    ) -> dict:
+        """CCXT (Bybit/Binance): cancel open reduce-only orders, place new bracket."""
+        exchange = await self._get_ccxt_exchange(exchange_id)
+        ccxt_symbol = f"{symbol}/USDT:USDT"
+        is_buy = side.lower() == "long"
+        sl_side = "sell" if is_buy else "buy"
+
+        # 1. Cancel existing reduce-only (SL/TP) orders for this symbol
+        try:
+            open_orders = await exchange.fetch_open_orders(ccxt_symbol)
+            for order in open_orders:
+                if order.get("reduceOnly"):
+                    try:
+                        await exchange.cancel_order(order["id"], ccxt_symbol)
+                    except Exception as _ce:  # noqa: BLE001
+                        self._log.debug(
+                            f"[IronMan/{exchange_id}] cancel order={order.get('id')} failed: {_ce}"
+                        )
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"[IronMan/{exchange_id}] fetch_open_orders failed (proceeding): {exc}")
+
+        # 2. Place new SL
+        sl_id: Optional[str] = None
+        try:
+            sl_order = await exchange.create_order(
+                symbol=ccxt_symbol,
+                type="stop_market",
+                side=sl_side,
+                amount=quantity,
+                params={"stopPrice": new_sl, "reduceOnly": True},
+            )
+            sl_id = str(sl_order.get("id") or "")
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"[IronMan/{exchange_id}] new SL placement failed: {exc}")
+
+        # 3. Place new TP if provided
+        tp_id: Optional[str] = None
+        if new_tp is not None:
+            try:
+                tp_order = await exchange.create_order(
+                    symbol=ccxt_symbol,
+                    type="take_profit_market",
+                    side=sl_side,
+                    amount=quantity,
+                    params={"stopPrice": new_tp, "reduceOnly": True},
+                )
+                tp_id = str(tp_order.get("id") or "")
+            except Exception as exc:  # noqa: BLE001
+                self._log.warning(f"[IronMan/{exchange_id}] new TP placement failed: {exc}")
+
+        self._log.info(
+            f"[IronMan/{exchange_id}] modify_sl_tp {symbol} SL→{new_sl} TP→{new_tp} "
+            f"sl_id={sl_id} tp_id={tp_id}"
+        )
+        return {
+            "status": "modified",
+            "exchange": exchange_id,
+            "symbol": symbol,
+            "new_sl": new_sl,
+            "new_tp": new_tp,
+            "sl_order_id": sl_id,
+            "tp_order_id": tp_id,
+        }
+
+    # ------------------------------------------------------------------
     # Response parsers (best-effort)
     # ------------------------------------------------------------------
 
