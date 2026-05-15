@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from loguru import logger
 
@@ -105,6 +105,9 @@ class NickFury(BaseAgent[list[CycleReport]]):
         # Story 049 — DailyPerformanceWriter: once-per-day Deadpool snapshot
         from src.services.daily_performance_writer import DailyPerformanceWriter
         self._perf_writer = DailyPerformanceWriter()
+        # Story 129 — Layer 1 subgraph compilado, injetado por make_checkpointed_graph().
+        # None = fallback para ProfessorX.run() com asyncio.gather (modo clássico).
+        self._layer1_graph: Any = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -543,41 +546,45 @@ class NickFury(BaseAgent[list[CycleReport]]):
         running_notional_usd: float = 0.0,
         current_positions: list | None = None,  # [Story 057] correlation gate
         lg_thread_id: Optional[str] = None,      # [Story 127] set when running under LangGraph
+        layer1_graph: Optional[Any] = None,      # [Story 129] Layer 1 subgraph compilado
     ) -> CycleReport:
         # 1. Analysis fan-out
+        # Story 129 — usa Layer 1 LangGraph subgraph quando disponível (modo --langgraph).
+        # Fallback para ProfessorX.run() com asyncio.gather quando não disponível.
         try:
-            analysis = await self._professor.run(symbol=symbol)
+            if layer1_graph is not None and lg_thread_id is not None:
+                from src.langgraph.layer1_graph import run_layer1_subgraph  # noqa: WPS433
+                analysis = await run_layer1_subgraph(
+                    graph=layer1_graph,
+                    symbol=symbol,
+                    cycle_id=lg_thread_id,
+                )
+            else:
+                analysis = await self._professor.run(symbol=symbol)
         except AgentError as exc:
             return CycleReport(symbol=symbol, error=f"Analysis failed: {exc}")
 
         # 2. Vision strategic decision
         signal = await self._vision.run(analysis=analysis)
 
-        # 2b. Vision Critic — second-look (Story 031, off by default).
-        # Save the post-critique signal so audit reflects what Batman
-        # actually saw, but log the critique separately.
+        # 2b. Vision Reflection Loop — Story 130 (supersedes Story 031 one-shot).
+        # Iterative Vision↔VisionCritic loop (AutoGen Reflection pattern).
+        # Converges early on ENDORSE; max_rounds cap prevents infinite LLM cost.
+        # When vision_reflection_max_rounds=1, behavior is identical to Story 031.
+        # Fails silently — the initial signal stands on any error.
         if settings.vision_critic_enabled:
             try:
-                from src.agents.vision_critic import apply_critique
-                critique = await self._vision_critic.run(
+                signal, _reflection_rounds = await self._vision_reflection_loop(
                     analysis=analysis,
-                    signal=signal,
-                )
-                await MekkaRepository.log_event(
-                    agent="VisionCritic",
-                    event=f"CRITIQUE_{critique.action.value}",
-                    severity="INFO",
+                    initial_signal=signal,
                     symbol=symbol,
-                    message=critique.summary(),
-                    payload=critique.to_audit_payload(),
                 )
-                if critique.is_actionable():
-                    signal = apply_critique(signal=signal, critique=critique)
+                if _reflection_rounds > 1:
+                    self._log.info(
+                        f"[NickFury] {symbol} reflection used {_reflection_rounds} rounds"
+                    )
             except Exception as exc:  # noqa: BLE001
-                # Critic must NEVER break the cycle. Defensive ENDORSE
-                # via fallback path is already handled inside _run, but
-                # any unexpected error here just logs and continues.
-                self._log.warning(f"[NickFury] critic skipped: {exc}")
+                self._log.warning(f"[NickFury] reflection loop failed: {exc}")
 
         signal_id = await MekkaRepository.save_signal(signal)
 
@@ -768,6 +775,103 @@ class NickFury(BaseAgent[list[CycleReport]]):
             approval=approval,
             execution=execution,
         )
+
+    # ------------------------------------------------------------------
+    # Story 130 — Vision Reflection Loop (AutoGen Reflection pattern)
+    # ------------------------------------------------------------------
+
+    async def _vision_reflection_loop(
+        self,
+        analysis: "MarketAnalysis",  # type: ignore[name-defined]
+        initial_signal: TradingSignal,
+        symbol: str,
+    ) -> tuple[TradingSignal, int]:
+        """
+        Iterative Vision↔VisionCritic reflection loop.
+
+        Inspired by AutoGen's Reflection pattern (Coder↔Reviewer):
+          Round 1: VisionCritic evaluates the initial Vision signal.
+          Round 2+: If critic returns AMEND/REJECT, Vision revises its
+            signal with the critique appended to the context.
+          Early exit: loop breaks as soon as critic returns ENDORSE.
+          Last round: applies the critique mechanically via apply_critique()
+            rather than calling Vision again (avoid infinite-cost spiral).
+
+        Returns (final_signal, rounds_used). Never throws — always returns
+        at minimum the initial_signal if all rounds fail.
+        """
+        from src.agents.vision_critic import apply_critique  # noqa: WPS433
+        from src.models.critique import CritiqueAction  # noqa: WPS433
+        from src.models.market_data import MarketAnalysis  # noqa: WPS433
+
+        max_rounds = settings.vision_reflection_max_rounds
+        signal = initial_signal
+
+        for round_num in range(1, max_rounds + 1):
+            try:
+                critique = await self._vision_critic.run(
+                    analysis=analysis,
+                    signal=signal,
+                )
+
+                # Audit every round
+                await MekkaRepository.log_event(
+                    agent="VisionCritic",
+                    event=f"REFLECTION_R{round_num}_{critique.action.value}",
+                    severity="INFO",
+                    symbol=symbol,
+                    message=critique.summary(),
+                    payload={
+                        **critique.to_audit_payload(),
+                        "reflection_round": round_num,
+                        "max_rounds": max_rounds,
+                    },
+                )
+
+                # Converged — critic is satisfied, exit early
+                if critique.action == CritiqueAction.ENDORSE:
+                    self._log.info(
+                        f"[Reflection] {symbol} converged at round {round_num} "
+                        f"(ENDORSE delta={critique.confidence_delta:.2f})"
+                    )
+                    break
+
+                # Last round — apply critique mechanically, no more LLM calls
+                if round_num == max_rounds:
+                    if critique.is_actionable():
+                        signal = apply_critique(signal=signal, critique=critique)
+                    self._log.info(
+                        f"[Reflection] {symbol} max_rounds={max_rounds} reached, "
+                        f"critique applied mechanically"
+                    )
+                    break
+
+                # Round N < max_rounds — give Vision a chance to revise
+                critique_context = (
+                    f"=== Vision Critic Feedback (Round {round_num} of {max_rounds}) ===\n"
+                    f"Verdict    : {critique.action.value}\n"
+                    f"Delta      : {critique.confidence_delta:.2f}\n"
+                    f"Reasoning  : {critique.reasoning}\n\n"
+                    "Revise your trading signal taking this feedback into account. "
+                    "Keep your best judgment — only change if the critique is valid. "
+                    "Output a single JSON object (same schema as before)."
+                )
+                revised = await self._vision.revise(
+                    analysis=analysis,
+                    critique_context=critique_context,
+                    round_num=round_num,
+                )
+                signal = revised
+
+            except Exception as exc:  # noqa: BLE001
+                # Critic or Vision revision must NEVER break the outer cycle.
+                self._log.warning(
+                    f"[Reflection] {symbol} round {round_num} failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                break  # fail-silent: use last known good signal
+
+        return signal, round_num
 
     # ------------------------------------------------------------------
     # Safety net (Story 029a)

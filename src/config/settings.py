@@ -689,6 +689,23 @@ class Settings(BaseSettings):
     )
 
     # --------------------------------------------------------------------------
+    # Vision Reflection Loop (Story 130)
+    # --------------------------------------------------------------------------
+    vision_reflection_max_rounds: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        description=(
+            "Maximum rounds in the Vision↔VisionCritic iterative reflection "
+            "loop (AutoGen Reflection pattern). Each round where the critic "
+            "returns AMEND or REJECT triggers a Vision revision call. "
+            "The loop converges early on ENDORSE. "
+            "Set to 1 to restore Story 031 one-shot behavior. "
+            "Requires vision_critic_enabled=True to take effect."
+        ),
+    )
+
+    # --------------------------------------------------------------------------
     # Telegram alerter (Story 035)
     # --------------------------------------------------------------------------
     telegram_alert_min_severity: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(

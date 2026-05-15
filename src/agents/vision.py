@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from src.agents.llm_client import LLMClient, make_llm_client
 
@@ -106,6 +106,10 @@ class Vision(BaseAgent[TradingSignal]):
             codename="Vision",
             role=f"Predictive Analyst — strategic LLM ({self._llm.active_provider})",
         )
+        # Story 128 — SemanticEpisodicStore injetado pelo LangGraph quando disponível.
+        # None = fallback para AgentMemoryStore SQL (Story 063).
+        # Definido por make_checkpointed_graph() via fury._vision._semantic_store = store.
+        self._semantic_store: Any = None  # SemanticEpisodicStore | None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -141,11 +145,14 @@ class Vision(BaseAgent[TradingSignal]):
 
         prompt = analysis.to_prompt()
 
-        # Story 063 — Episodic Memory: enrich prompt with historical pattern context.
-        # We attempt to fetch LONG and SHORT memories; the LLM receives the one
-        # that is most directionally relevant (both if uncertain). Fails silently.
+        # Story 063 / Story 128 — Episodic Memory: enrich prompt with historical
+        # pattern context. Story 128 uses semantic search when _semantic_store is
+        # available (LangGraph mode); falls back to SQL equality search otherwise.
+        # Fails silently — Vision always gets a prompt either way.
         try:
-            memory_block = await self._build_memory_block(analysis)
+            memory_block = await self._build_memory_block(
+                analysis, semantic_store=self._semantic_store
+            )
             if memory_block:
                 prompt = prompt + "\n\n" + memory_block
         except Exception as _mem_exc:  # noqa: BLE001
@@ -183,22 +190,61 @@ class Vision(BaseAgent[TradingSignal]):
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _build_memory_block(analysis: "MarketAnalysis") -> str:  # type: ignore[name-defined]
+    async def _build_memory_block(
+        analysis: "MarketAnalysis",  # type: ignore[name-defined]
+        semantic_store: Optional[Any] = None,
+    ) -> str:
         """
-        Query AgentMemoryStore for similar historical LONG and SHORT patterns
-        and return a compact text block to append to Vision's user prompt.
+        Story 063 / Story 128 — Episodic memory block for Vision's prompt.
 
-        Returns an empty string if the DB has no resolved memories yet,
-        or if the import / query fails — Vision always gets a prompt either way.
+        Routing:
+          • semantic_store is not None (LangGraph mode, Story 128):
+            Uses SemanticEpisodicStore.build_context_snippet() — cosine similarity
+            on OpenAI text-embedding-3-small. Richer than RSI ±10 bucket matching.
+
+          • semantic_store is None (classic mode, Story 063):
+            Falls back to AgentMemoryStore.query_similar() — SQL equality/range.
+
+        Returns an empty string on any failure — Vision always gets a prompt.
         """
-        from src.persistence.agent_memory import AgentMemoryStore  # noqa: WPS433
-
         chart = analysis.chart
         symbol = analysis.symbol
         rsi = chart.rsi_14 if chart else None
         trend = chart.trend.value if chart else "NEUTRAL"
+        vol_elevated = bool(chart.volume_spike) if chart else False
 
-        # Query both directions so Vision can see context for LONG and SHORT
+        # ── Story 128 — Semantic path ──────────────────────────────────────
+        if semantic_store is not None:
+            snippets: list[str] = []
+            for action in ("LONG", "SHORT"):
+                try:
+                    snippet = await semantic_store.build_context_snippet(
+                        symbol=symbol,
+                        action=action,
+                        rsi=rsi,
+                        trend=trend,
+                        volume_elevated=vol_elevated,
+                        confidence=0.75,  # neutral confidence para query aberta
+                        limit=8,
+                    )
+                    if snippet:
+                        snippets.append(snippet)
+                except Exception as _exc:  # noqa: BLE001
+                    pass  # individual direction fails silently
+
+            if not snippets:
+                return ""
+
+            return (
+                "=== Historical Pattern Memory (Semantic Search) ===\n"
+                + "\n\n".join(snippets)
+                + "\n\nUse this historical context to calibrate your confidence. "
+                "Low win-rate patterns warrant higher conservatism or HOLD."
+            )
+
+        # ── Story 063 — SQL fallback path ──────────────────────────────────
+        from src.persistence.agent_memory import AgentMemoryStore  # noqa: WPS433
+
         long_ctx = await AgentMemoryStore.query_similar(
             symbol=symbol, action="LONG", rsi=rsi, trend=trend, limit=12
         )
@@ -206,21 +252,101 @@ class Vision(BaseAgent[TradingSignal]):
             symbol=symbol, action="SHORT", rsi=rsi, trend=trend, limit=12
         )
 
-        snippets: list[str] = []
+        sql_snippets: list[str] = []
         if long_ctx.has_data:
-            snippets.append(AgentMemoryStore.build_context_snippet(long_ctx))
+            sql_snippets.append(AgentMemoryStore.build_context_snippet(long_ctx))
         if short_ctx.has_data:
-            snippets.append(AgentMemoryStore.build_context_snippet(short_ctx))
+            sql_snippets.append(AgentMemoryStore.build_context_snippet(short_ctx))
 
-        if not snippets:
+        if not sql_snippets:
             return ""
 
         return (
             "=== Historical Pattern Memory ===\n"
-            + "\n\n".join(snippets)
+            + "\n\n".join(sql_snippets)
             + "\n\nUse this historical context to calibrate your confidence. "
             "Low win-rate patterns warrant higher conservatism or HOLD."
         )
+
+    # ------------------------------------------------------------------
+    # Story 130 — Iterative Reflection: Vision revises with critic feedback
+    # ------------------------------------------------------------------
+
+    async def revise(
+        self,
+        analysis: MarketAnalysis,
+        critique_context: str,
+        round_num: int,
+    ) -> TradingSignal:
+        """
+        Re-generate a TradingSignal with VisionCritic feedback appended.
+
+        Called by NickFury's reflection loop when VisionCritic returns AMEND
+        or REJECT. Vision sees the original analysis + the critic's reasoning
+        and may revise its decision. The `critique_context` block is appended
+        to the standard analysis prompt so Vision knows what specifically
+        needs to be reconsidered.
+
+        On any failure, returns a defensive HOLD (same as _run()).
+        Never throws — fail-silent is critical because this runs mid-cycle.
+        """
+        symbol = analysis.symbol
+        price = analysis.price
+
+        if not analysis.is_safe_to_trade:
+            return self._fallback_hold(
+                symbol=symbol,
+                price=price,
+                reason="Pre-flight failed (revise)",
+            )
+
+        prompt = analysis.to_prompt()
+
+        # Episodic memory enrichment (same path as _run)
+        try:
+            memory_block = await self._build_memory_block(
+                analysis, semantic_store=self._semantic_store
+            )
+            if memory_block:
+                prompt = prompt + "\n\n" + memory_block
+        except Exception as _mem_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:revise] Memory fetch skipped: {_mem_exc}")
+
+        # Append critic feedback block — the key addition vs _run()
+        prompt = prompt + "\n\n" + critique_context
+
+        self._log.info(f"[Vision:Reflection] {symbol} revising — round {round_num}")
+
+        try:
+            raw = await self._call_llm(prompt)
+        except Exception as exc:  # noqa: BLE001
+            self._log.error(f"[Vision:revise] LLM error: {exc}")
+            return self._fallback_hold(
+                symbol=symbol,
+                price=price,
+                reason=f"LLM error (revise r{round_num}): {type(exc).__name__}: {exc}",
+            )
+
+        try:
+            payload = self._extract_json(raw)
+            signal = self._build_signal(payload, symbol=symbol, fallback_price=price)
+        except Exception as exc:  # noqa: BLE001
+            self._log.error(f"[Vision:revise] Parse error r{round_num}: {exc}")
+            return self._fallback_hold(
+                symbol=symbol,
+                price=price,
+                reason=f"Parse error (revise r{round_num}): {exc}",
+            )
+
+        # Tag the signal with reflection metadata
+        new_meta = dict(signal.metadata or {})
+        new_meta["reflection_round"] = round_num
+        signal = signal.model_copy(update={"metadata": new_meta})
+
+        self._log.info(
+            f"[Vision:Reflection] {symbol} R{round_num} → {signal.summary()}"
+        )
+        return signal
 
     # ------------------------------------------------------------------
     # LLM call

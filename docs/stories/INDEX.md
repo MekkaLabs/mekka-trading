@@ -4,7 +4,7 @@
 arquitetural. Stories abaixo são lidas em ordem numérica dentro de cada
 bloco.
 
-Última story entregue: **127** (LangGraph interrupt() + Command(resume=...) — Trade Approval durável).
+Última story entregue: **130** (Iterative Vision Reflection — loop Vision↔VisionCritic com até 3 rounds, padrão AutoGen Reflection).
 Stories 047–124 entregues e registradas no CHANGELOG.md (versões 0.2.0–0.8.0).
 
 ---
@@ -186,3 +186,12 @@ e subgrafo paralelo Layer 1.
 
 - [126 — LangGraph AsyncSqliteSaver: Durable Execution](story-126-langgraph-checkpointing.md)
 - [127 — LangGraph Trade Approval: interrupt() + Command(resume=...)](story-127-lg-interrupt.md)
+- [128 — Memória Episódica Semântica: SemanticEpisodicStore + text-embedding-3-small](story-128-semantic-memory.md)
+- [129 — Layer 1 Parallel Subgraph: fan-out LangGraph com checkpoints por agente](story-129-layer1-subgraph.md)
+
+## Milestone 20 — Decision Quality
+
+Loop iterativo Vision↔VisionCritic inspirado no padrão AutoGen Reflection. A Vision
+recebe o feedback do Critic no contexto e regenera o sinal — em vez de ajuste mecânico.
+
+- [130 — Iterative Vision Reflection: loop Vision↔VisionCritic até 3 rounds](story-130-vision-reflection.md)
