@@ -179,13 +179,14 @@ def build_cycle_graph(fury: "NickFury"):
                 trades_today=state["trades_today"],
                 open_positions=state["open_positions"],
                 running_notional_usd=state["running_notional_usd"],
-                # current_positions=None: correlation gate degrades gracefully
-                # (será implementado na Story 129 com sub-state)
                 # Story 127: passa thread_id para que interrupt() inclua na payload
                 # e TelegramInbound possa localizar o grafo pelo thread_id.
                 # NodeInterrupt (BaseException) propagará naturalmente sem ser
                 # capturado pelo except Exception abaixo.
                 lg_thread_id=state["cycle_id"],
+                # Story 129: Layer 1 subgraph para fan-out com checkpoints por agente.
+                # None = fallback para ProfessorX.run() com asyncio.gather.
+                layer1_graph=getattr(fury, "_layer1_graph", None),
             )
 
             # Observa safety-net breakers (Story 029a)
@@ -342,6 +343,10 @@ async def make_checkpointed_graph(fury: "NickFury"):
     Cria AsyncSqliteSaver apontando para o mesmo DB do projeto e compila o
     grafo. Retorna (graph, saver).
 
+    Story 128: também cria e aquece o SemanticEpisodicStore, injetando-o em
+    fury._vision._semantic_store. Vision usará busca semântica por embedding
+    em vez da busca SQL por bucket. Falha silenciosamente se OpenAI unavailable.
+
     O saver precisa ser mantido vivo enquanto o grafo estiver rodando.
     Use como context manager em produção ou mantenha referência.
     """
@@ -354,6 +359,38 @@ async def make_checkpointed_graph(fury: "NickFury"):
     saver = AsyncSqliteSaver(conn)
     # Cria as tabelas checkpoints/checkpoint_blobs/checkpoint_writes se não existirem
     await saver.setup()
+
+    # ── Story 128 — Memória Semântica ──────────────────────────────────────
+    # Cria o store, aquece a partir do SQLite e injeta em Vision.
+    # Falha silenciosamente: se OpenAI indisponível, Vision usa fallback SQL.
+    try:
+        from src.langgraph.semantic_memory import SemanticEpisodicStore  # noqa: WPS433
+        _sem_store = SemanticEpisodicStore(model="text-embedding-3-small")
+        n_loaded = await _sem_store.warm_up_from_db(limit=500)
+        fury._vision._semantic_store = _sem_store
+        logger.info(
+            f"[LG:graph] SemanticEpisodicStore pronto — {n_loaded} memórias indexadas"
+        )
+    except Exception as _sem_exc:
+        logger.warning(
+            f"[LG:graph] SemanticEpisodicStore indisponível (Vision usará SQL): {_sem_exc}"
+        )
+
+    # ── Story 129 — Layer 1 Subgraph ───────────────────────────────────────
+    # Compila o Layer 1 subgrafo com o mesmo saver (shared SQLite checkpoint).
+    # Thread IDs do subgrafo usam namespace "{cycle_id}:{symbol}:l1" — sem
+    # conflito com o ciclo principal. Falha silenciosamente: se não disponível,
+    # process_symbol_node usa ProfessorX.run() via asyncio.gather (fallback).
+    try:
+        from src.langgraph.layer1_graph import build_layer1_graph  # noqa: WPS433
+        _layer1_graph = build_layer1_graph(fury._professor).compile(checkpointer=saver)
+        fury._layer1_graph = _layer1_graph
+        logger.info("[LG:graph] Layer 1 subgraph compilado — fan-out com checkpoints por agente")
+    except Exception as _l1_exc:
+        fury._layer1_graph = None  # type: ignore[attr-defined]
+        logger.warning(
+            f"[LG:graph] Layer 1 subgraph indisponível (ProfessorX usará asyncio.gather): {_l1_exc}"
+        )
 
     graph = build_cycle_graph(fury).compile(checkpointer=saver)
     return graph, saver
