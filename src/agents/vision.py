@@ -27,20 +27,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-# `openai` is a runtime dependency, but we wrap the import so the rest of the
-# package can be loaded for unit tests / type-checking even when openai is
-# not installed. Tests mock `src.agents.vision.AsyncOpenAI` directly, which
-# still works because the name is defined at module level.
-try:
-    from openai import AsyncOpenAI
-    from openai import APIError, APITimeoutError, RateLimitError
-except ModuleNotFoundError:  # pragma: no cover - tested via mocks
-    AsyncOpenAI = None  # type: ignore[assignment]
-
-    class _OpenAIPlaceholder(Exception):
-        """Stand-in for OpenAI exceptions when the SDK isn't installed."""
-
-    APIError = APITimeoutError = RateLimitError = _OpenAIPlaceholder  # type: ignore[misc,assignment]
+from src.agents.llm_client import LLMClient, make_llm_client
 
 from src.agents.base import BaseAgent
 from src.config.settings import settings
@@ -114,25 +101,18 @@ class Vision(BaseAgent[TradingSignal]):
     """
 
     def __init__(self) -> None:
+        self._llm = make_llm_client()
         super().__init__(
             codename="Vision",
-            role=f"Predictive Analyst — strategic LLM ({settings.openai_model})",
+            role=f"Predictive Analyst — strategic LLM ({self._llm.active_provider})",
         )
-        self._client: Optional[AsyncOpenAI] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def _get_client(self) -> AsyncOpenAI:
-        if self._client is None:
-            self._client = AsyncOpenAI(api_key=settings.openai_api_key)
-        return self._client
-
     async def close(self) -> None:
-        if self._client is not None:
-            await self._client.close()
-            self._client = None
+        await self._llm.close()
 
     # ------------------------------------------------------------------
     # Core logic
@@ -173,19 +153,12 @@ class Vision(BaseAgent[TradingSignal]):
 
         try:
             raw = await self._call_llm(prompt)
-        except (APITimeoutError, RateLimitError, APIError) as exc:
-            self._log.error(f"[Vision] OpenAI API error: {exc}")
-            return self._fallback_hold(
-                symbol=symbol,
-                price=price,
-                reason=f"OpenAI API error: {type(exc).__name__}",
-            )
         except Exception as exc:  # noqa: BLE001
-            self._log.error(f"[Vision] Unexpected LLM error: {exc}")
+            self._log.error(f"[Vision] LLM error: {exc}")
             return self._fallback_hold(
                 symbol=symbol,
                 price=price,
-                reason=f"Unexpected LLM error: {exc}",
+                reason=f"LLM error: {type(exc).__name__}: {exc}",
             )
 
         # Parse and validate
@@ -254,19 +227,7 @@ class Vision(BaseAgent[TradingSignal]):
     # ------------------------------------------------------------------
 
     async def _call_llm(self, user_prompt: str) -> str:
-        client = self._get_client()
-        response = await client.chat.completions.create(
-            model=settings.openai_model,
-            temperature=settings.openai_temperature,
-            max_tokens=settings.openai_max_tokens,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-        content = response.choices[0].message.content or "{}"
-        return content
+        return await self._llm.chat(_SYSTEM_PROMPT, user_prompt)
 
     # ------------------------------------------------------------------
     # Parsing & validation

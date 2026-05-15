@@ -190,3 +190,12 @@ _git-stale-tmp*/
 tmp/
 temp/
 .cache/
+.env.save
+.env
+
+# Runtime data — não versionar
+data/dashboard_snapshots/
+data/mekka_trading.db
+data/mekka_trading.db-shm
+data/mekka_trading.db-wal
+.agent-os/

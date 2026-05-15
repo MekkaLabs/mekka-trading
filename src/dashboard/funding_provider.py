@@ -39,10 +39,11 @@ Sentiment heuristic
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any
+
+import aiohttp
 
 from src.config.settings import settings
 from src.config.runtime_mode import get_mode, PRESETS
@@ -111,7 +112,7 @@ async def _fetch_hyperliquid(
         async with session.post(
             base,
             json={"type": "metaAndAssetCtxs"},
-            timeout=asyncio.timeout(5),
+            timeout=aiohttp.ClientTimeout(total=5),
         ) as resp:
             if resp.status != 200:
                 logger.warning("HL metaAndAssetCtxs returned HTTP %s", resp.status)
@@ -173,7 +174,7 @@ async def _fetch_binance(
             async with session.get(
                 f"{_BINANCE_FAPI}/fapi/v1/premiumIndex",
                 params={"symbol": ticker},
-                timeout=asyncio.timeout(5),
+                timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 if resp.status != 200:
                     continue
@@ -203,8 +204,6 @@ async def fetch_funding_rates(symbols: list[str] | None = None) -> dict[str, Any
     Uses Hyperliquid as primary; falls back to Binance for any symbol missing
     in the HL response.
     """
-    import aiohttp  # noqa: WPS433
-
     if symbols is None:
         symbols = _current_assets()
 

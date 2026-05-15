@@ -40,12 +40,15 @@ class Settings(BaseSettings):
     )
 
     # --------------------------------------------------------------------------
-    # OpenAI
+    # OpenAI  (optional — falls back to Anthropic if not set)
     # --------------------------------------------------------------------------
-    openai_api_key: str = Field(..., description="OpenAI API key (sk-...)")
+    openai_api_key: str = Field(
+        default="",
+        description="OpenAI API key (sk-...). Leave blank to use Anthropic Claude instead.",
+    )
     openai_model: str = Field(
         default="gpt-4o",
-        description="Model used by Vision (the decision LLM)",
+        description="Model used by Vision when OpenAI is the active provider",
     )
     openai_temperature: float = Field(
         default=0.2,
@@ -57,6 +60,18 @@ class Settings(BaseSettings):
         default=2048,
         gt=0,
         description="Maximum tokens in LLM response",
+    )
+
+    # --------------------------------------------------------------------------
+    # Anthropic Claude  (fallback when OpenAI is unavailable)
+    # --------------------------------------------------------------------------
+    anthropic_api_key: str = Field(
+        default="",
+        description="Anthropic API key (sk-ant-...). Used as fallback when OpenAI fails or is not set.",
+    )
+    anthropic_model: str = Field(
+        default="claude-sonnet-4-6",
+        description="Claude model for Vision fallback (e.g. claude-sonnet-4-6, claude-opus-4-6)",
     )
 
     # --------------------------------------------------------------------------
@@ -751,11 +766,9 @@ class Settings(BaseSettings):
     @field_validator("openai_api_key")
     @classmethod
     def openai_key_must_not_be_placeholder(cls, v: str) -> str:
-        # Reject only the literal example placeholder — allow test stubs
-        if v == "sk-your-openai-api-key-here" or v == "":
-            raise ValueError(
-                "OPENAI_API_KEY is not set. Please add a real key to your .env file."
-            )
+        # Allow empty string — Claude fallback will be used instead
+        if v == "sk-your-openai-api-key-here":
+            return ""  # Treat the example placeholder as "not set"
         return v
 
     @model_validator(mode="after")

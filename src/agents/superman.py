@@ -328,7 +328,13 @@ class Superman(BaseAgent[MarketData]):
         # Lazy imports — pandas-ta registers the `.ta` DataFrame accessor on import
         # and pulls heavy transitive deps. Defer until we actually need to compute.
         import pandas as pd  # noqa: WPS433
-        import pandas_ta as ta  # noqa: F401, WPS433  (registers DataFrame accessor)
+        try:
+            import pandas_ta as ta  # noqa: F401, WPS433  (registers DataFrame accessor)
+        except (ImportError, ModuleNotFoundError):
+            # pandas-ta não disponível (ex: Python 3.14 sem numba) — Superman
+            # continuará sem indicadores avançados do pandas_ta, usando apenas
+            # os cálculos manuais abaixo.
+            ta = None  # type: ignore[assignment]
 
         exchange = await self._get_exchange()
 
@@ -362,22 +368,54 @@ class Superman(BaseAgent[MarketData]):
         df = df.set_index("timestamp").astype(float)
 
         # --- Compute indicators ---
-        # RSI
-        df.ta.rsi(length=14, append=True)
+        # Tenta usar pandas_ta se disponível; caso contrário usa cálculos manuais.
+        _use_ta = ta is not None and hasattr(df, "ta")
+
+        if _use_ta:
+            try:
+                df.ta.rsi(length=14, append=True)
+                df.ta.ema(length=20, append=True)
+                df.ta.ema(length=50, append=True)
+                df.ta.bbands(length=20, std=2, append=True)
+                df.ta.macd(fast=12, slow=26, signal=9, append=True)
+                df.ta.atr(length=14, append=True)
+            except Exception:
+                _use_ta = False
+
+        if not _use_ta:
+            # RSI manual
+            delta = df["close"].diff()
+            gain = delta.clip(lower=0).rolling(14).mean()
+            loss = (-delta.clip(upper=0)).rolling(14).mean()
+            rs = gain / loss.replace(0, float("nan"))
+            df["RSI_14"] = 100 - (100 / (1 + rs))
+
+            # EMA manual
+            df["EMA_20"] = df["close"].ewm(span=20, adjust=False).mean()
+            df["EMA_50"] = df["close"].ewm(span=50, adjust=False).mean()
+
+            # Bollinger Bands manual
+            bb_mid_s = df["close"].rolling(20).mean()
+            bb_std_s = df["close"].rolling(20).std()
+            df["BBM_20_2.0"] = bb_mid_s
+            df["BBU_20_2.0"] = bb_mid_s + 2 * bb_std_s
+            df["BBL_20_2.0"] = bb_mid_s - 2 * bb_std_s
+
+            # MACD manual
+            ema12 = df["close"].ewm(span=12, adjust=False).mean()
+            ema26 = df["close"].ewm(span=26, adjust=False).mean()
+            df["MACD_12_26_9"] = ema12 - ema26
+            df["MACDs_12_26_9"] = df["MACD_12_26_9"].ewm(span=9, adjust=False).mean()
+            df["MACDh_12_26_9"] = df["MACD_12_26_9"] - df["MACDs_12_26_9"]
+
+            # ATR manual
+            hl = df["high"] - df["low"]
+            hc = (df["high"] - df["close"].shift()).abs()
+            lc = (df["low"] - df["close"].shift()).abs()
+            tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+            df["ATRr_14"] = tr.ewm(span=14, adjust=False).mean()
+
         rsi_col = "RSI_14"
-
-        # EMA
-        df.ta.ema(length=20, append=True)
-        df.ta.ema(length=50, append=True)
-
-        # Bollinger Bands
-        df.ta.bbands(length=20, std=2, append=True)
-
-        # MACD
-        df.ta.macd(fast=12, slow=26, signal=9, append=True)
-
-        # ATR
-        df.ta.atr(length=14, append=True)
 
         # Volume MA
         df["VOLUME_MA_20"] = df["volume"].rolling(20).mean()

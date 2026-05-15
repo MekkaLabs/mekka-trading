@@ -29,19 +29,8 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-# Same lazy-import pattern as Vision (Story 028 contract hardening).
-try:
-    from openai import AsyncOpenAI
-    from openai import APIError, APITimeoutError, RateLimitError
-except ModuleNotFoundError:  # pragma: no cover - tested via mocks
-    AsyncOpenAI = None  # type: ignore[assignment]
-
-    class _OpenAIPlaceholder(Exception):
-        pass
-
-    APIError = APITimeoutError = RateLimitError = _OpenAIPlaceholder  # type: ignore[misc,assignment]
-
 from src.agents.base import BaseAgent
+from src.agents.llm_client import LLMClient, make_llm_client
 from src.config.settings import settings
 from src.models.critique import CritiqueAction, VisionCritique
 from src.models.market_data import MarketAnalysis
@@ -92,31 +81,18 @@ class VisionCritic(BaseAgent[VisionCritique]):
     """
 
     def __init__(self) -> None:
-        # [C6] Critic can run on a different (cheaper) model for independence
-        _critic_model = settings.vision_critic_model or settings.openai_model
+        self._llm = make_llm_client()
         super().__init__(
             codename="VisionCritic",
-            role=f"Second-look reviewer ({_critic_model})",
+            role=f"Second-look reviewer ({self._llm.active_provider})",
         )
-        self._client: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def _get_client(self) -> Any:
-        if AsyncOpenAI is None:
-            raise RuntimeError(
-                "openai SDK is not installed — cannot run VisionCritic"
-            )
-        if self._client is None:
-            self._client = AsyncOpenAI(api_key=settings.openai_api_key)
-        return self._client
-
     async def close(self) -> None:
-        if self._client is not None:
-            await self._client.close()
-            self._client = None
+        await self._llm.close()
 
     # ------------------------------------------------------------------
     # Core logic
@@ -143,12 +119,9 @@ class VisionCritic(BaseAgent[VisionCritique]):
 
         try:
             raw = await self._call_llm(prompt)
-        except (APITimeoutError, RateLimitError, APIError) as exc:
-            self._log.warning(f"OpenAI error in critic: {exc}")
-            return self._fallback_endorse(symbol, reason=f"OpenAI {type(exc).__name__}")
         except Exception as exc:  # noqa: BLE001
-            self._log.warning(f"Critic LLM unexpected error: {exc}")
-            return self._fallback_endorse(symbol, reason=f"Unexpected: {exc}")
+            self._log.warning(f"Critic LLM error: {exc}")
+            return self._fallback_endorse(symbol, reason=f"LLM error: {type(exc).__name__}")
 
         try:
             payload = self._extract_json(raw)
@@ -211,22 +184,7 @@ class VisionCritic(BaseAgent[VisionCritique]):
         return f"{analysis_block}\n\n{signal_block}\n\n=== Decision ===\nReview the signal above. Output JSON only."
 
     async def _call_llm(self, user_prompt: str) -> str:
-        client = self._get_client()
-        # [C6] Separate model + lower temperature for critic independence from Vision.
-        # Defaults: vision_critic_model="" → inherit openai_model;
-        #            vision_critic_temperature=0.0 → maximum determinism.
-        critic_model = settings.vision_critic_model or settings.openai_model
-        response = await client.chat.completions.create(
-            model=critic_model,
-            temperature=settings.vision_critic_temperature,
-            max_tokens=settings.openai_max_tokens,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-        return response.choices[0].message.content or "{}"
+        return await self._llm.chat(_SYSTEM_PROMPT, user_prompt)
 
     # ------------------------------------------------------------------
     # Parsing

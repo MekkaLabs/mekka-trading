@@ -2351,3 +2351,809 @@ input, select { padding: 7px 10px; }
   color: var(--text1);
   border: 1px solid var(--border);
 }
+
+
+/* ====================================================================
+   DESIGN FIX — Classes ausentes no CSS (audit completo 2026-05-15)
+   Todas as 24 classes usadas no HTML mas sem estilo definido.
+   ==================================================================== */
+
+/* ── Background grid overlay ──────────────────────────────────────── */
+.bg-grid {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(0,212,255,0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,212,255,0.025) 1px, transparent 1px);
+  background-size: 40px 40px;
+  z-index: 0;
+}
+
+/* ── Sidebar nav wrapper ──────────────────────────────────────────── */
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 6px 24px;
+  flex: 1;
+  overflow-y: auto;
+  gap: 1px;
+}
+
+/* ── Main header topbar (above financial strip) ─────────────────── */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 24px;
+  background: rgba(3,7,17,0.92);
+  backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--glass-border);
+  position: sticky;
+  top: 0;
+  z-index: 60;
+}
+.topbar h1 {
+  font-size: 1.0rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  margin: 0;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.topbar p {
+  font-size: 0.70rem;
+  color: var(--muted);
+  margin: 0;
+  letter-spacing: 0.04em;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Preferences reset / theme buttons in topbar */
+.prefs-reset-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  border-radius: var(--r-sm);
+  padding: 5px 10px;
+  font-size: 0.76rem;
+  cursor: pointer;
+  transition: background var(--t-base), border-color var(--t-base), color var(--t-base);
+}
+.prefs-reset-btn:hover {
+  background: var(--surface-hover);
+  border-color: rgba(0,212,255,0.25);
+  color: var(--text);
+}
+
+/* Connection status pill */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 12px;
+  border-radius: var(--r-pill);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: rgba(74,85,104,0.15);
+  color: var(--muted);
+  border: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+.pill.connected  { background: var(--good-dim); color: var(--good); border-color: var(--good-border); }
+.pill.error      { background: var(--bad-dim);  color: var(--bad);  border-color: var(--bad-border); }
+.pill.warn       { background: var(--warn-dim); color: var(--warn); border-color: var(--warn-border); }
+
+/* Global alerts strip */
+.global-alerts {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* ── Replay / Market Live panels ─────────────────────────────────── */
+/* .replay-panel is identical to .panel but without the grid span */
+.replay-panel {
+  background: var(--glass);
+  backdrop-filter: blur(12px) saturate(1.4);
+  -webkit-backdrop-filter: blur(12px) saturate(1.4);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-lg);
+  padding: 18px 20px;
+  box-shadow: var(--shadow-panel);
+  margin: 0 14px 14px;
+  transition: border-color var(--t-base);
+}
+.replay-panel h2 {
+  font-size: 0.80rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+  margin-bottom: 14px;
+}
+
+/* Panel head — flex between title and actions */
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.panel-head h2 { margin-bottom: 0; }
+
+/* ── Market Live section ─────────────────────────────────────────── */
+.market-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  background: rgba(3,7,17,0.50);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+}
+.market-controls label {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.market-controls select {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-2);
+  padding: 5px 10px;
+  font-size: 0.82rem;
+}
+.market-controls button {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 0.80rem;
+  font-weight: 600;
+  transition: background var(--t-base), color var(--t-base), border-color var(--t-base);
+}
+.market-controls button:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+  border-color: rgba(0,212,255,0.25);
+}
+
+.market-stats {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.market-stats .mstat { min-width: 100px; }
+
+/* Breaker pill state modifiers */
+.breaker-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.breaker-pill.ok       { background: var(--good-dim); color: var(--good); border-color: var(--good-border); }
+.breaker-pill.warn     { background: var(--warn-dim); color: var(--warn); border-color: var(--warn-border); }
+.breaker-pill.critical { background: var(--bad-dim);  color: var(--bad);  border-color: var(--bad-border); }
+
+/* Market chart container — must have explicit height for TradingView */
+.market-chart-wrap {
+  width: 100%;
+  height: 480px;
+  margin-bottom: 16px;
+  border-radius: var(--r-md);
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-2);
+}
+#market-chart {
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Order Book ───────────────────────────────────────────────────── */
+.orderbook-wrap {
+  margin-bottom: 16px;
+}
+.orderbook-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 0 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 10px;
+}
+.orderbook-head strong {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.04em;
+}
+.orderbook-head .muted-line {
+  font-size: 0.72rem;
+}
+.book-table {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* ── Trade Tape / Time & Sales ───────────────────────────────────── */
+.tape-wrap {
+  margin-bottom: 16px;
+}
+.trade-tape {
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+.trade-tape::-webkit-scrollbar { width: 4px; }
+.trade-tape::-webkit-scrollbar-thumb { background: rgba(0,212,255,0.15); border-radius: 2px; }
+
+/* ── Replay Player controls ──────────────────────────────────────── */
+.replay-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.replay-controls button {
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 0.80rem;
+  font-weight: 600;
+  transition: background var(--t-base), color var(--t-base);
+}
+.replay-controls button:hover { background: var(--surface-hover); color: var(--text); }
+.replay-controls select {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-2);
+  padding: 4px 8px;
+  font-size: 0.80rem;
+}
+.replay-controls span { color: var(--muted); font-size: 0.76rem; }
+
+/* Comparison controls */
+.compare-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.compare-controls input,
+.compare-controls select {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-2);
+  padding: 5px 10px;
+  font-size: 0.80rem;
+}
+.compare-controls button {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 0.80rem;
+  font-weight: 600;
+  transition: background var(--t-base);
+}
+.compare-controls button:hover { background: var(--surface-hover); }
+
+.compare-output {
+  margin-top: 10px;
+  padding: 12px 14px;
+  background: rgba(3,7,17,0.5);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  font-size: 0.82rem;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  min-height: 40px;
+}
+
+/* Modal body */
+.modal-body {
+  padding: 4px 0;
+}
+.modal-body p { margin-bottom: 12px; }
+
+/* Layout wrapper (page body below topbars) */
+.layout {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Leaderboard number column */
+.lb-num {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.80rem;
+  text-align: right;
+}
+
+/* Live sub-chart canvas (RSI / MACD) */
+.live-sub-chart {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+
+/* ====================================================================
+   SPACING & TYPOGRAPHY GLOBAL FIXES
+   ==================================================================== */
+
+/* Ensure all .panel h2 and .replay-panel h2 have consistent bottom margin */
+.panel h2,
+.replay-panel h2 {
+  margin-bottom: 14px;
+}
+
+/* Remove top margin from first child in panels */
+.panel > *:first-child,
+.replay-panel > *:first-child {
+  margin-top: 0;
+}
+
+/* Better table spacing throughout */
+th, td { padding: 8px 10px; }
+
+/* Fix muted-line margin */
+.muted-line { margin: 0; }
+
+/* Ensure the financial-topbar wraps gracefully */
+.financial-topbar {
+  gap: 6px;
+  padding: 8px 16px;
+}
+.ftb-card {
+  min-width: 80px;
+  padding: 5px 10px;
+}
+.ftb-label { font-size: 0.60rem; }
+.ftb-value { font-size: 0.88rem; }
+
+/* Content shell should allow full height */
+.content-shell {
+  position: relative;
+  z-index: 1;
+}
+
+/* Give .grid sections proper spacing from edges */
+.grid {
+  padding: 16px 14px;
+  gap: 16px;
+}
+
+/* Make market-topbar less cramped */
+.market-topbar {
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-subtle);
+}
+
+/* ── Selector/input consistent color in Safari/Firefox ─────────── */
+select option { background: var(--bg-2); color: var(--text); }
+
+
+/* ====================================================================
+   JS↔CSS MISMATCH FIXES (audit 2026-05-15)
+   Corrige todas as classes geradas dinamicamente pelo app.js que não
+   tinham equivalente no CSS.
+   ==================================================================== */
+
+/* ── 1. Order Book: JS usa .buy/.sell e --heat (não .bid/.ask e --depth) ── */
+
+/* Fix da variável CSS usada no ::before depth bar */
+.book-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 6px;
+  font-size: 0.83rem;
+  border-radius: var(--r-xs);
+  font-variant-numeric: tabular-nums;
+  position: relative;
+  overflow: hidden;
+  transition: background var(--t-fast);
+  gap: 4px;
+}
+.book-row > span { flex: 1; text-align: right; }
+.book-row > span:first-child { text-align: left; flex: 1.4; }
+
+.book-row::before {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0;
+  opacity: 0.09;
+  border-radius: var(--r-xs);
+  transition: width var(--t-fast);
+}
+/* JS classes: .buy (bids) e .sell (asks) */
+.book-row.buy,
+.book-row.bid  { color: var(--good); }
+.book-row.buy::before,
+.book-row.bid::before  {
+  background: var(--good);
+  right: 0; left: unset;
+  width: var(--heat, var(--depth, 0%));
+}
+.book-row.sell,
+.book-row.ask  { color: var(--bad); }
+.book-row.sell::before,
+.book-row.ask::before  {
+  background: var(--bad);
+  left: 0; right: unset;
+  width: var(--heat, var(--depth, 0%));
+}
+.book-row:hover::before { opacity: 0.16; }
+
+/* Price cell colors */
+.p.buy,
+span.buy  { color: var(--good) !important; font-weight: 600; }
+.p.sell,
+span.sell { color: var(--bad)  !important; font-weight: 600; }
+
+/* Header row for each orderbook column */
+.orderbook-col-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  padding: 0 6px 5px;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 2px;
+}
+
+/* ── 2. mstat: JS usa span/strong diretamente ─────────────────────────── */
+.mstat span {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+  font-weight: 600;
+  line-height: 1.2;
+}
+.mstat strong {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+}
+.mstat strong.pos,
+.mstat strong.buy  { color: var(--good); }
+.mstat strong.neg,
+.mstat strong.sell { color: var(--bad); }
+
+/* ── 3. Tape row price cell ───────────────────────────────────────────── */
+.tape-row {
+  display: grid;
+  grid-template-columns: 64px 1fr 1fr 48px;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 6px;
+  font-size: 0.81rem;
+  font-variant-numeric: tabular-nums;
+  border-bottom: 1px solid var(--border-subtle);
+  transition: background var(--t-fast);
+}
+.tape-row:hover { background: rgba(255,255,255,0.02); }
+.tape-row > span:last-child { text-align: right; font-size: 0.70rem; color: var(--muted); }
+.tape-row.buy  { border-left: 2px solid rgba(0,255,135,0.3); }
+.tape-row.sell { border-left: 2px solid rgba(255,51,102,0.3); }
+.tape-row .px.buy  { color: var(--good); font-weight: 600; }
+.tape-row .px.sell { color: var(--bad);  font-weight: 600; }
+.tape-row .time { color: var(--muted); font-size: 0.70rem; font-family: var(--font-mono); }
+
+/* ── 4. Compare tables ────────────────────────────────────────────────── */
+.compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.83rem;
+  margin-bottom: 10px;
+}
+.compare-table th {
+  background: rgba(3,7,17,0.5);
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+}
+.compare-table th:first-child { text-align: left; }
+.compare-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.compare-table td:first-child { text-align: left; font-weight: 600; }
+.compare-incident-baseline {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin: 8px 0 4px;
+  padding: 4px 8px;
+  background: rgba(0,212,255,0.04);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 var(--r-xs) var(--r-xs) 0;
+}
+
+/* ── 5. Risk heatmap drill button ─────────────────────────────────────── */
+.open-drill,
+.open-incident-drawer,
+.open-incident-replay {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  border-radius: var(--r-xs);
+  padding: 3px 10px;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: background var(--t-base), color var(--t-base);
+  font-weight: 600;
+  margin-left: 6px;
+}
+.open-drill:hover,
+.open-incident-drawer:hover,
+.open-incident-replay:hover {
+  background: var(--surface-hover);
+  color: var(--accent);
+  border-color: rgba(0,212,255,0.25);
+}
+
+/* ── 6. Funding rate cell colors ─────────────────────────────────────── */
+.funding-rate-pos { color: var(--good); font-weight: 600; }
+.funding-rate-neg { color: var(--bad);  font-weight: 600; }
+.funding-rate-zero { color: var(--muted); }
+
+/* ── 7. General .pos / .neg / .ok / .fail utility colors ─────────────── */
+.pos, .ok   { color: var(--good) !important; }
+.neg, .fail { color: var(--bad)  !important; }
+.warn-text  { color: var(--warn) !important; }
+
+/* ── 8. sev-critical / sev-high badge alignment fix ──────────────────── */
+.badge.sev-critical, .badge.sev-high,
+.badge.sev-medium,   .badge.sev-low,
+.badge.sev-none {
+  vertical-align: middle;
+}
+
+/* ── 9. .px tape price cell ──────────────────────────────────────────── */
+.px { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* ── 10. Incident row severityClass mapping ───────────────────────────── */
+.incident-row.sev-critical { border-left-color: var(--bad); background: rgba(255,51,102,0.03); }
+.incident-row.sev-high     { border-left-color: #ff8f57;   background: rgba(255,100,60,0.03); }
+.incident-row.sev-medium   { border-left-color: var(--warn); }
+.incident-row.sev-low      { border-left-color: var(--accent); }
+.incident-row.sev-none     { border-left-color: var(--border); }
+
+
+/* ====================================================================
+   GLOBAL SPACING & TYPOGRAPHY POLISH
+   Corrige os problemas de "colado sem espaçamento" reportados
+   ==================================================================== */
+
+/* Aumenta line-height base para respirar mais */
+body { line-height: 1.6; }
+
+/* Painéis com padding mais generoso */
+.panel { padding: 18px 20px; }
+.replay-panel { padding: 20px 22px; }
+
+/* Seções dentro de painéis com gap */
+.panel > * + *,
+.replay-panel > * + * { margin-top: 12px; }
+
+/* Títulos com breathing room */
+.panel h2, .replay-panel h2 {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 16px;
+}
+
+/* Cards do topbar financeiro mais espaçados */
+.ftb-card {
+  padding: 6px 12px;
+  min-width: 90px;
+  gap: 2px;
+}
+.ftb-label {
+  font-size: 0.60rem;
+  margin-bottom: 1px;
+}
+.ftb-value {
+  font-size: 0.92rem;
+  line-height: 1.3;
+}
+
+/* Mstat cards com gap e tamanho mínimo */
+.mstat {
+  padding: 8px 12px;
+  min-width: 110px;
+  gap: 3px;
+}
+
+/* Tabelas com mais espaço por linha */
+th, td { padding: 9px 10px; }
+.book-row { padding: 5px 6px; }
+
+/* Grid mais espaçado */
+.grid { gap: 16px; padding: 16px; }
+
+/* Scrollable sections com altura mínima decente */
+.book-table   { max-height: 260px; }
+.trade-tape   { max-height: 220px; }
+.tape         { max-height: 260px; }
+.log          { max-height: 260px; }
+.timeline, .symbol-timeline, .anomaly-console { max-height: 240px; }
+
+/* Market chart height (TradingView precisa de altura explícita) */
+.market-chart-wrap { height: 500px; }
+#market-chart { width: 100%; height: 100%; min-height: 500px; }
+
+/* Live split: gráfico com altura real */
+.live-split { height: calc(100vh - 110px); min-height: 560px; }
+
+/* Live chart ocupa 100% da área */
+.live-chart { min-height: 280px; }
+
+/* Sub-panels RSI/MACD com altura visível */
+.live-sub-wrap { height: 110px; }
+
+/* Sidebar mais espaçada */
+.sidebar-brand { padding: 20px 16px 16px; font-size: 1.1rem; }
+.sidebar-nav { padding: 10px 8px 32px; gap: 2px; }
+.page-nav-btn { padding: 8px 12px; font-size: 0.84rem; }
+.nav-group-label { padding: 12px 8px 5px; font-size: 0.62rem; }
+
+/* Financial topbar sem wrap desnecessário */
+.financial-topbar {
+  padding: 8px 20px;
+  gap: 8px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+.financial-topbar::-webkit-scrollbar { height: 3px; }
+.financial-topbar::-webkit-scrollbar-thumb { background: rgba(0,212,255,0.15); }
+
+/* Topbar header com boa altura */
+.topbar { padding: 14px 24px; min-height: 56px; }
+
+/* Ordenação do orderbook summary em 2x2 */
+.orderbook-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0,1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+/* Market topbar stats row */
+.market-stats {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+/* Orderbook grid com padding interno */
+.orderbook-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.orderbook-grid h3 {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+/* Market controls com visual melhor */
+.market-controls {
+  gap: 8px;
+  padding: 10px 14px;
+  background: rgba(3,7,17,0.40);
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-subtle);
+  margin-bottom: 12px;
+}
+
+/* Replay panel sections com separação */
+.orderbook-wrap  { margin-bottom: 20px; }
+.tape-wrap       { margin-bottom: 20px; }
+.orderbook-head  { margin-bottom: 10px; }
+
+/* PnL cards mínimos visíveis */
+.pnl-card { padding: 14px 16px; }
+.pnl-card .pnl-value { font-size: 1.15rem; }
+
+/* Posições com espaçamento */
+.positions-body { padding: 10px 12px; }
+.positions-table th, .positions-table td { padding: 8px 10px; }
+
+/* Agent cards espaçados */
+.agents-roster { gap: 12px; }
+.agent-card { padding: 14px 12px; }
+
+/* Incidentes com espaçamento */
+.incident-row { padding: 12px 14px; }
+.incident-head { gap: 10px; }
+
+/* Risk panel */
+.rp-card { padding: 14px 16px; }
+
+/* Memory cards */
+.mem-card { padding: 14px 16px; gap: 0.8rem; }
+
+/* Leaderboard */
+.lb-table thead th, .lb-table tbody td { padding: 8px 10px; }
+.lb-summary-row { padding: 8px 12px; gap: 1rem; }
+
+/* Section gaps nos painéis */
+.charts-grid { gap: 14px; }
+.chart-card  { padding: 12px 14px; min-height: 180px; }
+.chart-card canvas { max-height: 180px; }
+
+/* Live toolbar com espaçamento */
+.live-toolbar { padding: 10px 20px; gap: 14px; }
+
+/* Fix: o painel do Office (iframe) sem margin indesejada */
+.office-hero { margin: 0 14px 14px; }

@@ -29,7 +29,7 @@
     --ui: Inter, system-ui, sans-serif;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: var(--ui); }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: var(--ui); overflow-x: hidden; }
   canvas { image-rendering: pixelated; image-rendering: crisp-edges; display: block; }
   button { font-family: inherit; cursor: pointer; }
 
@@ -42,7 +42,7 @@
   }
 
   /* ============ HEADER ============ */
-  .page { max-width: 1840px; margin: 0 auto; padding: 28px 32px 64px; }
+  .page { max-width: 1840px; margin: 0 auto; padding: 20px 20px 40px; }
   .hdr {
     display: flex; align-items: flex-end; justify-content: space-between;
     gap: 24px; padding-bottom: 20px;
@@ -75,9 +75,9 @@
   .pill-muted { color: var(--text-dim); }
   @keyframes pulse { 0%,100% {opacity: 1;} 50% {opacity: 0.35;} }
 
-  /* ============ MAIN GRID ============ */
+  /* ============ MAIN LAYOUT — office top, panels bottom ============ */
   .main {
-    display: grid; grid-template-columns: 1fr 380px; gap: 24px; align-items: flex-start;
+    display: flex; flex-direction: column; gap: 20px; align-items: stretch;
   }
 
   /* ============ SCENE ============ */
@@ -85,6 +85,12 @@
     background: linear-gradient(180deg, var(--panel-2), var(--panel));
     border: 1px solid var(--line);
     border-radius: 6px;
+    overflow: hidden;
+    /* Responsive: prevent horizontal scroll */
+    max-width: 100%;
+  }
+  /* Responsive scene scaling container */
+  .scene-frame-body {
     overflow: hidden;
   }
   .scene-frame-hdr {
@@ -109,8 +115,15 @@
     box-shadow: 0 0 0 1px var(--line), 0 20px 60px -20px rgba(0,0,0,0.8);
     border-radius: 2px;
     overflow: hidden;
+    transform-origin: top left;
+    /* transition for smooth resize */
+    transition: transform 0.2s ease;
   }
   .scene-wrap canvas { position: absolute; inset: 0; }
+  /* Container that receives the scaled height */
+  .scene-scale-host {
+    overflow: hidden;
+  }
 
   /* Action arrows SVG sits over the canvas */
   .action-svg {
@@ -227,7 +240,17 @@
   .t-msg { color: var(--text); }
 
   /* ============ SIDE PANEL ============ */
-  .side { display: flex; flex-direction: column; gap: 16px; }
+  /* Side panel — 2×2 grid: agent + trading-mode on top, roster full-width below */
+  .side {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    align-items: start;
+  }
+  /* Roster spans both columns in the second row */
+  .side > .roster {
+    grid-column: 1 / -1;
+  }
   .agent-card {
     background: var(--panel);
     border: 1px solid var(--line);
@@ -327,7 +350,7 @@
     background: rgba(10,20,36,0.6);
   }
   .roster-grid {
-    display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px;
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
     background: var(--line);
   }
   .roster-cell {
@@ -387,23 +410,98 @@
         head.appendChild(s);
       });
     }
-    injectScript('office_v2.bundle.js')
-      .then(() => console.info('[office-v2] using pre-built bundle'))
-      .catch(() => {
-        console.warn('[office-v2] bundle missing; falling back to Babel-standalone (slow)');
+    // DEV MODE: bundle invalidated — load JSX directly via Babel-standalone.
+    // To restore production bundle: npm run build:office-v2 (run on Mac, not Docker).
+    const USE_BUNDLE = true;
+    const bundleP = USE_BUNDLE
+      ? injectScript('office_v2.bundle.js').then(() => console.info('[office-v2] using pre-built bundle'))
+      : Promise.reject(new Error('dev-mode'));
+
+    bundleP.catch(() => {
+        console.warn('[office-v2] loading Babel-standalone for dev mode');
         // No integrity check — local dev tool, CDN hash changes with minor releases
         injectScript('https://unpkg.com/@babel/standalone@7.29.0/babel.min.js')
           .then(() => {
+            const v = Date.now(); // cache-buster
             for (const f of ['tweaks-panel.jsx','sprites.jsx','props.jsx','scene.jsx','agent-motion.jsx','live-data.jsx','app.jsx']) {
               const s = document.createElement('script');
               s.type = 'text/babel';
-              s.src = f;
+              s.src = f + '?v=' + v;
               head.appendChild(s);
             }
           })
           .catch(() => console.error('[office-v2] Babel CDN also failed — check network'));
       });
   })();
+</script>
+<script>
+/* ── Pixel Office: responsive scene zoom ─────────────────────────────────
+   React renders the canvas at 1440px (SCENE_W=480 × scale=3).
+   We use CSS `zoom` (not transform) so layout dimensions shrink too,
+   eliminating horizontal scroll without needing height compensation.
+
+   IMPORTANT: We cannot measure the container (.scene-frame-body) to get
+   available width because CSS Grid 1fr expands the column to fit 1440px
+   content (min-width: auto). Instead, we calculate available width from
+   the viewport minus the side panel width.
+   ── */
+(function () {
+  var SCENE_NATURAL_W = 480 * 3; // 1440 — must match React SCENE_W × scale
+
+  function getAvailableWidth() {
+    // Office now takes full width — no side panel to subtract.
+    var page = document.querySelector('.page');
+    var pageW = page ? page.getBoundingClientRect().width : window.innerWidth;
+    // Subtract page horizontal padding (20px × 2 = 40px)
+    return Math.max(200, pageW - 40);
+  }
+
+  function applyZoom() {
+    var wrap = document.querySelector('.scene-wrap');
+    if (!wrap) return false;
+    if (wrap.offsetWidth < 100) return false; // not rendered yet
+
+    var sceneW = SCENE_NATURAL_W; // always 1440, regardless of zoom
+    var availW = getAvailableWidth();
+    if (!availW) return false;
+
+    if (sceneW <= availW) {
+      wrap.style.zoom = ''; // fits — no scaling needed
+    } else {
+      wrap.style.zoom = availW / sceneW;
+    }
+    return true;
+  }
+
+  // Polling fallback — runs until the element has rendered
+  function poll(attempt) {
+    if (applyZoom()) return;
+    if (attempt < 50) setTimeout(function () { poll(attempt + 1); }, 200);
+  }
+
+  // MutationObserver fires as soon as React inserts .scene-wrap into the DOM
+  var _obs = new MutationObserver(function () {
+    var wrap = document.querySelector('.scene-wrap');
+    if (wrap && wrap.offsetWidth > 100) {
+      applyZoom();
+    }
+  });
+
+  function init() {
+    _obs.observe(document.body, { childList: true, subtree: true });
+    poll(0);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+
+  window.addEventListener('resize', function () {
+    requestAnimationFrame(applyZoom);
+  });
+})();
 </script>
 </body>
 </html>

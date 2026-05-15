@@ -141,25 +141,28 @@ function drawServer(ctx, x, y, frame) {
 }
 
 // ---------- STATIONS ----------
+// Row 1 (back wall, deskY~100): Layer-1 Market Analysis + Layer-2 Strategy + IronMan
+// Row 2 (front, deskY~196): Layer-1 remaining + Layer-3 Risk/Execution + Layer-4 Command
 const STATIONS = [
+  // ── Row 1 — Market Analysis + Strategy ──────────────────────────────────
   { id:"superman",      deskX: 12,  deskY: 100, screen:"#1e40af", accent:"#fde047" },
   { id:"doctorstrange", deskX: 68,  deskY: 100, screen:"#7f1d1d", accent:"#fbbf24" },
   { id:"blackpanther",  deskX: 144, deskY: 100, screen:"#1a1a2e", accent:"#a78bfa" },
   { id:"thor",          deskX: 200, deskY: 100, screen:"#0e7490", accent:"#fde047" },
+  { id:"flash",         deskX: 248, deskY: 100, screen:"#7f1d1d", accent:"#fbbf24" }, // L1.5 — Momentum
   { id:"vision",        deskX: 296, deskY: 100, screen:"#15803d", accent:"#fde047" },
   { id:"professorx",    deskX: 352, deskY: 100, screen:"#3f3f46", accent:"#a78bfa" },
   { id:"ironman",       deskX: 416, deskY: 100, screen:"#dc2626", accent:"#fde047" },
 
+  // ── Row 2 — Risk / Execution / Analytics / Command ──────────────────────
   { id:"aquaman",       deskX: 18,  deskY: 196, screen:"#0e7490", accent:"#22c55e" },
   { id:"spiderman",     deskX: 78,  deskY: 196, screen:"#dc2626", accent:"#1e40af" },
   { id:"batman",        deskX: 138, deskY: 196, screen:"#1c1c1c", accent:"#fbbf24" },
-  { id:"portfolio",     deskX: 268, deskY: 196, screen:"#1e3a8a", accent:"#22c55e" },
-  { id:"nickfury",      deskX: 332, deskY: 196, screen:"#0a0a0a", accent:"#dc2626" },
-  { id:"dailypnl",      deskX: 396, deskY: 196, screen:"#7c2d12", accent:"#fbbf24" },
-  // Newer agents
-  { id:"hawkeye",       deskX: 240, deskY: 100, screen:"#5b21b6", accent:"#fde047" },
-  { id:"nighttrader",   deskX: 198, deskY: 196, screen:"#0a0a14", accent:"#a78bfa" },
-  { id:"hulk",          deskX: 456, deskY: 196, screen:"#15803d", accent:"#fde047" },
+  { id:"wolverine",     deskX: 198, deskY: 196, screen:"#1e40af", accent:"#fde047" }, // L3 — Recovery
+  { id:"cyclops",       deskX: 258, deskY: 196, screen:"#1e40af", accent:"#dc2626" }, // L3 — Position Monitor
+  { id:"deadpool",      deskX: 318, deskY: 196, screen:"#7f1d1d", accent:"#a78bfa" }, // L2 — Analytics
+  { id:"portfolio",     deskX: 376, deskY: 196, screen:"#1e3a8a", accent:"#22c55e" },
+  { id:"nickfury",      deskX: 432, deskY: 196, screen:"#0a0a0a", accent:"#dc2626" },
 ];
 
 // 3x5 pixel tiny font — supports digits, +, -, %, .

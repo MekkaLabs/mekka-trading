@@ -150,23 +150,31 @@ class TelegramAlerter:
         payload: Optional[dict],
     ) -> str:
         sym = f" [{symbol}]" if symbol else ""
-        env = f"net={settings.hyperliquid_network} mode={settings.mode_label}"
+        env = f"rede={settings.hyperliquid_network} modo={settings.mode_label}"
+        _severity_labels = {
+            "DEBUG": "DEBUG",
+            "INFO": "INFO",
+            "WARNING": "⚠️ AVISO",
+            "ERROR": "🔴 ERRO",
+            "CRITICAL": "🚨 CRÍTICO",
+        }
+        sev_label = _severity_labels.get(severity.upper(), severity)
         lines = [
-            f"⚠️ {severity} · {event}{sym}",
-            f"agent: {agent}",
+            f"{sev_label} · {event}{sym}",
+            f"agente: {agent}",
         ]
         if message:
-            # Truncate to fit Telegram's 4096-char limit comfortably
+            # Truncar para caber no limite de 4096 chars do Telegram
             trimmed = message if len(message) < 600 else message[:600] + "…"
-            lines.append(f"msg: {trimmed}")
+            lines.append(f"mensagem: {trimmed}")
         if payload:
-            # Render compact key=value, drop heavy nested
+            # Renderiza chave=valor compacto, ignora objetos aninhados
             flat = {k: v for k, v in payload.items() if not isinstance(v, (dict, list))}
             if flat:
                 kv = " ".join(f"{k}={v}" for k, v in flat.items())
                 if len(kv) > 400:
                     kv = kv[:400] + "…"
-                lines.append(f"payload: {kv}")
+                lines.append(f"dados: {kv}")
         lines.append(f"env: {env}")
         return "\n".join(lines)
 
@@ -206,11 +214,11 @@ class TelegramAlerter:
         signal: "TradingSignal",
     ) -> bool:
         """
-        Rich notification sent whenever a trade is FILLED or PAPER.
+        Notificação rica enviada sempre que um trade é FILLED ou PAPER.
 
-        Includes: symbol, side, size, entry, SL, TP, leverage, RR,
-        confidence, mode, paper/live tag and the Vision reasoning snippet.
-        Never throws — failures are logged and absorbed.
+        Inclui: símbolo, direção, tamanho, entrada, SL, TP, leverage, R/R,
+        confiança, modo, tag paper/live, explicação leiga e estimativa de duração.
+        Nunca lança exceção — falhas são logadas e absorvidas.
         """
         if not settings.telegram_enabled:
             return False
@@ -220,12 +228,12 @@ class TelegramAlerter:
         if execution.status not in (ExecutionStatus.FILLED, ExecutionStatus.PAPER):
             return False
 
-        # [Story 094] Min notional filter — skip tiny trades that would spam alerts
+        # [Story 094] Filtro de notional mínimo — ignora trades pequenos
         try:
             _min_notional = float(getattr(settings, "min_alert_notional_usd", 0.0))
             if execution.notional_usd < _min_notional:
                 self._log.debug(
-                    "trade_opened: notional $%.2f < min $%.2f — skip alert",
+                    "trade_opened: notional $%.2f < min $%.2f — ignorando alerta",
                     execution.notional_usd,
                     _min_notional,
                 )
@@ -234,32 +242,52 @@ class TelegramAlerter:
             pass  # fail-open
 
         tag = "📄 PAPER" if execution.is_paper else "🔴 LIVE"
-        side_emoji = "🟢 LONG" if (execution.side or "").upper() == "LONG" else "🔴 SHORT"
+        side_emoji = "🟢 COMPRA" if (execution.side or "").upper() == "LONG" else "🔴 VENDA"
+        side_upper = (execution.side or "").upper()
 
-        # Risk / reward
+        # Risco / retorno
         try:
             rr = signal.risk_reward_ratio  # type: ignore[attr-defined]
-            rr_str = f"{rr:.2f}" if rr else "n/a"
+            rr_str = f"{rr:.2f}" if rr else "n/d"
         except Exception:
-            rr_str = "n/a"
+            rr_str = "n/d"
 
-        # Reasoning — first 200 chars
-        reasoning = (signal.reasoning or "").strip()
-        reasoning_short = reasoning[:200] + "…" if len(reasoning) > 200 else reasoning
-
-        # SL distance %
+        # Distância SL %
         try:
             sl_dist = abs(signal.entry_price - signal.stop_loss) / signal.entry_price * 100
             sl_dist_str = f"{sl_dist:.2f}%"
         except Exception:
-            sl_dist_str = "n/a"
+            sl_dist_str = "n/d"
 
-        # TP distance %
+        # Distância TP %
         try:
             tp_dist = abs(signal.take_profit - signal.entry_price) / signal.entry_price * 100
             tp_dist_str = f"{tp_dist:.2f}%"
         except Exception:
-            tp_dist_str = "n/a"
+            tp_dist_str = "n/d"
+
+        # ── Explicação leiga ─────────────────────────────────────────────
+        # Traduz o reasoning técnico da Vision em linguagem simples
+        try:
+            _raw_reasoning = (signal.reasoning or "").strip()
+            _layman = self._layman_explanation(
+                reasoning=_raw_reasoning,
+                side=side_upper,
+                confidence=signal.confidence,
+            )
+        except Exception:  # noqa: BLE001
+            _layman = ""
+
+        # ── Estimativa de duração ────────────────────────────────────────
+        # Baseada na distância SL/TP em % e alavancagem — heurística simples
+        try:
+            _duration_str = self._estimate_duration(
+                sl_dist_pct=float(sl_dist_str.rstrip("%")) if sl_dist_str != "n/d" else None,
+                tp_dist_pct=float(tp_dist_str.rstrip("%")) if tp_dist_str != "n/d" else None,
+                leverage=signal.leverage,
+            )
+        except Exception:  # noqa: BLE001
+            _duration_str = ""
 
         lines = [
             f"🚀 *Trade Aberto — {execution.symbol}*  {tag}",
@@ -267,12 +295,12 @@ class TelegramAlerter:
             f"Direção   : {side_emoji}",
             f"Entrada   : ${execution.avg_price:,.4f}",
             f"Qtd       : {execution.quantity:.6f}  (${execution.notional_usd:,.2f})",
-            f"Leverage  : {signal.leverage}x",
+            f"Alavancagem: {signal.leverage}x",
             f"Tamanho   : {signal.size_pct * 100:.1f}% da equity",
             "",
-            f"SL        : ${signal.stop_loss:,.4f}  (-{sl_dist_str})",
-            f"TP        : ${signal.take_profit:,.4f}  (+{tp_dist_str})",
-            f"R/R       : {rr_str}",
+            f"Stop Loss : ${signal.stop_loss:,.4f}  (-{sl_dist_str})",
+            f"Alvo (TP) : ${signal.take_profit:,.4f}  (+{tp_dist_str})",
+            f"Risco/Ret : {rr_str}",
             "",
             f"Confiança : {signal.confidence * 100:.0f}%",
             f"Modo      : {settings.mode_label}",
@@ -280,9 +308,9 @@ class TelegramAlerter:
         ]
 
         if execution.order_id:
-            lines.append(f"Order ID  : {execution.order_id}")
+            lines.append(f"Ordem ID  : {execution.order_id}")
 
-        # [Story 097] Batman verdict summary — signal quality score + breached limits
+        # [Story 097] Qualidade do sinal + limites violados
         try:
             _meta = execution.metadata or {}
             _sqs = _meta.get("signal_quality_score")
@@ -293,21 +321,133 @@ class TelegramAlerter:
                 lines.append(f"📊 *Qualidade*: {_sqs:.1f}/100  [{_sqs_bar}]")
             if _breached:
                 _breached_str = ", ".join(str(b) for b in _breached[:5])
-                lines.append(f"⚠️ *Limites*  : {_breached_str}")
+                lines.append(f"⚠️ *Ajustes*  : {_breached_str}")
         except Exception:  # noqa: BLE001
-            pass  # fail-open — never breaks the alert
+            pass  # fail-open — nunca interrompe o alerta
 
-        if reasoning_short:
+        # Duração estimada
+        if _duration_str:
             lines.append("")
-            lines.append(f"📝 _{reasoning_short}_")
+            lines.append(f"⏱ *Duração estimada*: {_duration_str}")
+
+        # Explicação leiga
+        if _layman:
+            lines.append("")
+            lines.append(f"💡 *Por que entrar agora?*")
+            lines.append(f"_{_layman}_")
 
         text = "\n".join(lines)
 
         try:
             return await self._post(text, parse_mode="Markdown")
         except Exception as exc:  # noqa: BLE001
-            self._log.warning(f"trade_opened alert failed (suppressed): {exc}")
+            self._log.warning(f"trade_opened: alerta falhou (suprimido): {exc}")
             return False
+
+    # ------------------------------------------------------------------
+    # Helpers de explicação e duração
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _layman_explanation(reasoning: str, side: str, confidence: float) -> str:
+        """
+        Converte o reasoning técnico da Vision em linguagem acessível para
+        um usuário leigo entender o motivo de entrar na operação.
+        """
+        if not reasoning:
+            dir_pt = "compra" if side == "LONG" else "venda"
+            return (
+                f"Os indicadores apontam para uma oportunidade de {dir_pt}. "
+                f"A IA está com {confidence * 100:.0f}% de confiança nesse movimento."
+            )
+
+        # Extrai palavras-chave do reasoning e monta texto simples
+        r = reasoning.lower()
+        pieces: list[str] = []
+
+        # Tendência
+        if "uptrend" in r or "bullish" in r or "alta" in r:
+            pieces.append("o mercado está em tendência de alta")
+        elif "downtrend" in r or "bearish" in r or "baixa" in r:
+            pieces.append("o mercado está em tendência de baixa")
+
+        # RSI
+        if "rsi" in r:
+            if "oversold" in r or "sobrevendido" in r:
+                pieces.append("o ativo está sobrevendido (barato demais)")
+            elif "overbought" in r or "sobrecomprado" in r:
+                pieces.append("o ativo está sobrecomprado (caro demais)")
+            else:
+                pieces.append("o indicador de força (RSI) apoia a operação")
+
+        # Suporte/resistência
+        if "support" in r or "suporte" in r:
+            pieces.append("o preço está em uma região de suporte forte")
+        if "resistance" in r or "resistência" in r or "resistencia" in r:
+            pieces.append("o preço está próximo de uma resistência importante")
+
+        # Volume / momentum
+        if "volume" in r:
+            pieces.append("o volume confirma o movimento")
+        if "momentum" in r:
+            pieces.append("há força (momentum) no movimento atual")
+
+        # Funding / sentiment
+        if "funding" in r:
+            pieces.append("as taxas de financiamento favorecem a posição")
+        if "sentiment" in r or "fear" in r or "greed" in r:
+            pieces.append("o sentimento do mercado apoia a entrada")
+
+        # Breakout
+        if "breakout" in r or "break" in r:
+            pieces.append("o preço rompeu um nível técnico importante")
+
+        # Fallback genérico
+        if not pieces:
+            dir_pt = "compra" if side == "LONG" else "venda"
+            return (
+                f"Múltiplos indicadores técnicos alinham para uma operação de {dir_pt}. "
+                f"Confiança da IA: {confidence * 100:.0f}%."
+            )
+
+        direction_pt = "comprar" if side == "LONG" else "vender"
+        intro = f"A IA decidiu {direction_pt} porque "
+        body = ", ".join(pieces[:3])  # máximo 3 pontos para não ficar longo
+        suffix = f". Confiança: {confidence * 100:.0f}%."
+        return intro + body + suffix
+
+    @staticmethod
+    def _estimate_duration(
+        sl_dist_pct: Optional[float],
+        tp_dist_pct: Optional[float],
+        leverage: int,
+    ) -> str:
+        """
+        Estima a duração da operação com base na distância SL/TP e alavancagem.
+
+        Heurística simples:
+        - Distância pequena + alavancagem alta → scalp (minutos a 1h)
+        - Distância média                      → swing curto (2–8h)
+        - Distância grande + baixa alavancagem → swing longo (1–3 dias)
+        """
+        if sl_dist_pct is None and tp_dist_pct is None:
+            return ""
+
+        # Distância média entre SL e TP como referência
+        dists = [d for d in [sl_dist_pct, tp_dist_pct] if d is not None]
+        avg_dist = sum(dists) / len(dists)
+
+        # Ajuste por alavancagem — mais alavancagem → movimentos menores são suficientes
+        effective_dist = avg_dist / max(leverage, 1)
+
+        if effective_dist < 0.3:
+            return "Scalp — alguns minutos a 1 hora"
+        elif effective_dist < 0.8:
+            return "Curto prazo — 1 a 6 horas"
+        elif effective_dist < 1.5:
+            return "Médio prazo — 6 a 24 horas"
+        else:
+            return "Swing — 1 a 3 dias"
 
     async def position_closed(
         self,

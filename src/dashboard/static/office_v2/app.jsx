@@ -121,12 +121,22 @@ function hexToRgb(hex) {
 }
 
 const ACTIONS = [
-  { id: "fanout", from: "nickfury",      to: "portfolio",     label: "ASSIGN BOOK",   color: "#22c55e" },
-  { id: "synth",  from: "superman",      to: "vision",        label: "FORWARD SIGNAL", color: "#38bdf8" },
-  { id: "exec",   from: "vision",        to: "ironman",       label: "EXECUTE PLAN",  color: "#fb923c" },
-  { id: "watch",  from: "ironman",       to: "batman",        label: "RISK CHECK",    color: "#facc15" },
-  { id: "report", from: "portfolio",     to: "dailypnl",      label: "WRITE PNL",     color: "#a78bfa" },
-  { id: "search", from: "doctorstrange", to: "__search",      label: "SEARCH WEB",    color: "#38bdf8" },
+  // Layer-4: Nick Fury coordena
+  { id: "fanout",    from: "nickfury",      to: "portfolio",   label: "ASSIGN BOOK",    color: "#22c55e" },
+  // Layer-1→2: sinal percorre a cadeia
+  { id: "synth",     from: "superman",      to: "vision",      label: "FORWARD SIGNAL", color: "#38bdf8" },
+  { id: "flash2vis", from: "flash",         to: "vision",      label: "MOMENTUM",       color: "#fbbf24" },
+  // Layer-2→3: Vision → Batman → IronMan
+  { id: "exec",      from: "vision",        to: "batman",      label: "RISK GATE",      color: "#fb923c" },
+  { id: "approve",   from: "batman",        to: "ironman",     label: "APPROVED",       color: "#facc15" },
+  // Layer-3 recovery loop
+  { id: "recovery",  from: "wolverine",     to: "batman",      label: "RECOVERY PLAN",  color: "#fb923c" },
+  { id: "monitor",   from: "cyclops",       to: "ironman",     label: "MONITOR SL/TP",  color: "#fbbf24" },
+  // Analytics → Command
+  { id: "perf",      from: "deadpool",      to: "nickfury",    label: "PERF REPORT",    color: "#a78bfa" },
+  { id: "report",    from: "portfolio",     to: "deadpool",    label: "EQUITY DATA",    color: "#a78bfa" },
+  // Web search
+  { id: "search",    from: "doctorstrange", to: "__search",    label: "SEARCH WEB",     color: "#38bdf8" },
 ];
 
 const ANCHORS = {
