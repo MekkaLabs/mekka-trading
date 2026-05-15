@@ -172,6 +172,127 @@ class Cyclops:
                 tp_trigger = max(tp_values) if tp_values else None
 
             # ----------------------------------------------------------------
+            # Story 083 — Auto-TP Ladder (3-level graduated exits)
+            # ----------------------------------------------------------------
+            # When tp_ladder_enabled, replaces the single Story-065 scale-out
+            # with 3 graduated exits at 1/3, 2/3, and full TP of the move.
+            # Each level is detected by a distinct triggered_by marker.
+            if settings.tp_ladder_enabled and tp_trigger and avg_entry:
+                _sym_trades = [t for t in trades if t.symbol.upper() == symbol]
+                _triggered_bys = [
+                    (getattr(t, "raw", {}) or {}).get("metadata", {}).get("triggered_by", "")
+                    for t in _sym_trades
+                ]
+                _ladder_1_done = "cyclops_tp_ladder_1" in _triggered_bys
+                _ladder_2_done = "cyclops_tp_ladder_2" in _triggered_bys
+
+                # Calculate ladder trigger prices
+                _r = tp_trigger - avg_entry if side == "long" else avg_entry - tp_trigger
+                if side == "long":
+                    _ladder_tp1 = avg_entry + (_r / 3.0) if not _ladder_1_done else None
+                    _ladder_tp2 = avg_entry + (2.0 * _r / 3.0) if _ladder_1_done and not _ladder_2_done else None
+                else:
+                    _ladder_tp1 = avg_entry - (_r / 3.0) if not _ladder_1_done else None
+                    _ladder_tp2 = avg_entry - (2.0 * _r / 3.0) if _ladder_1_done and not _ladder_2_done else None
+
+                # Apply breakeven SL after TP1, trailing after TP2
+                if _ladder_1_done and avg_entry:
+                    if side == "long":
+                        sl_trigger = max(sl_trigger, avg_entry) if sl_trigger else avg_entry
+                    else:
+                        sl_trigger = min(sl_trigger, avg_entry) if sl_trigger else avg_entry
+                if _ladder_2_done and mark:
+                    trail_pct = settings.trailing_stop_pct
+                    if side == "long":
+                        _trail_sl = round(mark * (1.0 - trail_pct), 6)
+                        _trail_sl = max(avg_entry, _trail_sl)
+                        sl_trigger = max(sl_trigger, _trail_sl) if sl_trigger else _trail_sl
+                    else:
+                        _trail_sl = round(mark * (1.0 + trail_pct), 6)
+                        _trail_sl = min(avg_entry, _trail_sl)
+                        sl_trigger = min(sl_trigger, _trail_sl) if sl_trigger else _trail_sl
+
+                # TP Ladder Level 1 check
+                if _ladder_tp1 is not None:
+                    _ltp1_hit = (
+                        (side == "long" and mark >= _ladder_tp1)
+                        or (side == "short" and mark <= _ladder_tp1)
+                    )
+                    if _ltp1_hit:
+                        _l1_qty = round(open_qty * settings.tp_ladder_tp1_pct, 8)
+                        _l1_pnl = round(
+                            (mark - avg_entry) * _l1_qty if side == "long"
+                            else (avg_entry - mark) * _l1_qty, 4,
+                        )
+                        _l1_close_side = "short" if side == "long" else "long"
+                        _l1_result = ExecutionResult(
+                            symbol=symbol, status=ExecutionStatus.PAPER, is_paper=True,
+                            side=_l1_close_side, quantity=_l1_qty,
+                            avg_price=round(mark, 6),
+                            notional_usd=round(_l1_qty * mark, 2),
+                            order_id=f"CYCLOPS-TPL1-{uuid.uuid4().hex[:8]}",
+                            metadata={
+                                "triggered_by": "cyclops_tp_ladder_1",
+                                "trigger_reason": f"TP Ladder L1: mark {mark:,.4f} hit {_ladder_tp1:,.4f} (1/3 of range)",
+                                "avg_entry": avg_entry, "tp_ladder_trigger": _ladder_tp1,
+                                "new_sl_breakeven": avg_entry, "pnl_usd": _l1_pnl,
+                            },
+                        )
+                        try:
+                            from src.persistence.repository import MekkaRepository as _Repo  # noqa: WPS433
+                            await _Repo.save_trade(execution=_l1_result, pnl_usd=_l1_pnl)
+                            await _Repo.log_event(
+                                agent="Cyclops", event="TP_LADDER_L1", severity="INFO", symbol=symbol,
+                                message=f"[TP-Ladder-L1] {symbol} {side.upper()} closed {settings.tp_ladder_tp1_pct*100:.0f}% @ {mark:,.4f} pnl={_l1_pnl:+.4f}",
+                                payload={"symbol": symbol, "side": side, "qty": _l1_qty, "price": mark, "pnl_usd": _l1_pnl},
+                            )
+                            triggered += 1
+                            logger.info("[Cyclops] TP-Ladder-L1 %s qty=%.6f pnl=%+.4f", symbol, _l1_qty, _l1_pnl)
+                        except Exception as _exc:  # noqa: BLE001
+                            logger.error("[Cyclops] TP-Ladder-L1 save failed %s: %s", symbol, _exc)
+                        continue
+
+                # TP Ladder Level 2 check
+                if _ladder_tp2 is not None:
+                    _ltp2_hit = (
+                        (side == "long" and mark >= _ladder_tp2)
+                        or (side == "short" and mark <= _ladder_tp2)
+                    )
+                    if _ltp2_hit:
+                        _l2_qty = round(open_qty * settings.tp_ladder_tp2_pct, 8)
+                        _l2_pnl = round(
+                            (mark - avg_entry) * _l2_qty if side == "long"
+                            else (avg_entry - mark) * _l2_qty, 4,
+                        )
+                        _l2_close_side = "short" if side == "long" else "long"
+                        _l2_result = ExecutionResult(
+                            symbol=symbol, status=ExecutionStatus.PAPER, is_paper=True,
+                            side=_l2_close_side, quantity=_l2_qty,
+                            avg_price=round(mark, 6),
+                            notional_usd=round(_l2_qty * mark, 2),
+                            order_id=f"CYCLOPS-TPL2-{uuid.uuid4().hex[:8]}",
+                            metadata={
+                                "triggered_by": "cyclops_tp_ladder_2",
+                                "trigger_reason": f"TP Ladder L2: mark {mark:,.4f} hit {_ladder_tp2:,.4f} (2/3 of range)",
+                                "avg_entry": avg_entry, "tp_ladder_trigger": _ladder_tp2,
+                                "new_sl_trailing": True, "pnl_usd": _l2_pnl,
+                            },
+                        )
+                        try:
+                            from src.persistence.repository import MekkaRepository as _Repo  # noqa: WPS433
+                            await _Repo.save_trade(execution=_l2_result, pnl_usd=_l2_pnl)
+                            await _Repo.log_event(
+                                agent="Cyclops", event="TP_LADDER_L2", severity="INFO", symbol=symbol,
+                                message=f"[TP-Ladder-L2] {symbol} {side.upper()} closed {settings.tp_ladder_tp2_pct*100:.0f}% @ {mark:,.4f} pnl={_l2_pnl:+.4f} | SL→trailing",
+                                payload={"symbol": symbol, "side": side, "qty": _l2_qty, "price": mark, "pnl_usd": _l2_pnl},
+                            )
+                            triggered += 1
+                            logger.info("[Cyclops] TP-Ladder-L2 %s qty=%.6f pnl=%+.4f", symbol, _l2_qty, _l2_pnl)
+                        except Exception as _exc:  # noqa: BLE001
+                            logger.error("[Cyclops] TP-Ladder-L2 save failed %s: %s", symbol, _exc)
+                        continue
+
+            # ----------------------------------------------------------------
             # Story 065 — Scale-out (Partial TP at 50% of move)
             # ----------------------------------------------------------------
             # Detect if a scale-out trade has already been recorded for this
@@ -210,6 +331,202 @@ class Cyclops:
                         min(sl_trigger, dynamic_sl) if sl_trigger is not None
                         else dynamic_sl
                     )
+
+            # ----------------------------------------------------------------
+            # Story 087 — +2R profit alert (Telegram warning to close manually)
+            # ----------------------------------------------------------------
+            # Fires once when position unrealised profit crosses 2× the initial
+            # risk (distance from entry to SL). Detected via a sentinel marker
+            # in trade history so we don't spam on every cycle.
+            if tp_trigger and sl_trigger and avg_entry and mark:
+                try:
+                    _risk = abs(avg_entry - sl_trigger)
+                    _two_r_price = (
+                        avg_entry + 2.0 * _risk if side == "long"
+                        else avg_entry - 2.0 * _risk
+                    )
+                    _two_r_done = any(
+                        (getattr(t, "raw", {}) or {}).get("metadata", {}).get("triggered_by")
+                        == "cyclops_2r_alert"
+                        for t in trades
+                        if t.symbol.upper() == symbol
+                    )
+                    _two_r_hit = (
+                        not _two_r_done
+                        and (
+                            (side == "long" and mark >= _two_r_price)
+                            or (side == "short" and mark <= _two_r_price)
+                        )
+                    )
+                    if _two_r_hit:
+                        from src.persistence.repository import MekkaRepository as _Repo3  # noqa: WPS433
+                        await _Repo3.log_event(
+                            agent="Cyclops", event="TWO_R_PROFIT_ALERT", severity="INFO",
+                            symbol=symbol,
+                            message=f"[+2R] {symbol} {side.upper()} position hit +2R @ {mark:,.4f}",
+                            payload={"symbol": symbol, "side": side, "mark": mark,
+                                     "avg_entry": avg_entry, "two_r_price": _two_r_price,
+                                     "sl_trigger": sl_trigger},
+                        )
+                        # Sentinel trade to avoid re-alerting
+                        from src.models.execution import ExecutionResult as _ER, ExecutionStatus as _ES  # noqa: WPS433
+                        _sentinel = _ER(
+                            symbol=symbol, status=_ES.PAPER, is_paper=True,
+                            side=side, quantity=0.0, avg_price=mark,
+                            notional_usd=0.0,
+                            order_id=f"CYCLOPS-2RALERT-{uuid.uuid4().hex[:8]}",
+                            metadata={
+                                "triggered_by": "cyclops_2r_alert",
+                                "trigger_reason": f"+2R alert: mark {mark:,.4f} ≥ 2R target {_two_r_price:,.4f}",
+                            },
+                        )
+                        await _Repo3.save_trade(execution=_sentinel, pnl_usd=None)
+                        # Telegram alert
+                        try:
+                            from src.services.telegram_alerter import TelegramAlerter as _TGA  # noqa: WPS433
+                            _unrealised = (
+                                (mark - avg_entry) * open_qty if side == "long"
+                                else (avg_entry - mark) * open_qty
+                            )
+                            await _TGA().send(
+                                f"🎯 +2R Alert — {symbol} {side.upper()}\n"
+                                f"Mark: {mark:,.4f} | Entry: {avg_entry:,.4f}\n"
+                                f"Unrealised: +${_unrealised:.2f}\n"
+                                f"Considere fechar parcial ou mover SL para proteger lucro.",
+                                level="INFO",
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                        logger.info("[Cyclops] +2R alert fired for %s @ %s", symbol, mark)
+                except Exception as _2r_exc:  # noqa: BLE001
+                    logger.debug("[Cyclops] +2R alert skipped: %s", _2r_exc)
+
+            # ----------------------------------------------------------------
+            # Story 098 — -0.5R danger zone alert (early SL warning)
+            # ----------------------------------------------------------------
+            if sl_trigger and avg_entry and mark:
+                try:
+                    _risk_dist = abs(avg_entry - sl_trigger)
+                    _half_r_warn_price = (
+                        avg_entry - 0.5 * _risk_dist if side == "long"
+                        else avg_entry + 0.5 * _risk_dist
+                    )
+                    _warn_done = any(
+                        (getattr(t, "raw", {}) or {}).get("metadata", {}).get("triggered_by")
+                        == "cyclops_half_r_warn"
+                        for t in trades
+                        if t.symbol.upper() == symbol
+                    )
+                    _warn_hit = (
+                        not _warn_done
+                        and (
+                            (side == "long" and mark <= _half_r_warn_price)
+                            or (side == "short" and mark >= _half_r_warn_price)
+                        )
+                    )
+                    if _warn_hit:
+                        from src.persistence.repository import MekkaRepository as _Repo4  # noqa: WPS433
+                        _warn_sentinel = ExecutionResult(
+                            symbol=symbol, status=ExecutionStatus.PAPER, is_paper=True,
+                            side=side, quantity=0.0, avg_price=mark,
+                            notional_usd=0.0,
+                            order_id=f"CYCLOPS-HALFR-{uuid.uuid4().hex[:8]}",
+                            metadata={
+                                "triggered_by": "cyclops_half_r_warn",
+                                "trigger_reason": f"-0.5R warning: mark {mark:,.4f}",
+                            },
+                        )
+                        await _Repo4.save_trade(execution=_warn_sentinel, pnl_usd=None)
+                        try:
+                            from src.services.telegram_alerter import TelegramAlerter as _TGA2  # noqa: WPS433
+                            _loss_now = (
+                                (avg_entry - mark) * open_qty if side == "long"
+                                else (mark - avg_entry) * open_qty
+                            )
+                            await _TGA2().send(
+                                f"⚠️ -0.5R Warning — {symbol} {side.upper()}\n"
+                                f"Mark: {mark:,.4f} | Entry: {avg_entry:,.4f}\n"
+                                f"SL em: {sl_trigger:,.4f} | Loss atual: -${_loss_now:.2f}\n"
+                                f"Posição se aproximando do stop loss.",
+                                level="WARNING",
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                        logger.warning("[Cyclops] -0.5R danger zone alert for %s @ %s", symbol, mark)
+                except Exception as _hr_exc:  # noqa: BLE001
+                    logger.debug("[Cyclops] -0.5R warn skipped: %s", _hr_exc)
+
+            # ----------------------------------------------------------------
+            # [Story 105] Partial SL — close 50% at -0.75R
+            #
+            # When price crosses 75% of the distance from entry to SL, close
+            # half the position to reduce maximum loss. Uses sentinel to fire
+            # only once per position. Gated by settings.partial_sl_enabled.
+            # ----------------------------------------------------------------
+            if settings.partial_sl_enabled and sl_trigger and avg_entry and mark:
+                try:
+                    _partial_sl_price = (
+                        avg_entry - 0.75 * abs(avg_entry - sl_trigger) if side == "long"
+                        else avg_entry + 0.75 * abs(avg_entry - sl_trigger)
+                    )
+                    _psl_done = any(
+                        (getattr(t, "raw", {}) or {}).get("metadata", {}).get("triggered_by")
+                        == "cyclops_partial_sl"
+                        for t in trades
+                        if t.symbol.upper() == symbol
+                    )
+                    _psl_hit = (
+                        not _psl_done
+                        and open_qty > 1e-8
+                        and (
+                            (side == "long" and mark <= _partial_sl_price)
+                            or (side == "short" and mark >= _partial_sl_price)
+                        )
+                    )
+                    if _psl_hit:
+                        _psl_qty = round(open_qty * 0.5, 8)
+                        _psl_pnl = round(
+                            (mark - avg_entry) * _psl_qty if side == "long"
+                            else (avg_entry - mark) * _psl_qty, 4
+                        )
+                        _psl_close_side = "short" if side == "long" else "long"
+                        _psl_exec = ExecutionResult(
+                            symbol=symbol,
+                            status=ExecutionStatus.PAPER,
+                            is_paper=True,
+                            side=_psl_close_side,
+                            quantity=_psl_qty,
+                            avg_price=round(mark, 6),
+                            notional_usd=round(_psl_qty * mark, 2),
+                            order_id=f"CYCLOPS-PSL-{uuid.uuid4().hex[:8]}",
+                            metadata={
+                                "triggered_by": "cyclops_partial_sl",
+                                "trigger_reason": f"-0.75R partial SL: mark {mark:,.4f}",
+                                "avg_entry": avg_entry,
+                                "sl_trigger": sl_trigger,
+                                "partial_sl_price": _partial_sl_price,
+                                "pnl_usd": _psl_pnl,
+                            },
+                        )
+                        from src.persistence.repository import MekkaRepository as _PSLRepo  # noqa: WPS433
+                        await _PSLRepo.save_trade(execution=_psl_exec, pnl_usd=_psl_pnl)
+                        try:
+                            from src.services.telegram_alerter import TelegramAlerter as _TGPSL  # noqa: WPS433
+                            await _TGPSL().send(
+                                f"✂️ *Partial SL* — {symbol} {side.upper()}\n"
+                                f"Fechado 50% ({_psl_qty:.6f}) @ {mark:,.4f}\n"
+                                f"PnL parcial: ${_psl_pnl:+.2f}\n"
+                                f"SL em: {sl_trigger:,.4f} (−0.75R atingido)",
+                                level="WARNING",
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                        logger.warning(
+                            "[Cyclops] Partial SL fired for %s — closed 50%% @ %s (pnl=%s)",
+                            symbol, mark, _psl_pnl,
+                        )
+                except Exception as _psl_exc:  # noqa: BLE001
+                    logger.debug("[Cyclops] Partial SL gate skipped: %s", _psl_exc)
 
             # Check TP1 trigger (scale-out: close 50%, keep rest risk-free)
             if tp1_trigger is not None:
@@ -404,6 +721,31 @@ class Cyclops:
                     )
                 except Exception as _mem_exc:  # noqa: BLE001
                     logger.debug("[Cyclops] memory resolve skipped: %s", _mem_exc)
+
+                # Story 111 — Auto-reset consecutive losses gate (3o).
+                # When Cyclops closes a position with POSITIVE PnL (TP win),
+                # the gate 3o's list_recent_closed_trades() will naturally see
+                # this winning trade and break any all-losses streak. We also
+                # write an explicit audit event GATE_3O_RESET for observability.
+                if pnl_usd > 0:
+                    try:
+                        await MekkaRepository.log_event(
+                            agent="Cyclops",
+                            event="GATE_3O_RESET",
+                            severity="INFO",
+                            symbol=symbol,
+                            message=(
+                                f"[111] TP win on {symbol} pnl={pnl_usd:+.4f} — "
+                                f"consecutive-losses streak reset."
+                            ),
+                            payload={
+                                "symbol": symbol,
+                                "pnl_usd": pnl_usd,
+                                "trigger_reason": trigger_reason,
+                            },
+                        )
+                    except Exception as _r111_exc:  # noqa: BLE001
+                        logger.debug("[Cyclops] gate-3o reset audit skipped: %s", _r111_exc)
 
                 # Telegram — fire-and-forget, never raises
                 try:

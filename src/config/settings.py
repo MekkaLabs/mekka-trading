@@ -199,6 +199,310 @@ class Settings(BaseSettings):
         default=0.20,
         description="Block new entries if total open notional exceeds this fraction of equity (0.20 = 20%)",
     )
+    # Story 069 — Re-entry cooldown after SL close
+    reentry_cooldown_minutes: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "Minutes to block re-entry in a symbol after Cyclops closes it via SL. "
+            "Set to 0 to disable. Prevents AI revenge-trading after a loss."
+        ),
+    )
+    # Story 070 — ATR-based position sizing
+    atr_sizing_enabled: bool = Field(
+        default=True,
+        description="Scale position size inversely with 14-period ATR volatility.",
+    )
+    atr_lookback_candles: int = Field(
+        default=14,
+        ge=5,
+        le=50,
+        description="Number of 1h candles used to compute ATR for sizing.",
+    )
+    atr_target_pct: float = Field(
+        default=0.02,
+        gt=0.0,
+        le=0.20,
+        description=(
+            "Target ATR% (ATR / price). When current ATR% exceeds this, position size "
+            "is scaled down proportionally. Default 2%: BTC typically trades 1.5-3%."
+        ),
+    )
+    atr_min_size_multiplier: float = Field(
+        default=0.25,
+        gt=0.0,
+        le=1.0,
+        description="Floor for ATR size multiplier — never reduces size below this fraction.",
+    )
+    # Story 074 — Telegram Trade Approval
+    telegram_trade_approval_enabled: bool = Field(
+        default=True,
+        description=(
+            "If True, Batman-approved trades are sent to Telegram for operator confirmation "
+            "before IronMan executes. In paper mode, auto-approves on timeout. "
+            "In live mode, auto-rejects on timeout (safety-first)."
+        ),
+    )
+    telegram_trade_approval_timeout_s: int = Field(
+        default=120,
+        ge=10,
+        le=600,
+        description="Seconds to wait for operator response before auto-approve/reject.",
+    )
+
+    # Story 075 — Funding Rate Gate
+    funding_gate_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable funding rate gate in Batman. "
+            "Blocks/penalizes entries when funding rate signals extreme crowded positioning."
+        ),
+    )
+    funding_long_block_pct: float = Field(
+        default=0.10,
+        gt=0.0,
+        description=(
+            "Block LONG entries when 8h funding rate exceeds this % "
+            "(e.g. 0.10 = 0.10%/8h ≈ 109%/yr — extremely crowded long)."
+        ),
+    )
+    funding_long_warn_pct: float = Field(
+        default=0.05,
+        gt=0.0,
+        description=(
+            "Reduce LONG size 40%% when 8h funding rate exceeds this % "
+            "(e.g. 0.05 = 0.05%/8h ≈ 55%/yr — elevated long cost)."
+        ),
+    )
+    funding_short_block_pct: float = Field(
+        default=-0.10,
+        lt=0.0,
+        description=(
+            "Block SHORT entries when 8h funding rate is below this % "
+            "(e.g. -0.10 = extremely crowded short)."
+        ),
+    )
+    funding_short_warn_pct: float = Field(
+        default=-0.05,
+        lt=0.0,
+        description="Reduce SHORT size 40%% when 8h funding rate is below this %.",
+    )
+
+    # Story 076 — Trading Hours Gate
+    trading_hours_enabled: bool = Field(
+        default=False,
+        description=(
+            "Only allow new entries within the configured UTC hour window. "
+            "Reduces noise during low-liquidity hours (e.g. Asian pre-session)."
+        ),
+    )
+    trading_hours_start_utc: int = Field(
+        default=7,
+        ge=0,
+        le=23,
+        description="Earliest UTC hour allowed for new entries (inclusive). Default: 07:00 UTC.",
+    )
+    trading_hours_end_utc: int = Field(
+        default=23,
+        ge=0,
+        le=23,
+        description=(
+            "Latest UTC hour allowed for new entries (inclusive). "
+            "Default: 23:00 UTC (midnight block = 00:00-06:59 UTC)."
+        ),
+    )
+
+    # Story 072 — Multi-Timeframe Confluence
+    mtf_confluence_enabled: bool = Field(
+        default=True,
+        description="Enable 4h trend check before entering on lower-timeframe signal.",
+    )
+    mtf_interval: str = Field(
+        default="4h",
+        description="Higher timeframe used for confluence check (Hyperliquid interval string).",
+    )
+    mtf_lookback_candles: int = Field(
+        default=30,
+        ge=10,
+        le=100,
+        description="Number of HTF candles to classify the prevailing trend.",
+    )
+    mtf_reject_on_opposite: bool = Field(
+        default=False,
+        description=(
+            "If True, hard-reject signals that oppose the HTF trend. "
+            "If False (default), only apply a 40% size reduction (REDUCED verdict)."
+        ),
+    )
+
+    # Story 086 — Max trades per symbol per day gate
+    max_trades_per_symbol_day: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Batman gate 3l: Maximum number of FILLED/PAPER trades allowed "
+            "for a single symbol within a UTC calendar day. "
+            "Set to 99 to effectively disable. Default 2."
+        ),
+    )
+
+    # Story 091 — Dry-Run Mode
+    dry_run_mode: bool = Field(
+        default=False,
+        description=(
+            "When True, the full signal→Batman→approval pipeline runs but "
+            "IronMan execution is skipped. Useful for testing strategy changes "
+            "without creating real paper positions. Also toggled at runtime "
+            "via /dryrun Telegram command (MEKKA_DRY_RUN=1 env var)."
+        ),
+    )
+
+    # Story 094 — Minimum notional for Telegram trade alerts
+    min_alert_notional_usd: float = Field(
+        default=50.0,
+        ge=0.0,
+        description=(
+            "Suppress Telegram trade alerts for trades with notional "
+            "below this threshold (USD). Default $50. Set 0 to always alert."
+        ),
+    )
+
+    # Story 096 — Minimum trade notional gate
+    min_trade_notional_usd: float = Field(
+        default=10.0,
+        ge=0.0,
+        description=(
+            "Batman gate 3m: Reject signals where equity × size_pct × leverage "
+            "would produce a notional below this threshold (USD). "
+            "Prevents micro-positions that generate fees without meaningful exposure. "
+            "Default $10. Set 0 to disable."
+        ),
+    )
+
+    # Story 100 — Max drawdown per symbol per week
+    max_symbol_drawdown_pct: float = Field(
+        default=0.05,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Batman gate 3n: Reject new entries in a symbol whose cumulative "
+            "realized PnL this week is worse than -(equity × max_symbol_drawdown_pct). "
+            "Default 5% of equity. Set to 1.0 to disable."
+        ),
+    )
+
+    # Story 102 — Max consecutive losses gate (Batman 3o)
+    max_consecutive_losses: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Batman gate 3o: Reject new entries when the last N trades across "
+            "all symbols were losses (SL hit). Resets on first TP/win. "
+            "Set to a high value (e.g. 99) to disable."
+        ),
+    )
+
+    # Story 105 — Cyclops partial SL (close half at -0.75R)
+    partial_sl_enabled: bool = Field(
+        default=False,
+        description=(
+            "Cyclops gate: close 50% of a position when price crosses -75% "
+            "of the SL range (i.e. the position is at -0.75R). "
+            "Uses sentinel trade triggered_by='cyclops_partial_sl'."
+        ),
+    )
+
+    # Story 106 — Directional bias guard (Batman 3p)
+    max_same_direction_streak: int = Field(
+        default=4,
+        ge=1,
+        description=(
+            "Batman gate 3p: Reject new entries when the last N executed trades "
+            "were all in the same direction (all LONG or all SHORT), indicating "
+            "directional bias. Set to a high value (e.g. 99) to disable."
+        ),
+    )
+
+    # Story 110 — Min ATR filter (Batman gate 3q)
+    min_atr_pct: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=0.10,
+        description=(
+            "Batman gate 3q: Reject signals when the symbol's current ATR% "
+            "(ATR / price) is below this threshold — indicates a quiet/paused market. "
+            "0.0 (default) disables the gate. Example: 0.005 = 0.5% ATR minimum."
+        ),
+    )
+
+    # Story 083 — Auto-TP Ladder (multi-level partial exits)
+    tp_ladder_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable 3-level TP ladder in Cyclops. When True, replaces the "
+            "single midpoint scale-out (Story 065) with 3 graduated exits:\n"
+            "  TP1 at 1/3 of range → close tp_ladder_tp1_pct of position\n"
+            "  TP2 at 2/3 of range → close tp_ladder_tp2_pct of remaining\n"
+            "  TP3 at full TP      → close all remaining\n"
+            "After TP1, SL moves to breakeven. After TP2, SL trails."
+        ),
+    )
+    tp_ladder_tp1_pct: float = Field(
+        default=0.25,
+        gt=0.0,
+        lt=1.0,
+        description="Fraction of position closed at TP ladder level 1 (1/3 of range). Default 25%.",
+    )
+    tp_ladder_tp2_pct: float = Field(
+        default=0.25,
+        gt=0.0,
+        lt=1.0,
+        description=(
+            "Fraction of *remaining* position closed at TP ladder level 2 (2/3 of range). "
+            "Default 25% of original (33% of remaining 75%)."
+        ),
+    )
+
+    # Story 080 — Pyramid / Scale-In Entry
+    pyramid_enabled: bool = Field(
+        default=False,
+        description=(
+            "Allow adding to an existing profitable position (scale-in / pyramid) "
+            "when a new confirming signal arrives. If True, Batman bypasses the "
+            "max_open_positions gate for the same symbol when the existing position "
+            "is profitable (unrealized_pnl_usd > 0). The added size is capped at "
+            "pyramid_max_add_pct of equity."
+        ),
+    )
+    pyramid_max_add_pct: float = Field(
+        default=0.01,
+        gt=0.0,
+        le=0.05,
+        description=(
+            "Maximum size (fraction of equity) allowed for a scale-in add. "
+            "Default 1% of equity — always smaller than the initial position."
+        ),
+    )
+    pyramid_min_profit_pct: float = Field(
+        default=0.5,
+        ge=0.0,
+        description=(
+            "Minimum unrealised profit (%) the existing position must show "
+            "before a pyramid entry is allowed. Default 0.5%."
+        ),
+    )
+
+    # Story 071 — Symbol consecutive-SL strike counter + auto-blacklist
+    symbol_strike_limit: int = Field(
+        default=3,
+        ge=1,
+        description="Number of consecutive SL hits before a symbol is auto-blacklisted.",
+    )
+    symbol_blacklist_hours: float = Field(
+        default=24.0,
+        gt=0.0,
+        description="Hours to blacklist a symbol after hitting the consecutive-SL strike limit.",
+    )
 
     # --------------------------------------------------------------------------
     # Timing (seconds)

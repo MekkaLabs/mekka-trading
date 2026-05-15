@@ -1,0 +1,58 @@
+# ==============================================================================
+# Mekka Trading — Python Dependencies
+# ==============================================================================
+
+# --- Hyperliquid ---
+hyperliquid-python-sdk>=0.8.0
+eth-account>=0.10.0
+
+# --- OpenAI ---
+openai>=1.0.0
+
+# --- Data & Technical Analysis ---
+pandas>=2.0.0
+# pandas-ta: the 0.4.x dev branches that PyPI publishes for Python 3.14 require
+# `numba`, and numba does not yet build on Python 3.14. There are three known
+# workable paths for full Superman runtime support:
+#   1. Use Python 3.13 in the venv (recommended). pandas-ta 0.3.14b0 then
+#      installs cleanly and numba is optional, not required.
+#   2. Install the community fork that drops numba:
+#         pip install "pandas-ta @ git+https://github.com/twopirllc/pandas-ta.git@development"
+#   3. Skip pandas-ta entirely — Superman will then fail at runtime when its
+#      lazy import fires, but the rest of the pipeline (Vision, Batman, Iron
+#      Man, the test suite) is unaffected.
+# The constraint below is intentionally loose so `pip install -r requirements.txt`
+# does not abort on a missing exact version. Pytest does not exercise Superman
+# end-to-end; lazy imports keep test collection green even when pandas-ta is
+# broken in the venv.
+pandas-ta>=0.3.14b
+numpy>=1.24.0
+ccxt>=4.0.0
+
+# --- Validation & Settings ---
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
+
+# --- Async / Networking ---
+aiohttp>=3.9.0
+websockets>=12.0
+requests>=2.31.0
+
+# --- Telegram Notifications ---
+python-telegram-bot>=20.0
+
+# --- Database ---
+sqlalchemy>=2.0.0
+aiosqlite>=0.19.0
+
+# --- Logging ---
+loguru>=0.7.0
+
+# --- Retry Logic ---
+tenacity>=8.2.0
+
+# --- Dev / Testing ---
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0

@@ -1,0 +1,13 @@
+{
+  "alwaysUpdateLinks": true,
+  "newLinkFormat": "shortest",
+  "useMarkdownLinks": false,
+  "attachmentFolderPath": "80 - Attachments",
+  "newFileLocation": "folder",
+  "newFileFolderPath": "00 - Inbox",
+  "showLineNumber": true,
+  "showInlineTitle": true,
+  "showFrontmatter": true,
+  "promptDelete": true,
+  "trashOption": "local"
+}

@@ -20,7 +20,8 @@
     "run:alerts-retention": "node dist/cli/alerts-retention.js",
     "run:ops-status": "node dist/cli/ops-status.js",
     "run:ops-alerts": "node dist/cli/ops-alerts.js",
-    "run:ops-alert-audit": "node dist/cli/ops-alert-audit.js"
+    "run:ops-alert-audit": "node dist/cli/ops-alert-audit.js",
+    "build:office-v2": "node scripts/build_office_v2.mjs"
   },
   "engines": {
     "node": ">=20"
@@ -28,5 +29,10 @@
   "devDependencies": {
     "@types/node": "^22.10.5",
     "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "esbuild": "^0.25.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   }
 }

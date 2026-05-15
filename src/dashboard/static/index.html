@@ -80,6 +80,10 @@
           <li><a href="#sec-manual">Mini Manual</a></li>
         </ul>
         <button class="page-nav-btn" data-page="settings">Settings</button>
+        <button class="page-nav-btn" data-page="leaderboard">🏆 Leaderboard</button>
+        <ul class="page-nav-sub">
+          <li><a href="#sec-leaderboard">Symbol Performance</a></li>
+        </ul>
         <button class="page-nav-btn page-nav-live" data-page="live">📡 Live</button>
       </nav>
     </aside>
@@ -406,6 +410,18 @@
         </div>
       </section>
 
+      <!-- Story 077 — Equity Curve Chart -->
+      <section class="panel" id="sec-equity-curve" data-page="performance">
+        <h2>Equity Curve</h2>
+        <div class="eq-stats-row" id="eq-stats-row"></div>
+        <div class="eq-chart-wrap">
+          <canvas id="eq-equity-canvas" class="eq-canvas"></canvas>
+        </div>
+        <div class="eq-chart-wrap eq-chart-sm">
+          <canvas id="eq-drawdown-canvas" class="eq-canvas"></canvas>
+        </div>
+      </section>
+
       <section class="panel replay-panel" id="sec-trades-timeline" data-page="performance">
         <h2>Trades Execution Timeline</h2>
         <div class="positions-toolbar">
@@ -549,6 +565,44 @@
         <div id="hero-sla" class="hero-sla"></div>
       </section>
 
+      <!-- Story 073 — Live Risk Panel -->
+      <section class="panel" id="sec-risk-panel" data-page="risk">
+        <h2>Live Risk Panel</h2>
+        <div class="risk-panel-grid" id="risk-panel-grid">
+          <!-- Exposure card -->
+          <div class="rp-card" id="rp-exposure">
+            <div class="rp-card-title">📊 Exposure</div>
+            <div class="rp-bar-wrap">
+              <div class="rp-bar" id="rp-exposure-bar"></div>
+            </div>
+            <div class="rp-card-value" id="rp-exposure-val">—</div>
+          </div>
+          <!-- Daily PnL card -->
+          <div class="rp-card" id="rp-pnl">
+            <div class="rp-card-title">💰 Daily PnL</div>
+            <div class="rp-bar-wrap">
+              <div class="rp-bar rp-bar-pnl" id="rp-pnl-bar"></div>
+            </div>
+            <div class="rp-card-value" id="rp-pnl-val">—</div>
+          </div>
+          <!-- Cooldowns card -->
+          <div class="rp-card" id="rp-cooldowns">
+            <div class="rp-card-title">⏳ Cooldowns</div>
+            <div class="rp-chips" id="rp-cooldown-chips"></div>
+          </div>
+          <!-- Blacklisted card -->
+          <div class="rp-card" id="rp-blacklist">
+            <div class="rp-card-title">🚫 Blacklisted</div>
+            <div class="rp-chips" id="rp-blacklist-chips"></div>
+          </div>
+          <!-- ATR card -->
+          <div class="rp-card rp-card-wide" id="rp-atrs">
+            <div class="rp-card-title">📈 ATR% por Ativo</div>
+            <div class="rp-atr-grid" id="rp-atr-grid"></div>
+          </div>
+        </div>
+      </section>
+
       <section class="panel" id="sec-risk" data-page="risk">
         <h2>Batman Risk Heatmap</h2>
         <div id="risk-heatmap" class="risk-heatmap"></div>
@@ -568,7 +622,17 @@
       </section>
 
       <section class="panel" id="sec-trades" data-page="trades">
-        <h2>Iron Man Executions</h2>
+        <div class="panel-head">
+          <h2>Iron Man Executions</h2>
+          <div class="export-actions">
+            <a id="export-csv-btn" class="export-btn" href="/api/trades/export?format=csv" download>
+              ⬇ CSV
+            </a>
+            <a id="export-json-btn" class="export-btn export-btn-secondary" href="/api/trades/export?format=json" download>
+              ⬇ JSON
+            </a>
+          </div>
+        </div>
         <table>
           <thead><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Notional</th></tr></thead>
           <tbody id="trades-body"></tbody>
@@ -679,6 +743,53 @@
             <div class="live-equity-strip" id="live-equity-strip"></div>
           </div>
         </div>
+      </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════
+           LEADERBOARD PAGE — Story 079
+           Symbol Performance Leaderboard: ranked by total PnL with
+           win rate, avg trade, Sharpe and best/worst breakdown.
+      ════════════════════════════════════════════════════════════════ -->
+      <section class="panel full" id="sec-leaderboard" data-page="leaderboard">
+        <div class="panel-head">
+          <h2>🏆 Symbol Performance Leaderboard</h2>
+          <div class="lb-controls">
+            <select id="lb-days-select" class="lb-select">
+              <option value="30">Últimos 30 dias</option>
+              <option value="60">Últimos 60 dias</option>
+              <option value="90" selected>Últimos 90 dias</option>
+              <option value="180">Últimos 180 dias</option>
+              <option value="365">Último ano</option>
+            </select>
+            <button id="lb-refresh-btn" class="lb-refresh-btn">↻ Atualizar</button>
+          </div>
+        </div>
+        <div id="lb-summary-row" class="lb-summary-row"></div>
+        <div class="lb-table-wrap">
+          <table class="lb-table" id="lb-table">
+            <thead>
+              <tr>
+                <th class="lb-rank">#</th>
+                <th class="lb-sym">Símbolo</th>
+                <th class="lb-num lb-sortable" data-col="total_pnl_usd">PnL Total</th>
+                <th class="lb-num lb-sortable" data-col="win_rate">Win Rate</th>
+                <th class="lb-num lb-sortable" data-col="trades">Trades</th>
+                <th class="lb-num lb-sortable" data-col="avg_pnl_usd">Avg Trade</th>
+                <th class="lb-num lb-sortable" data-col="sharpe">Sharpe</th>
+                <th class="lb-num">Melhor</th>
+                <th class="lb-num">Pior</th>
+              </tr>
+            </thead>
+            <tbody id="lb-tbody">
+              <tr><td colspan="9" class="lb-loading">Carregando…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="lb-empty" class="lb-empty hidden">
+          Nenhum trade registrado no período selecionado.
+        </div>
+        <div id="lb-error" class="lb-error hidden"></div>
+        <div class="lb-footer" id="lb-footer"></div>
       </section>
 
       </main>

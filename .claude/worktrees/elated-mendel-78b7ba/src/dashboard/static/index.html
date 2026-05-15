@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mekka Trading Command Center</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+  </head>
+  <body>
+    <div class="bg-grid"></div>
+    <header class="topbar">
+      <div>
+        <h1>Mekka Trading Command Center</h1>
+        <p>Nick Fury Operations • Wall Street Marvel Office</p>
+      </div>
+      <div id="status-pill" class="pill">Conectando...</div>
+    </header>
+    <div id="global-alerts" class="global-alerts"></div>
+    <section class="panel replay-panel">
+      <h2>Replay Player</h2>
+      <div class="replay-controls">
+        <button id="replay-live" type="button">Live</button>
+        <button id="replay-prev" type="button">Prev</button>
+        <button id="replay-play" type="button">Play</button>
+        <button id="replay-next" type="button">Next</button>
+        <select id="replay-snapshot"></select>
+        <button id="replay-export-json" type="button">Export JSON</button>
+        <button id="replay-export-csv" type="button">Export CSV</button>
+        <span id="replay-status">Live stream ativo</span>
+      </div>
+      <div class="compare-controls">
+        <input id="export-start-utc" placeholder="start_utc (ISO)" />
+        <input id="export-end-utc" placeholder="end_utc (ISO)" />
+        <button id="incident-latest" type="button">Incident Latest</button>
+        <button id="incident-download" type="button" class="btn-incident-download">Download Bundle</button>
+        <button id="charts-refresh" type="button">Refresh Charts</button>
+        <button id="queue-refresh" type="button">Refresh Queue</button>
+      </div>
+      <div class="compare-controls">
+        <select id="compare-a"></select>
+        <select id="compare-b"></select>
+        <button id="compare-run" type="button">Comparar A/B</button>
+      </div>
+      <div id="compare-output" class="compare-output"></div>
+    </section>
+
+    <section class="panel replay-panel">
+      <h2>Replay Charts (Series Temporais)</h2>
+      <div class="charts-grid">
+        <div class="chart-card">
+          <h3>Signals (total)</h3>
+          <canvas id="chart-signals" height="120"></canvas>
+        </div>
+        <div class="chart-card">
+          <h3>Trades (total)</h3>
+          <canvas id="chart-trades" height="120"></canvas>
+        </div>
+        <div class="chart-card">
+          <h3>Alerts &amp; Severity</h3>
+          <canvas id="chart-alerts" height="120"></canvas>
+        </div>
+      </div>
+      <p id="charts-status" class="muted-line">Aguardando snapshots...</p>
+    </section>
+
+    <section class="panel replay-panel">
+      <h2>Incident Investigation Queue</h2>
+      <div id="incident-queue" class="incident-queue">
+        <div class="muted-line">Sem incidentes ativos.</div>
+      </div>
+    </section>
+
+    <main class="layout">
+      <section class="panel metrics">
+        <h2>Mission Metrics</h2>
+        <div class="cards" id="metrics"></div>
+      </section>
+
+      <section class="panel scene">
+        <h2>Pixel 3D Office</h2>
+        <canvas id="office-canvas" width="900" height="520"></canvas>
+      </section>
+
+      <section class="panel full">
+        <h2>Layer Command Map (L1-L4)</h2>
+        <div id="layer-map" class="layer-map"></div>
+      </section>
+
+      <section class="panel full">
+        <h2>Filters</h2>
+        <div class="filters">
+          <input id="filter-symbol" placeholder="Símbolo (ex: BTC)" />
+          <input id="filter-hero" placeholder="Herói (ex: Batman)" />
+          <input id="filter-event" placeholder="Evento (ex: RISK_)" />
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Nick Fury Timeline</h2>
+        <div class="timeline" id="timeline"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Timeline Por Símbolo</h2>
+        <div id="symbol-timeline" class="symbol-timeline"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Hero SLA (s)</h2>
+        <div id="hero-sla" class="hero-sla"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Batman Risk Heatmap</h2>
+        <div id="risk-heatmap" class="risk-heatmap"></div>
+      </section>
+
+      <section class="panel full">
+        <h2>Spider-Man Anomaly Console</h2>
+        <div id="anomaly-console" class="anomaly-console"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Vision Signals</h2>
+        <table>
+          <thead><tr><th>Time</th><th>Symbol</th><th>Action</th><th>Conf.</th></tr></thead>
+          <tbody id="signals-body"></tbody>
+        </table>
+      </section>
+
+      <section class="panel">
+        <h2>Iron Man Executions</h2>
+        <table>
+          <thead><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Notional</th></tr></thead>
+          <tbody id="trades-body"></tbody>
+        </table>
+      </section>
+
+      <section class="panel full">
+        <h2>Hero Audit Stream</h2>
+        <div class="log" id="audit-log"></div>
+      </section>
+    </main>
+
+    <div id="risk-modal" class="modal hidden">
+      <div class="modal-card">
+        <div class="modal-head">
+          <strong id="risk-modal-title">Batman Drilldown</strong>
+          <button id="risk-modal-close" type="button">Fechar</button>
+        </div>
+        <div id="risk-modal-body" class="modal-body"></div>
+      </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

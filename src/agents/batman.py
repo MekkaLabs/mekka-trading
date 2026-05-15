@@ -205,7 +205,67 @@ class Batman(BaseAgent[RiskApproval]):
         # ---------------------------------------------------------------
         # 3. Trade-count and concurrency breakers
         # ---------------------------------------------------------------
-        if open_positions >= settings.max_open_positions:
+
+        # ── 3k. Pyramid / Scale-In Bypass — Story 080 ──────────────────
+        #
+        # Before hard-rejecting for max_open_positions, check whether this
+        # signal is a pyramid opportunity: same symbol, same direction, and
+        # the existing position is already profitable.
+        #
+        # Conditions for pyramid allowance:
+        #   1. settings.pyramid_enabled is True
+        #   2. open_positions >= settings.max_open_positions (would otherwise block)
+        #   3. current_positions contains a position in 'symbol'
+        #   4. That position is in the SAME direction as signal.action
+        #   5. That position has unrealized_pnl_usd >= pyramid_min_profit_pct% gain
+        #
+        # Effect: size is capped at pyramid_max_add_pct, verdict may be REDUCED,
+        # and the max_open_positions gate is skipped for this symbol.
+        _is_pyramid_entry = False
+        if (
+            settings.pyramid_enabled
+            and open_positions >= settings.max_open_positions
+            and current_positions
+        ):
+            try:
+                _signal_side = signal.action.value.lower()  # 'long' or 'short'
+                for _pos in current_positions:
+                    _pos_sym = (getattr(_pos, "symbol", "") or "").upper()
+                    _pos_side = (getattr(_pos, "side", "") or "").lower()
+                    if _pos_sym != symbol.upper():
+                        continue
+                    if _pos_side != _signal_side:
+                        continue
+                    # Check profitability threshold
+                    _unreal_pnl = float(getattr(_pos, "unrealized_pnl_usd", 0) or 0)
+                    _entry_p = float(getattr(_pos, "entry_price", 0) or 0)
+                    _qty = float(getattr(_pos, "size", 0) or 0)
+                    _notional = _entry_p * _qty if _entry_p > 0 and _qty > 0 else 0.0
+                    _profit_pct = (_unreal_pnl / _notional * 100) if _notional > 0 else 0.0
+                    _min_pct = settings.pyramid_min_profit_pct
+                    if _profit_pct >= _min_pct:
+                        _is_pyramid_entry = True
+                        reasons.append(
+                            f"[3k] Pyramid entry approved: existing {symbol} {_signal_side.upper()} "
+                            f"position at +{_profit_pct:.2f}% unrealised profit "
+                            f"(min={_min_pct:.1f}%) — scale-in with capped size."
+                        )
+                        # Cap size at pyramid_max_add_pct
+                        if signal.size_pct > settings.pyramid_max_add_pct:
+                            signal = signal.model_copy(
+                                update={"size_pct": settings.pyramid_max_add_pct}
+                            )
+                            breached.append("pyramid_size_cap")
+                        break
+                    else:
+                        reasons.append(
+                            f"[3k] Pyramid skipped: {symbol} unrealised profit "
+                            f"{_profit_pct:.2f}% < min {_min_pct:.1f}% — position not profitable enough."
+                        )
+            except Exception as _pyr_exc:  # noqa: BLE001
+                self._log.debug("[Batman] Pyramid gate error (fail-open): %s", _pyr_exc)
+
+        if not _is_pyramid_entry and open_positions >= settings.max_open_positions:
             reasons.append(
                 f"Open positions {open_positions} ≥ "
                 f"limit {settings.max_open_positions}"
@@ -436,6 +496,553 @@ class Batman(BaseAgent[RiskApproval]):
                 self._log.debug(f"[Batman] Portfolio exposure gate skipped: {_exp_exc}")
 
         # ---------------------------------------------------------------
+        # 3f. Re-entry Cooldown Guard — Story 069
+        #
+        # After Cyclops closes a position via SL, the same symbol is locked
+        # for ``reentry_cooldown_minutes`` minutes. This prevents the AI from
+        # immediately re-entering a losing trade ("revenge trading").
+        #
+        # Logic:
+        #   - Query the last Cyclops SL close for this symbol within the
+        #     cooldown window. If found, return REJECTED with time-remaining.
+        #   - Falls open on any DB error (never blocks due to infra failure).
+        # ---------------------------------------------------------------
+        if settings.reentry_cooldown_minutes > 0:
+            try:
+                from src.persistence.repository import MekkaRepository as _Repo  # noqa: WPS433
+                from datetime import timedelta  # noqa: WPS433
+                _sl_time = await _Repo.get_last_sl_close_time(
+                    symbol=symbol,
+                    lookback_minutes=settings.reentry_cooldown_minutes,
+                )
+                if _sl_time is not None:
+                    from datetime import datetime as _dt, timezone as _tz  # noqa: WPS433
+                    _elapsed_min = (_dt.now(_tz.utc) - _sl_time).total_seconds() / 60
+                    _remaining_min = round(settings.reentry_cooldown_minutes - _elapsed_min, 1)
+                    reasons.append(
+                        f"Re-entry cooldown: {symbol} had SL close {_elapsed_min:.1f}min ago "
+                        f"(cooldown={settings.reentry_cooldown_minutes}min, "
+                        f"remaining={max(0, _remaining_min):.1f}min)"
+                    )
+                    breached.append("reentry_cooldown")
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        breached_limits=breached,
+                        metadata={
+                            "last_sl_close_utc": _sl_time.isoformat(),
+                            "elapsed_minutes": round(_elapsed_min, 2),
+                            "cooldown_minutes": settings.reentry_cooldown_minutes,
+                        },
+                    )
+            except Exception as _cd_exc:  # noqa: BLE001
+                self._log.debug(f"[Batman] Re-entry cooldown gate skipped: {_cd_exc}")
+
+        # ---------------------------------------------------------------
+        # 3g. Symbol Strike Counter + Auto-Blacklist — Story 071
+        #
+        # If a symbol has hit its SL ``symbol_strike_limit`` times in a
+        # row (consecutive Cyclops SL closes with no TP or manual close
+        # in between), it is automatically blocked for ``symbol_blacklist_hours``
+        # hours. A Telegram CRITICAL alert is fired on first blacklist.
+        #
+        # Logic:
+        #   - Count consecutive SL hits via DB query (most recent first).
+        #   - If count ≥ limit: check if a per-symbol blacklist file exists
+        #     and is still within the cooldown window. If so → REJECTED.
+        #   - If freshly hit: create/update the file + fire Telegram alert.
+        #   - Falls open on any error (DB, file I/O, Telegram).
+        # ---------------------------------------------------------------
+        try:
+            from src.persistence.repository import MekkaRepository as _Repo  # noqa: WPS433
+            _strike_count = await _Repo.count_consecutive_sl_hits(symbol=symbol)
+            if _strike_count >= settings.symbol_strike_limit:
+                import json as _json  # noqa: WPS433
+                from pathlib import Path as _Path  # noqa: WPS433
+                from datetime import datetime as _dt2, timezone as _tz2, timedelta as _td2  # noqa: WPS433
+
+                _bl_path = _Path("data") / f".blacklist_{symbol.upper()}.json"
+                _now2 = _dt2.now(_tz2.utc)
+                _bl_active = False
+                _bl_data: dict = {}
+
+                if _bl_path.exists():
+                    try:
+                        _bl_data = _json.loads(_bl_path.read_text())
+                        _bl_since = _dt2.fromisoformat(_bl_data.get("since", ""))
+                        _bl_expires = _bl_since + _td2(hours=settings.symbol_blacklist_hours)
+                        if _now2 < _bl_expires:
+                            _bl_active = True
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                if not _bl_active:
+                    # Fresh blacklist — write file + fire Telegram alert
+                    _bl_data = {
+                        "symbol": symbol.upper(),
+                        "since": _now2.isoformat(),
+                        "expires": (_now2 + _td2(hours=settings.symbol_blacklist_hours)).isoformat(),
+                        "consecutive_sl_hits": _strike_count,
+                    }
+                    try:
+                        _bl_path.parent.mkdir(parents=True, exist_ok=True)
+                        _bl_path.write_text(_json.dumps(_bl_data, indent=2))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    # Telegram CRITICAL alert
+                    try:
+                        from src.services.telegram_alerter import TelegramAlerter  # noqa: WPS433
+                        await TelegramAlerter().send_message(
+                            f"🚫 *BLACKLIST ATIVADO* — `{symbol.upper()}`\n"
+                            f"*{_strike_count} SLs consecutivos* sem TP intermediário.\n"
+                            f"Símbolo bloqueado por {settings.symbol_blacklist_hours:.0f}h "
+                            f"(expira: {_bl_data['expires'][:16]} UTC).",
+                            level="CRITICAL",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._log.warning(
+                        "[Batman] [3g] %s BLACKLISTED — %d consecutive SL hits "
+                        "(limit=%d, duration=%.0fh)",
+                        symbol, _strike_count, settings.symbol_strike_limit,
+                        settings.symbol_blacklist_hours,
+                    )
+
+                # Either way: block this entry
+                _expires_str = _bl_data.get("expires", "?")[:16]
+                reasons.append(
+                    f"Symbol blacklist: {symbol} hit {_strike_count} consecutive SL(s) "
+                    f"(limit={settings.symbol_strike_limit}) → blocked until {_expires_str} UTC"
+                )
+                breached.append("symbol_blacklist")
+                return RiskApproval(
+                    symbol=symbol,
+                    verdict=RiskVerdict.REJECTED,
+                    reasons=reasons,
+                    breached_limits=breached,
+                    metadata={"consecutive_sl_hits": _strike_count, "blacklist": _bl_data},
+                )
+        except Exception as _bl_exc:  # noqa: BLE001
+            self._log.debug(f"[Batman] Symbol blacklist gate skipped: {_bl_exc}")
+
+        # ---------------------------------------------------------------
+        # 3h. Multi-Timeframe Confluence Gate — Story 072
+        #
+        # Checks that the prevailing trend on a higher timeframe (default 4h)
+        # agrees with the signal direction before approving entry.
+        #
+        # Rules:
+        #   - LONG signal + DOWNTREND on HTF → REDUCED (size × 0.6) or REJECTED
+        #   - SHORT signal + UPTREND on HTF  → REDUCED (size × 0.6) or REJECTED
+        #   - NEUTRAL HTF  → pass-through (no penalty)
+        #   - Confirming trend → positive note in reasons
+        #
+        # The hard-reject mode is controlled by settings.mtf_reject_on_opposite.
+        # Falls open on any error — never blocks due to infra failure.
+        # ---------------------------------------------------------------
+        if settings.mtf_confluence_enabled:
+            try:
+                from src.analytics.trend import compute_htf_trend as _htf, HTFTrend as _HTFTrend  # noqa: WPS433
+                _htf_trend = await _htf(
+                    symbol=symbol,
+                    interval=settings.mtf_interval,
+                    lookback=settings.mtf_lookback_candles,
+                )
+                _sig_dir = signal.action.value.lower()  # "long" or "short"
+                _opposing = (
+                    (_sig_dir == "long"  and _htf_trend == _HTFTrend.DOWNTREND) or
+                    (_sig_dir == "short" and _htf_trend == _HTFTrend.UPTREND)
+                )
+                _confirming = (
+                    (_sig_dir == "long"  and _htf_trend == _HTFTrend.UPTREND) or
+                    (_sig_dir == "short" and _htf_trend == _HTFTrend.DOWNTREND)
+                )
+
+                if _opposing:
+                    if settings.mtf_reject_on_opposite:
+                        reasons.append(
+                            f"MTF Confluence VETO: {_sig_dir.upper()} signal opposes "
+                            f"{settings.mtf_interval} trend ({_htf_trend.value}) — hard reject."
+                        )
+                        breached.append("mtf_confluence_reject")
+                        return RiskApproval(
+                            symbol=symbol,
+                            verdict=RiskVerdict.REJECTED,
+                            reasons=reasons,
+                            breached_limits=breached,
+                            metadata={"htf_trend": _htf_trend.value, "htf_interval": settings.mtf_interval},
+                        )
+                    else:
+                        _mtf_mult = 0.60
+                        _prev_size = signal.size_pct
+                        signal = signal.model_copy(
+                            update={"size_pct": round(signal.size_pct * _mtf_mult, 6)}
+                        )
+                        reasons.append(
+                            f"MTF Confluence WARNING: {_sig_dir.upper()} opposes "
+                            f"{settings.mtf_interval} {_htf_trend.value} → "
+                            f"size ×{_mtf_mult:.0%} ({_prev_size:.4f} → {signal.size_pct:.4f})"
+                        )
+                        breached.append("mtf_confluence_penalty")
+                elif _confirming:
+                    reasons.append(
+                        f"MTF Confluence OK: {_sig_dir.upper()} confirmed by "
+                        f"{settings.mtf_interval} {_htf_trend.value}."
+                    )
+                else:
+                    reasons.append(
+                        f"MTF Confluence NEUTRAL: {settings.mtf_interval} trend is "
+                        f"{_htf_trend.value} — no confluence bonus or penalty."
+                    )
+            except Exception as _mtf_exc:  # noqa: BLE001
+                self._log.debug(f"[Batman] MTF confluence gate skipped: {_mtf_exc}")
+
+        # ---------------------------------------------------------------
+        # 3i. Funding Rate Gate — Story 075
+        #
+        # Extreme funding rates signal overcrowded positioning that is
+        # expensive to hold and prone to violent reversals (long/short squeezes).
+        #
+        # Rules (configurable thresholds):
+        #   LONG signal:
+        #     rate ≥ funding_long_block_pct  → hard REJECT
+        #     rate ≥ funding_long_warn_pct   → REDUCED (size × 0.60)
+        #   SHORT signal:
+        #     rate ≤ funding_short_block_pct → hard REJECT
+        #     rate ≤ funding_short_warn_pct  → REDUCED (size × 0.60)
+        #
+        # Falls open on any network/cache error — never blocks due to infra failure.
+        # ---------------------------------------------------------------
+        if settings.funding_gate_enabled:
+            try:
+                from src.analytics.funding import get_funding_rate_pct as _get_fr  # noqa: WPS433
+                _fr_pct = await _get_fr(symbol)
+                if _fr_pct is not None:
+                    _sig_dir = signal.action.value.lower()
+                    _fr_label = f"{_fr_pct:+.5f}%/8h"
+
+                    if _sig_dir == "long":
+                        if _fr_pct >= settings.funding_long_block_pct:
+                            reasons.append(
+                                f"Funding Rate VETO: rate {_fr_label} ≥ "
+                                f"block threshold {settings.funding_long_block_pct:+.4f}% "
+                                f"— LONG is extremely expensive, high squeeze risk."
+                            )
+                            breached.append("funding_rate_block")
+                            return RiskApproval(
+                                symbol=symbol,
+                                verdict=RiskVerdict.REJECTED,
+                                reasons=reasons,
+                                breached_limits=breached,
+                                metadata={"funding_rate_pct": _fr_pct},
+                            )
+                        elif _fr_pct >= settings.funding_long_warn_pct:
+                            _fr_mult = 0.60
+                            _prev_fr = signal.size_pct
+                            signal = signal.model_copy(
+                                update={"size_pct": round(signal.size_pct * _fr_mult, 6)}
+                            )
+                            reasons.append(
+                                f"Funding Rate WARNING: rate {_fr_label} elevated for LONG "
+                                f"(≥ warn threshold {settings.funding_long_warn_pct:+.4f}%) "
+                                f"→ size ×{_fr_mult:.0%} ({_prev_fr:.4f} → {signal.size_pct:.4f})"
+                            )
+                            breached.append("funding_rate_penalty")
+                        else:
+                            reasons.append(f"Funding Rate OK: {_fr_label} within normal range for LONG.")
+
+                    elif _sig_dir == "short":
+                        if _fr_pct <= settings.funding_short_block_pct:
+                            reasons.append(
+                                f"Funding Rate VETO: rate {_fr_label} ≤ "
+                                f"block threshold {settings.funding_short_block_pct:+.4f}% "
+                                f"— SHORT is extremely expensive, high short-squeeze risk."
+                            )
+                            breached.append("funding_rate_block")
+                            return RiskApproval(
+                                symbol=symbol,
+                                verdict=RiskVerdict.REJECTED,
+                                reasons=reasons,
+                                breached_limits=breached,
+                                metadata={"funding_rate_pct": _fr_pct},
+                            )
+                        elif _fr_pct <= settings.funding_short_warn_pct:
+                            _fr_mult = 0.60
+                            _prev_fr = signal.size_pct
+                            signal = signal.model_copy(
+                                update={"size_pct": round(signal.size_pct * _fr_mult, 6)}
+                            )
+                            reasons.append(
+                                f"Funding Rate WARNING: rate {_fr_label} elevated for SHORT "
+                                f"(≤ warn threshold {settings.funding_short_warn_pct:+.4f}%) "
+                                f"→ size ×{_fr_mult:.0%} ({_prev_fr:.4f} → {signal.size_pct:.4f})"
+                            )
+                            breached.append("funding_rate_penalty")
+                        else:
+                            reasons.append(f"Funding Rate OK: {_fr_label} within normal range for SHORT.")
+            except Exception as _fr_exc:  # noqa: BLE001
+                self._log.debug(f"[Batman] Funding rate gate skipped: {_fr_exc}")
+
+        # ---------------------------------------------------------------
+        # 3j. Trading Hours Gate — Story 076
+        #
+        # Restricts new entries to a configured UTC hour window to avoid
+        # low-liquidity periods (e.g., Asian pre-session 00:00-06:59 UTC).
+        #
+        # Set trading_hours_enabled=True in settings to activate.
+        # Default window: 07:00-23:59 UTC (blocks 00:00-06:59 UTC).
+        # ---------------------------------------------------------------
+        if settings.trading_hours_enabled:
+            from datetime import datetime, timezone as _tz  # noqa: WPS433
+            _now_h = datetime.now(_tz.utc).hour
+            _start = settings.trading_hours_start_utc
+            _end   = settings.trading_hours_end_utc
+
+            # Handle overnight windows (e.g. start=22, end=6)
+            if _start <= _end:
+                _in_window = _start <= _now_h <= _end
+            else:
+                _in_window = _now_h >= _start or _now_h <= _end
+
+            if not _in_window:
+                _next_open = _start
+                reasons.append(
+                    f"Trading Hours Gate: current UTC hour {_now_h:02d}:xx is outside "
+                    f"the allowed window {_start:02d}:00-{_end:02d}:59 UTC. "
+                    f"Next open: {_next_open:02d}:00 UTC."
+                )
+                breached.append("trading_hours")
+                return RiskApproval(
+                    symbol=symbol,
+                    verdict=RiskVerdict.REJECTED,
+                    reasons=reasons,
+                    breached_limits=breached,
+                    metadata={"current_hour_utc": _now_h, "window": f"{_start:02d}-{_end:02d}"},
+                )
+            else:
+                reasons.append(
+                    f"Trading Hours OK: {_now_h:02d}:xx UTC within window "
+                    f"{_start:02d}:00-{_end:02d}:59 UTC."
+                )
+
+        # ---------------------------------------------------------------
+        # 3l. Max trades per symbol per day — Story 086
+        #
+        # Prevents over-trading a single symbol within the same UTC day.
+        # Counts FILLED + PAPER trades already executed today for 'symbol'.
+        # Fails open: DB error → gate skipped silently.
+        # ---------------------------------------------------------------
+        if settings.max_trades_per_symbol_day < 99:
+            try:
+                from src.persistence.repository import MekkaRepository as _Repo  # noqa: WPS433
+                _sym_today = await _Repo.count_trades_today_for_symbol(symbol)
+                if _sym_today >= settings.max_trades_per_symbol_day:
+                    reasons.append(
+                        f"[3l] Max trades/symbol/day: {symbol} already has "
+                        f"{_sym_today} trade(s) today "
+                        f"(limit={settings.max_trades_per_symbol_day})."
+                    )
+                    breached.append("max_trades_per_symbol_day")
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        breached_limits=breached,
+                    )
+                else:
+                    reasons.append(
+                        f"[3l] Trades/{symbol}/day OK: {_sym_today}/{settings.max_trades_per_symbol_day}"
+                    )
+            except Exception as _tpsd_exc:  # noqa: BLE001
+                self._log.debug("[Batman] Max trades/symbol/day gate skipped: %s", _tpsd_exc)
+
+        # ---------------------------------------------------------------
+        # 3m. Minimum trade notional — Story 096
+        #
+        # Reject signals that would produce a micro-position smaller than
+        # min_trade_notional_usd (fees would exceed potential PnL).
+        # ---------------------------------------------------------------
+        if settings.min_trade_notional_usd > 0 and equity_usd > 0:
+            _planned_notional = equity_usd * signal.size_pct * signal.leverage
+            if _planned_notional < settings.min_trade_notional_usd:
+                reasons.append(
+                    f"[3m] Min notional: planned ${_planned_notional:.2f} < "
+                    f"min ${settings.min_trade_notional_usd:.2f} — micro-position rejected."
+                )
+                breached.append("min_trade_notional_usd")
+                return RiskApproval(
+                    symbol=symbol,
+                    verdict=RiskVerdict.REJECTED,
+                    reasons=reasons,
+                    breached_limits=breached,
+                )
+
+        # ---------------------------------------------------------------
+        # 3n. Max drawdown per symbol per week — Story 100
+        #
+        # Rejects new entries in a symbol that has already lost more than
+        # max_symbol_drawdown_pct × equity this UTC week.
+        # Fails open: DB error → gate skipped silently.
+        # ---------------------------------------------------------------
+        if settings.max_symbol_drawdown_pct < 1.0 and equity_usd > 0:
+            try:
+                from src.persistence.repository import MekkaRepository as _Repo2  # noqa: WPS433
+                _sym_week_pnl = await _Repo2.get_symbol_week_pnl(symbol)
+                _sym_draw_limit = -(equity_usd * settings.max_symbol_drawdown_pct)
+                if _sym_week_pnl < _sym_draw_limit:
+                    reasons.append(
+                        f"[3n] Symbol weekly drawdown: {symbol} PnL this week "
+                        f"${_sym_week_pnl:.2f} < limit ${_sym_draw_limit:.2f} "
+                        f"({settings.max_symbol_drawdown_pct:.1%} of equity)."
+                    )
+                    breached.append("max_symbol_drawdown_pct")
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        breached_limits=breached,
+                    )
+            except Exception as _msd_exc:  # noqa: BLE001
+                self._log.debug("[Batman] Symbol weekly drawdown gate skipped: %s", _msd_exc)
+
+        # ---------------------------------------------------------------
+        # 3o. Max consecutive losses — Story 102
+        #
+        # Reject new entries when the last N completed trades across all
+        # symbols were losses (realized_pnl < 0). Resets on any win/TP.
+        # Fails open: DB error → gate skipped silently.
+        # ---------------------------------------------------------------
+        if settings.max_consecutive_losses < 99:
+            try:
+                from src.persistence.repository import MekkaRepository as _Repo3o  # noqa: WPS433
+                _recent_trades = await _Repo3o.list_recent_closed_trades(
+                    limit=settings.max_consecutive_losses
+                )
+                if len(_recent_trades) >= settings.max_consecutive_losses:
+                    _all_losses = all(
+                        (getattr(t, "realized_pnl_usd", None) or 0.0) < 0
+                        for t in _recent_trades[: settings.max_consecutive_losses]
+                    )
+                    if _all_losses:
+                        reasons.append(
+                            f"[3o] {settings.max_consecutive_losses} perdas consecutivas "
+                            f"detectadas — pausando novas entradas até próxima vitória."
+                        )
+                        breached.append("max_consecutive_losses")
+                        # Story 112 — audit gate rejection
+                        try:
+                            await _Repo3o.log_event(
+                                agent="Batman", event="GATE_REJECTED", severity="WARNING",
+                                symbol=symbol,
+                                message=reasons[-1],
+                                payload={"gate_id": "3o", "symbol": symbol,
+                                         "reason": reasons[-1], "breached": list(breached)},
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                        return RiskApproval(
+                            symbol=symbol,
+                            verdict=RiskVerdict.REJECTED,
+                            reasons=reasons,
+                            breached_limits=breached,
+                        )
+            except Exception as _cl_exc:  # noqa: BLE001
+                self._log.debug("[Batman] Consecutive losses gate skipped: %s", _cl_exc)
+
+        # ---------------------------------------------------------------
+        # 3p. Directional bias guard — Story 106
+        #
+        # Reject new entries when the last N completed trades were all in
+        # the same direction (all LONG or all SHORT), indicating the
+        # model may have a runaway directional bias.
+        # Fails open: DB error → gate skipped silently.
+        # ---------------------------------------------------------------
+        if settings.max_same_direction_streak < 99:
+            try:
+                from src.persistence.repository import MekkaRepository as _Repo3p  # noqa: WPS433
+                _dir_trades = await _Repo3p.list_recent_closed_trades(
+                    limit=settings.max_same_direction_streak
+                )
+                if len(_dir_trades) >= settings.max_same_direction_streak:
+                    _sides = [
+                        (getattr(t, "side", "") or "").upper()
+                        for t in _dir_trades[: settings.max_same_direction_streak]
+                    ]
+                    if len(set(_sides)) == 1 and _sides[0] in ("LONG", "SHORT"):
+                        _dom_side = _sides[0]
+                        _new_side = (signal.action.value if hasattr(signal.action, "value") else str(signal.action)).upper()
+                        if _new_side == _dom_side:
+                            reasons.append(
+                                f"[3p] Directional bias: últimos "
+                                f"{settings.max_same_direction_streak} trades todos "
+                                f"{_dom_side} — novo sinal {_new_side} rejeitado."
+                            )
+                            breached.append("max_same_direction_streak")
+                            # Story 112 — audit gate rejection
+                            try:
+                                await _Repo3p.log_event(
+                                    agent="Batman", event="GATE_REJECTED", severity="WARNING",
+                                    symbol=symbol,
+                                    message=reasons[-1],
+                                    payload={"gate_id": "3p", "symbol": symbol,
+                                             "reason": reasons[-1], "breached": list(breached)},
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
+                            return RiskApproval(
+                                symbol=symbol,
+                                verdict=RiskVerdict.REJECTED,
+                                reasons=reasons,
+                                breached_limits=breached,
+                            )
+            except Exception as _db_exc:  # noqa: BLE001
+                self._log.debug("[Batman] Directional bias gate skipped: %s", _db_exc)
+
+        # ---------------------------------------------------------------
+        # 3q. Min ATR filter — Story 110
+        #
+        # Reject signals when the symbol's ATR% is below min_atr_pct,
+        # indicating a paused/quiet market with insufficient volatility.
+        # 0.0 (default) disables the gate. Fails open on errors.
+        # ---------------------------------------------------------------
+        if settings.min_atr_pct > 0.0:
+            try:
+                from src.analytics.atr import compute_atr_pct as _atr3q  # noqa: WPS433
+                _current_atr_3q = await _atr3q(
+                    symbol=symbol,
+                    lookback=settings.atr_lookback_candles,
+                )
+                if _current_atr_3q is not None and _current_atr_3q < settings.min_atr_pct:
+                    reasons.append(
+                        f"[3q] Min ATR: ATR% {_current_atr_3q:.4f} < mínimo "
+                        f"{settings.min_atr_pct:.4f} — mercado parado."
+                    )
+                    breached.append("min_atr_pct")
+                    # Story 112 — audit gate rejection
+                    try:
+                        from src.persistence.repository import MekkaRepository as _Repo3q  # noqa: WPS433
+                        await _Repo3q.log_event(
+                            agent="Batman", event="GATE_REJECTED", severity="WARNING",
+                            symbol=symbol,
+                            message=reasons[-1],
+                            payload={"gate_id": "3q", "symbol": symbol,
+                                     "reason": reasons[-1], "breached": list(breached),
+                                     "atr_pct": round(_current_atr_3q, 6),
+                                     "min_atr_pct": settings.min_atr_pct},
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        breached_limits=breached,
+                    )
+            except Exception as _atr3q_exc:  # noqa: BLE001
+                self._log.debug("[Batman] Min ATR gate skipped: %s", _atr3q_exc)
+
+        # ---------------------------------------------------------------
         # 4. Confidence and R:R quality gates
         # ---------------------------------------------------------------
         if signal.confidence < settings.min_confidence_threshold:
@@ -481,6 +1088,38 @@ class Batman(BaseAgent[RiskApproval]):
                 )
                 breached.append("volatility_adjustment")
             adjusted_size = new_size
+
+        # Story 070 — ATR-based position sizing
+        # Scale size inversely with ATR%: high volatility → smaller position.
+        # atr_multiplier = clamp(atr_target_pct / current_atr_pct, min_mult, 1.0)
+        # Fails open: if ATR cannot be computed, size is left unchanged.
+        if settings.atr_sizing_enabled:
+            try:
+                from src.analytics.atr import compute_atr_pct as _atr  # noqa: WPS433
+                _current_atr_pct = await _atr(
+                    symbol=symbol,
+                    lookback=settings.atr_lookback_candles,
+                )
+                if _current_atr_pct and _current_atr_pct > 0:
+                    _atr_mult = min(
+                        1.0,
+                        max(
+                            settings.atr_min_size_multiplier,
+                            settings.atr_target_pct * 100 / _current_atr_pct,
+                        ),
+                    )
+                    if _atr_mult < 0.999:
+                        _prev = adjusted_size
+                        adjusted_size = round(adjusted_size * _atr_mult, 6)
+                        reasons.append(
+                            f"ATR sizing: current ATR%={_current_atr_pct:.3f}% "
+                            f"(target={settings.atr_target_pct * 100:.1f}%) → "
+                            f"size ×{_atr_mult:.2f} "
+                            f"({_prev:.4f} → {adjusted_size:.4f})"
+                        )
+                        breached.append("atr_size_reduction")
+            except Exception as _atr_exc:  # noqa: BLE001
+                self._log.debug("[Batman] ATR sizing skipped: %s", _atr_exc)
 
         # Penalize on poor liquidity
         if liquidity is not None and liquidity.liquidity_score < 0.4:
@@ -549,6 +1188,21 @@ class Batman(BaseAgent[RiskApproval]):
             verdict = RiskVerdict.APPROVED
             reasons.insert(0, "All risk checks passed")
 
+        # ---------------------------------------------------------------
+        # Story 088 — Signal Quality Score (0-100)
+        #
+        # Composite score combining: confidence (40%), R:R ratio (30%),
+        # size utilisation (15%), and absence of breaches penalty (15%).
+        # Logged in the approval metadata for dashboard + audit visibility.
+        # ---------------------------------------------------------------
+        _conf_score  = min(100.0, signal.confidence * 100) * 0.40
+        _rr_score    = min(100.0, (rr / max(settings.min_risk_reward_ratio, 0.01)) * 50) * 0.30
+        _size_score  = min(100.0, (adjusted_size / max(settings.max_position_size_pct, 1e-6)) * 100) * 0.15
+        _clean_score = max(0.0, 100.0 - len([b for b in breached if b not in
+                          ("volatility_adjustment", "atr_size_reduction", "liquidity_penalty",
+                           "pyramid_size_cap")]) * 20) * 0.15
+        _signal_quality_score = round(_conf_score + _rr_score + _size_score + _clean_score, 1)
+
         approval = RiskApproval(
             symbol=symbol,
             verdict=verdict,
@@ -562,8 +1216,12 @@ class Batman(BaseAgent[RiskApproval]):
                 "confidence": signal.confidence,
                 "rr": rr,
                 "paper_trading": settings.paper_trading,
+                "signal_quality_score": _signal_quality_score,
             },
         )
 
-        self._log.info(approval.summary())
+        self._log.info(
+            "[Batman] verdict=%s score=%.1f symbol=%s breached=%s",
+            verdict.value, _signal_quality_score, symbol, breached or "none",
+        )
         return approval

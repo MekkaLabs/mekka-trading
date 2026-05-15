@@ -1,0 +1,32 @@
+{
+  "name": "mekka-trading",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-Orchestrated Autonomous Trading Operating System powered by AIOX Core and Hyperliquid",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "node scripts/lint.js",
+    "test": "node --test dist/tests/**/*.test.js",
+    "pretest": "npm run build",
+    "run:runtime": "node dist/cli/main.js",
+    "run:replay": "node dist/cli/replay.js",
+    "run:export-report": "node dist/cli/export-report.js",
+    "run:verify-integrity": "node dist/cli/verify-integrity.js",
+    "run:health-check": "node dist/cli/health-check.js",
+    "run:replay-dlq": "node dist/cli/replay-dlq.js",
+    "run:alerts-retention": "node dist/cli/alerts-retention.js",
+    "run:ops-status": "node dist/cli/ops-status.js",
+    "run:ops-alerts": "node dist/cli/ops-alerts.js",
+    "run:ops-alert-audit": "node dist/cli/ops-alert-audit.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.3"
+  }
+}

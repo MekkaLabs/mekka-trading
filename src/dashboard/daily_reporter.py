@@ -406,3 +406,152 @@ class DailyReporter:
         wait_s = (target - now).total_seconds()
         logger.debug("daily_reporter: sleeping %.0f s until %s", wait_s, target.isoformat())
         await asyncio.sleep(wait_s)
+
+    # ── Weekly report ────────────────────────────────────────────────────────
+
+    async def send_weekly_report(self, *, force: bool = False) -> dict:
+        """
+        [Story 090] Weekly Deadpool report — 7-day window + all-time.
+
+        Builds a richer Telegram message with 7-day PnL, win rate,
+        Deadpool analytics and all-time cumulative stats.
+
+        Dedup: only fires once per ISO week number unless ``force=True``.
+        """
+        from datetime import datetime, timezone  # noqa: WPS433 (already imported module-level but safe)
+
+        now_utc = datetime.now(timezone.utc)
+        iso_week = now_utc.strftime("%Y-W%V")  # e.g. "2026-W20"
+
+        if not force and getattr(self, "_last_weekly_week", None) == iso_week:
+            logger.info("weekly_reporter: report already sent for %s — skipping", iso_week)
+            return {"week": iso_week, "sent_telegram": False, "skipped": True}
+
+        if not self.has_targets:
+            return {"week": iso_week, "sent_telegram": False, "skipped": True, "reason": "no targets"}
+
+        # 7-day PnL + all-time
+        try:
+            summary_7d = await asyncio.wait_for(
+                self._repo.get_pnl_summary(window_days=7), timeout=5.0
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("weekly_reporter: get_pnl_summary(7d) failed: %s", exc)
+            return {"week": iso_week, "sent_telegram": False, "error": str(exc)}
+
+        week_data = summary_7d.get("window", {})
+        all_time_data = summary_7d.get("all_time", {})
+
+        # Deadpool 30-day analytics
+        perf = None
+        try:
+            from src.agents.deadpool import Deadpool as _Deadpool  # noqa: WPS433
+            perf = await asyncio.wait_for(
+                _Deadpool(self._repo).run(window_days=30), timeout=10.0
+            )
+        except Exception as _exc:  # noqa: BLE001
+            logger.warning("weekly_reporter: Deadpool run failed (proceeding without): %s", _exc)
+
+        # Build Telegram message
+        week_label = now_utc.strftime("Semana %V/%Y")
+        pnl_w = week_data.get("pnl_usd", 0.0)
+        trades_w = week_data.get("trades", 0)
+        wins_w = week_data.get("wins", 0)
+        losses_w = week_data.get("losses", 0)
+        wr_w = week_data.get("win_rate")
+        dd_w = week_data.get("max_drawdown_pct", 0.0)
+        at_pnl = all_time_data.get("pnl_usd", 0.0)
+        at_trades = all_time_data.get("trades", 0)
+        at_wr = all_time_data.get("win_rate")
+
+        e = _pnl_emoji(pnl_w)
+        lines = [
+            f"📅 *Mekka Weekly Report — {week_label}*",
+            "",
+            f"{e} *PnL 7 dias : * ${pnl_w:+.2f}",
+            f"📈 *Trades    : * {trades_w}  (W:{wins_w} L:{losses_w}  WR:{_win_rate_str(wr_w)})",
+            f"{_dd_emoji(dd_w)} *Drawdown   : * {dd_w * 100:.2f}%",
+            "",
+            "─── All-time ───",
+            f"PnL total  : ${at_pnl:+.2f}",
+            f"Trades     : {at_trades}",
+            f"Win rate   : {_win_rate_str(at_wr)}",
+        ]
+
+        if perf is not None:
+            sharpe_str = f"{perf.sharpe_estimate:.2f}" if perf.sharpe_estimate is not None else "n/a"
+            sortino_str = f"{perf.sortino_estimate:.2f}" if perf.sortino_estimate is not None else "n/a"
+            exp_str = f"${perf.expectancy_usd:+.2f}/trade" if perf.expectancy_usd is not None else "n/a"
+            _VEMOJI = {"READY": "✅", "NOT_READY": "⚠️", "INSUFFICIENT_DATA": "⏳"}
+            v_emoji = _VEMOJI.get(perf.verdict, "❓")
+            lines += [
+                "",
+                "─── Deadpool Analytics (30d) ───",
+                f"Sharpe      : {sharpe_str}   Sortino: {sortino_str}",
+                f"Expectancy  : {exp_str}",
+                f"Veredicto   : {v_emoji} {perf.verdict}",
+            ]
+
+        text = "\n".join(lines)
+
+        sent_telegram = False
+        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+            tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            sent_telegram = await self._post_with_retry(
+                tg_url, {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
+            )
+            if sent_telegram:
+                logger.info("weekly_reporter: Telegram sent for %s", iso_week)
+                self._last_weekly_week = iso_week  # type: ignore[attr-defined]
+
+        sent_slack = False
+        if SLACK_WEBHOOK:
+            # Plain text fallback for Slack
+            sent_slack = await self._post_with_retry(SLACK_WEBHOOK, {"text": text})
+
+        return {
+            "week": iso_week,
+            "sent_telegram": sent_telegram,
+            "sent_slack": sent_slack,
+            "skipped": False,
+            "week_pnl_usd": pnl_w,
+            "week_trades": trades_w,
+        }
+
+    async def run_weekly_loop(self) -> None:
+        """
+        [Story 090] Asyncio task: wait until next Monday 08:00 UTC,
+        then call send_weekly_report(). Loops forever.
+        """
+        from datetime import timedelta  # noqa: WPS433
+
+        logger.info("weekly_reporter: scheduler started — fires Monday 08:00 UTC")
+        while True:
+            try:
+                await self._sleep_until_weekly_time()
+                result = await self.send_weekly_report()
+                logger.info("weekly_reporter: loop result: %s", result)
+            except asyncio.CancelledError:
+                logger.info("weekly_reporter: loop cancelled")
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.error("weekly_reporter: unexpected error: %s", exc)
+                await asyncio.sleep(60)
+
+    async def _sleep_until_weekly_time(self) -> None:
+        """Sleep until next Monday 08:00 UTC."""
+        from datetime import timedelta  # noqa: WPS433
+
+        now = datetime.now(timezone.utc)
+        # weekday(): Mon=0 … Sun=6
+        days_until_monday = (7 - now.weekday()) % 7
+        if days_until_monday == 0 and now.hour >= 8:
+            # Already past Monday 08:00 this week → next Monday
+            days_until_monday = 7
+
+        target = (now + timedelta(days=days_until_monday)).replace(
+            hour=8, minute=0, second=0, microsecond=0
+        )
+        wait_s = (target - now).total_seconds()
+        logger.debug("weekly_reporter: sleeping %.0f s until %s", wait_s, target.isoformat())
+        await asyncio.sleep(wait_s)

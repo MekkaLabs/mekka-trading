@@ -220,6 +220,19 @@ class TelegramAlerter:
         if execution.status not in (ExecutionStatus.FILLED, ExecutionStatus.PAPER):
             return False
 
+        # [Story 094] Min notional filter — skip tiny trades that would spam alerts
+        try:
+            _min_notional = float(getattr(settings, "min_alert_notional_usd", 0.0))
+            if execution.notional_usd < _min_notional:
+                self._log.debug(
+                    "trade_opened: notional $%.2f < min $%.2f — skip alert",
+                    execution.notional_usd,
+                    _min_notional,
+                )
+                return False
+        except Exception:  # noqa: BLE001
+            pass  # fail-open
+
         tag = "📄 PAPER" if execution.is_paper else "🔴 LIVE"
         side_emoji = "🟢 LONG" if (execution.side or "").upper() == "LONG" else "🔴 SHORT"
 
@@ -268,6 +281,21 @@ class TelegramAlerter:
 
         if execution.order_id:
             lines.append(f"Order ID  : {execution.order_id}")
+
+        # [Story 097] Batman verdict summary — signal quality score + breached limits
+        try:
+            _meta = execution.metadata or {}
+            _sqs = _meta.get("signal_quality_score")
+            _breached = _meta.get("breached_limits") or []
+            if _sqs is not None:
+                _sqs_bar = "█" * int(_sqs / 10) + "░" * (10 - int(_sqs / 10))
+                lines.append("")
+                lines.append(f"📊 *Qualidade*: {_sqs:.1f}/100  [{_sqs_bar}]")
+            if _breached:
+                _breached_str = ", ".join(str(b) for b in _breached[:5])
+                lines.append(f"⚠️ *Limites*  : {_breached_str}")
+        except Exception:  # noqa: BLE001
+            pass  # fail-open — never breaks the alert
 
         if reasoning_short:
             lines.append("")

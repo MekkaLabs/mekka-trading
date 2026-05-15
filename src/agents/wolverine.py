@@ -211,6 +211,53 @@ class Wolverine(BaseAgent[RecoveryPlan]):
                 update.new_stop_loss = _suggested_new_stop(pos, current_price, action)
             updates.append(update)
 
+        # [Story 095] Aggressive SL at +2R — lock-in 1R profit when position
+        # unrealised gain ≥ 2× initial risk distance.  Runs after the standard
+        # classify loop so it only upgrades HOLD/TRAIL_STOP (not EMERGENCY_CLOSE).
+        try:
+            from src.persistence.repository import MekkaRepository as _WolvRepo  # noqa: WPS433
+            _open_trades = await _WolvRepo.list_paper_filled_trades(limit=200)
+            # Build map: symbol → initial stop_loss from the oldest opening trade
+            _sl_map: dict[str, float] = {}
+            for _t in sorted(_open_trades, key=lambda t: getattr(t, "created_at", 0) or 0):
+                _sym = (_t.symbol or "").upper()
+                if _sym in _sl_map:
+                    continue
+                _traw: dict = getattr(_t, "raw", {}) or {}
+                _tmeta: dict = _traw.get("metadata") or {}
+                _tsl = _tmeta.get("stop_loss")
+                if _tsl:
+                    _sl_map[_sym] = float(_tsl)
+        except Exception:  # noqa: BLE001
+            _sl_map = {}
+
+        for _upd in updates:
+            if _upd.action in (RecoveryAction.EMERGENCY_CLOSE, RecoveryAction.CLOSE):
+                continue  # do not downgrade a close decision
+            _initial_sl = _sl_map.get((_upd.symbol or "").upper())
+            if _initial_sl is None or _upd.entry_price <= 0:
+                continue
+            _risk_pts = abs(_upd.entry_price - _initial_sl)
+            if _risk_pts < 1e-8:
+                continue
+            _two_r_usd = 2.0 * _risk_pts * _upd.size  # 2R in USD
+            if _upd.unrealized_pnl_usd >= _two_r_usd:
+                # Move SL to entry ± 1R to lock-in at least 1R profit
+                if (_upd.side or "").lower() == "long":
+                    _agg_sl = round(_upd.entry_price + _risk_pts, 6)
+                else:
+                    _agg_sl = round(_upd.entry_price - _risk_pts, 6)
+                self._log.info(
+                    "[Story 095] %s +2R reached (uPnL=$%.2f ≥ 2R=$%.2f) → SL→%.4f",
+                    _upd.symbol, _upd.unrealized_pnl_usd, _two_r_usd, _agg_sl,
+                )
+                _upd.action = RecoveryAction.TIGHTEN_STOP
+                _upd.new_stop_loss = _agg_sl
+                _upd.reason = (
+                    f"[Story 095] +2R reached (uPnL=${_upd.unrealized_pnl_usd:.2f} "
+                    f"≥ 2R=${_two_r_usd:.2f}) — SL agressivo para 1R: {_agg_sl:.4f}"
+                )
+
         # Aggregate intraday drawdown: only count negative aggregate PnL.
         total_upnl = sum(u.unrealized_pnl_usd for u in updates)
         intraday_dd = max(-total_upnl / equity, 0.0)

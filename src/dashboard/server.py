@@ -292,6 +292,7 @@ class MekkaDashboardServer:
         }
         self._broadcast_task: asyncio.Task[Any] | None = None
         self._daily_report_task: asyncio.Task[Any] | None = None
+        self._weekly_report_task: asyncio.Task[Any] | None = None  # Story 090
         self._daily_reporter: Any | None = None  # DailyReporter, lazy import
         # Live trading panel — Hyperliquid WebSocket price feed
         self._live_sockets: set[web.WebSocketResponse] = set()
@@ -368,6 +369,7 @@ class MekkaDashboardServer:
         self._app.router.add_get("/api/pnl/series", self._handle_pnl_series)
         self._app.router.add_get("/api/pnl/summary", self._handle_pnl_summary)
         self._app.router.add_get("/api/pnl/benchmark", self._handle_pnl_benchmark)
+        self._app.router.add_get("/api/pnl/equity-curve", self._handle_equity_curve)  # Story 077
         self._app.router.add_get("/api/performance", self._handle_performance)
         self._app.router.add_get("/api/trades/timeline", self._handle_trades_timeline)
         self._app.router.add_get("/api/killswitch/status", self._handle_killswitch_status)
@@ -376,6 +378,7 @@ class MekkaDashboardServer:
         self._app.router.add_get("/api/mode", self._handle_mode_get)
         self._app.router.add_post("/api/mode", self._handle_mode_set)
         self._app.router.add_get("/api/report/daily", self._handle_report_daily)
+        self._app.router.add_get("/api/report/weekly", self._handle_report_weekly)  # Story 090
         self._app.router.add_get("/api/positions", self._handle_positions)
         self._app.router.add_post("/api/positions/close", self._handle_positions_close)
         self._app.router.add_get("/api/settings", self._handle_settings_get)
@@ -383,6 +386,15 @@ class MekkaDashboardServer:
         self._app.router.add_get("/api/agents/tasks", self._handle_agents_tasks)
         self._app.router.add_get("/api/audit/feed", self._handle_audit_feed)
         self._app.router.add_get("/api/memory/stats", self._handle_memory_stats)  # Story 064
+        self._app.router.add_get("/api/risk/panel", self._handle_risk_panel)      # Story 073
+        self._app.router.add_get("/api/leaderboard", self._handle_leaderboard)   # Story 079
+        self._app.router.add_get("/api/trades/export", self._handle_trades_export)      # Story 082
+        self._app.router.add_get("/api/pnl/heatmap", self._handle_pnl_heatmap)          # Story 089
+        self._app.router.add_get("/api/trades/calendar", self._handle_trades_calendar) # Story 107
+        self._app.router.add_get("/api/pnl/hourly", self._handle_pnl_hourly)           # Story 109
+        self._app.router.add_get("/api/gates/timeline", self._handle_gates_timeline)   # Story 112
+        self._app.router.add_get("/api/signals/export", self._handle_signals_export)    # Story 093
+        self._app.router.add_get("/api/session/stats", self._handle_session_stats)      # Story 092
         self._app.router.add_post("/api/trade/analyze", self._handle_trade_analyze)
         self._app.router.add_post("/api/trade/execute", self._handle_trade_execute)
         self._app.router.add_get("/api/prefs", self._handle_prefs_get)
@@ -433,6 +445,7 @@ class MekkaDashboardServer:
         self._daily_reporter = DailyReporter()
         self._broadcast_task = asyncio.create_task(self._broadcast_loop())
         self._daily_report_task = asyncio.create_task(self._daily_reporter.run_loop())
+        self._weekly_report_task = asyncio.create_task(self._daily_reporter.run_weekly_loop())  # Story 090
         # Live price feed — connect to Hyperliquid WS
         self._hl_pump_task = asyncio.create_task(self._hl_price_pump_loop())
         self._live_bcast_task = asyncio.create_task(self._live_price_broadcast_loop())
@@ -450,6 +463,12 @@ class MekkaDashboardServer:
             self._daily_report_task.cancel()
             try:
                 await self._daily_report_task
+            except asyncio.CancelledError:
+                pass
+        if self._weekly_report_task is not None:  # Story 090
+            self._weekly_report_task.cancel()
+            try:
+                await self._weekly_report_task
             except asyncio.CancelledError:
                 pass
         if self._daily_reporter is not None:
@@ -1659,17 +1678,591 @@ class MekkaDashboardServer:
                 "error": str(exc),
             })
 
+    async def _handle_risk_panel(self, _: web.Request) -> web.Response:
+        """
+        GET /api/risk/panel — Story 073
+
+        Returns a consolidated real-time risk snapshot for the Risk Panel
+        dashboard widget. All fields are computed from the DB + settings.
+
+        Response shape
+        --------------
+        {
+          "exposure": {
+            "open_notional_usd": float,
+            "cap_usd": float,
+            "cap_pct": float,
+            "used_pct": float           // open_notional / cap_usd * 100
+          },
+          "daily_pnl": {
+            "pnl_usd": float,
+            "equity_usd": float,
+            "pnl_pct": float,
+            "profit_target_pct": float,  // pause threshold
+            "kill_threshold_pct": float  // auto-kill threshold
+          },
+          "cooldowns": [               // symbols in re-entry cooldown
+            {"symbol": str, "remaining_min": float, "expires_utc": str}
+          ],
+          "blacklisted": [             // symbols in auto-blacklist
+            {"symbol": str, "expires_utc": str, "consecutive_sl_hits": int}
+          ],
+          "atrs": [                    // ATR% per trading asset
+            {"symbol": str, "atr_pct": float | null}
+          ],
+          "generated_at": str
+        }
+        """
+        import json as _json  # noqa: WPS433
+        from datetime import datetime, timezone, timedelta  # noqa: WPS433
+        from pathlib import Path  # noqa: WPS433
+        from src.persistence.repository import MekkaRepository  # noqa: WPS433
+        from src.analytics.atr import compute_atr_pct  # noqa: WPS433
+
+        now_utc = datetime.now(timezone.utc)
+
+        # ── Exposure ──────────────────────────────────────────────────
+        try:
+            _positions = await MekkaRepository.list_paper_filled_trades(limit=500)
+            from collections import defaultdict  # noqa: WPS433
+            _long_qty: dict = defaultdict(float)
+            _short_qty: dict = defaultdict(float)
+            _long_notional: dict = defaultdict(float)
+            _short_notional: dict = defaultdict(float)
+            for t in _positions:
+                sym = (t.symbol or "").upper()
+                qty = float(t.quantity or 0)
+                price = float(t.avg_price or 0)
+                if (t.side or "long").lower() == "long":
+                    _long_qty[sym] += qty
+                    _long_notional[sym] += qty * price
+                else:
+                    _short_qty[sym] += qty
+                    _short_notional[sym] += qty * price
+            _open_notional = 0.0
+            for sym in set(_long_qty) | set(_short_qty):
+                net = _long_qty[sym] - _short_qty[sym]
+                if net > 1e-8:
+                    _open_notional += _long_notional[sym]
+                elif net < -1e-8:
+                    _open_notional += _short_notional[sym]
+            _equity = await MekkaRepository.get_today_peak_equity()
+            _cap_usd = _equity * settings.max_portfolio_exposure_pct
+            _used_pct = round(_open_notional / _cap_usd * 100, 1) if _cap_usd > 0 else 0.0
+            exposure = {
+                "open_notional_usd": round(_open_notional, 2),
+                "cap_usd": round(_cap_usd, 2),
+                "cap_pct": round(settings.max_portfolio_exposure_pct * 100, 1),
+                "used_pct": _used_pct,
+            }
+        except Exception as _e:
+            exposure = {"open_notional_usd": 0, "cap_usd": 0, "cap_pct": 20, "used_pct": 0, "error": str(_e)}
+
+        # ── Daily PnL ──────────────────────────────────────────────────
+        try:
+            _pnl_usd = await MekkaRepository.get_today_pnl_usd()
+            _eq = _equity if "_equity" in dir() else await MekkaRepository.get_today_peak_equity()
+            _pnl_pct = round(_pnl_usd / _eq * 100, 3) if _eq > 0 else 0.0
+            daily_pnl = {
+                "pnl_usd": round(_pnl_usd, 2),
+                "equity_usd": round(_eq, 2),
+                "pnl_pct": _pnl_pct,
+                "profit_target_pct": round(settings.daily_profit_target_pct * 100, 1),
+                "kill_threshold_pct": round(settings.max_daily_drawdown_pct * 100, 1),
+            }
+        except Exception as _e:
+            daily_pnl = {"pnl_usd": 0, "equity_usd": 0, "pnl_pct": 0, "profit_target_pct": 5, "kill_threshold_pct": 10, "error": str(_e)}
+
+        # ── Cooldowns ──────────────────────────────────────────────────
+        cooldowns: list[dict] = []
+        if settings.reentry_cooldown_minutes > 0:
+            try:
+                _trading_assets = settings.trading_assets
+                for _sym in _trading_assets:
+                    _sl_time = await MekkaRepository.get_last_sl_close_time(
+                        symbol=_sym, lookback_minutes=settings.reentry_cooldown_minutes
+                    )
+                    if _sl_time is not None:
+                        _ts = _sl_time if _sl_time.tzinfo else _sl_time.replace(tzinfo=timezone.utc)
+                        _elapsed = (now_utc - _ts).total_seconds() / 60
+                        _remaining = max(0.0, settings.reentry_cooldown_minutes - _elapsed)
+                        _expires = _ts + timedelta(minutes=settings.reentry_cooldown_minutes)
+                        cooldowns.append({
+                            "symbol": _sym.upper(),
+                            "remaining_min": round(_remaining, 1),
+                            "expires_utc": _expires.isoformat(),
+                        })
+            except Exception:  # noqa: BLE001
+                pass
+
+        # ── Blacklisted symbols ─────────────────────────────────────────
+        blacklisted: list[dict] = []
+        try:
+            _data_dir = Path("data")
+            if _data_dir.exists():
+                for _bl_file in _data_dir.glob(".blacklist_*.json"):
+                    try:
+                        _bl = _json.loads(_bl_file.read_text())
+                        _expires_str = _bl.get("expires", "")
+                        if _expires_str:
+                            _expires_dt = datetime.fromisoformat(_expires_str)
+                            if _expires_dt.tzinfo is None:
+                                _expires_dt = _expires_dt.replace(tzinfo=timezone.utc)
+                            if now_utc < _expires_dt:
+                                blacklisted.append({
+                                    "symbol": _bl.get("symbol", ""),
+                                    "expires_utc": _expires_str,
+                                    "consecutive_sl_hits": _bl.get("consecutive_sl_hits", 0),
+                                    "remaining_h": round((_expires_dt - now_utc).total_seconds() / 3600, 1),
+                                })
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception:  # noqa: BLE001
+            pass
+
+        # ── ATR per trading asset ───────────────────────────────────────
+        atrs: list[dict] = []
+        if settings.atr_sizing_enabled:
+            for _sym in settings.trading_assets:
+                try:
+                    _atr = await compute_atr_pct(_sym, lookback=settings.atr_lookback_candles)
+                    atrs.append({"symbol": _sym.upper(), "atr_pct": _atr})
+                except Exception:  # noqa: BLE001
+                    atrs.append({"symbol": _sym.upper(), "atr_pct": None})
+
+        return web.json_response({
+            "exposure": exposure,
+            "daily_pnl": daily_pnl,
+            "cooldowns": cooldowns,
+            "blacklisted": blacklisted,
+            "atrs": atrs,
+            "generated_at": now_utc.isoformat(),
+        })
+
+    async def _handle_leaderboard(self, request: web.Request) -> web.Response:
+        """
+        GET /api/leaderboard?days=90 — Story 079
+
+        Returns symbol-level performance stats for the Symbol Leaderboard page.
+
+        Response shape
+        --------------
+        {
+          "items": [
+            {
+              "symbol": "BTC",
+              "trades": 12,
+              "wins": 8,
+              "losses": 4,
+              "win_rate": 0.667,       // null if no decided trades
+              "total_pnl_usd": 540.0,
+              "avg_pnl_usd": 45.0,
+              "best_trade_usd": 210.0,
+              "worst_trade_usd": -85.0,
+              "sharpe": 1.23           // null if < 3 trades
+            },
+            ...
+          ],
+          "lookback_days": 90,
+          "generated_at": "2026-05-14T12:00:00+00:00"
+        }
+        """
+        from datetime import datetime, timezone  # noqa: WPS433
+
+        qs = request.rel_url.query
+        try:
+            days = max(1, min(int(qs.get("days", "90")), 365))
+        except (ValueError, TypeError):
+            days = 90
+
+        try:
+            items = await MekkaRepository.list_symbol_stats(lookback_days=days)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("leaderboard query failed: %s", exc)
+            items = []
+
+        return web.json_response({
+            "items": items,
+            "lookback_days": days,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    async def _handle_trades_export(self, request: web.Request) -> web.Response:
+        """
+        GET /api/trades/export?format=csv|json&status=FILLED,PAPER&limit=5000
+        Story 082 — Trade Export.
+
+        Downloads the full trade history as CSV or JSON.
+        Query params:
+          format  — "csv" (default) or "json"
+          status  — comma-separated status filter (default: all)
+          limit   — max rows (default 5000, max 50000)
+        """
+        import csv as _csv  # noqa: WPS433
+        import io as _io    # noqa: WPS433
+        from datetime import datetime, timezone  # noqa: WPS433
+
+        qs = request.rel_url.query
+        fmt = qs.get("format", "csv").lower()
+        status_raw = qs.get("status", "").strip()
+        status_filter = [s.strip().upper() for s in status_raw.split(",") if s.strip()] or None
+        try:
+            limit = max(1, min(int(qs.get("limit", "5000")), 50_000))
+        except (ValueError, TypeError):
+            limit = 5_000
+
+        try:
+            rows = await MekkaRepository.export_trades(limit=limit, status_filter=status_filter)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("trades export failed: %s", exc)
+            return web.json_response({"error": str(exc)}, status=500)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M")
+
+        if fmt == "json":
+            body = json.dumps({"trades": rows, "count": len(rows), "exported_at": ts}, indent=2)
+            return web.Response(
+                body=body.encode(),
+                content_type="application/json",
+                headers={"Content-Disposition": f'attachment; filename="mekka_trades_{ts}.json"'},
+            )
+
+        # CSV output
+        _FIELDS = [
+            "id", "timestamp_utc", "symbol", "status", "side",
+            "quantity", "avg_price", "notional_usd", "is_paper",
+            "stop_loss", "take_profit", "realized_pnl_usd",
+            "triggered_by", "trigger_reason",
+            "signal_confidence", "signal_action", "risk_verdict",
+        ]
+        buf = _io.StringIO()
+        writer = _csv.DictWriter(buf, fieldnames=_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+        csv_bytes = buf.getvalue().encode("utf-8-sig")  # BOM for Excel compat
+        return web.Response(
+            body=csv_bytes,
+            content_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="mekka_trades_{ts}.csv"',
+                "Content-Length": str(len(csv_bytes)),
+            },
+        )
+
+    async def _handle_pnl_heatmap(self, request: web.Request) -> web.Response:
+        """
+        GET /api/pnl/heatmap?days=90 — Story 089.
+
+        Returns a 7×24 heatmap of average trade PnL grouped by
+        UTC day-of-week (0=Mon) and hour-of-day.
+
+        Response shape
+        --------------
+        {
+          "heatmap": {
+            "0": {"9": -12.5, "14": 40.2, ...},  // Mon, hour → avg PnL
+            ...
+            "6": {...}                             // Sun
+          },
+          "max_abs": float,    // for colour scale normalisation
+          "lookback_days": int,
+          "generated_at": str
+        }
+        """
+        from datetime import datetime, timezone, timedelta  # noqa: WPS433
+        from collections import defaultdict  # noqa: WPS433
+
+        qs = request.rel_url.query
+        try:
+            days = max(7, min(int(qs.get("days", "90")), 365))
+        except (ValueError, TypeError):
+            days = 90
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+        try:
+            rows = await MekkaRepository.export_trades(limit=50_000, status_filter=["FILLED", "PAPER"])
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)}, status=500)
+
+        # Accumulate PnL per (weekday, hour)
+        bucket_pnl: dict[tuple[int,int], list[float]] = defaultdict(list)
+        for t in rows:
+            ts_str = t.get("timestamp_utc")
+            pnl = t.get("realized_pnl_usd")
+            if not ts_str or pnl is None:
+                continue
+            try:
+                ts = datetime.fromisoformat(ts_str)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts < cutoff:
+                    continue
+                bucket_pnl[(ts.weekday(), ts.hour)].append(float(pnl))
+            except (ValueError, TypeError):
+                continue
+
+        # Build 7×24 dict with averages
+        heatmap: dict[str, dict[str, float]] = {}
+        max_abs = 0.0
+        for dow in range(7):
+            heatmap[str(dow)] = {}
+            for hr in range(24):
+                pnls = bucket_pnl.get((dow, hr), [])
+                if pnls:
+                    avg = round(sum(pnls) / len(pnls), 2)
+                    heatmap[str(dow)][str(hr)] = avg
+                    max_abs = max(max_abs, abs(avg))
+
+        return web.json_response({
+            "heatmap": heatmap,
+            "max_abs": round(max_abs, 2),
+            "lookback_days": days,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    async def _handle_trades_calendar(self, request: web.Request) -> web.Response:
+        """
+        GET /api/trades/calendar?year=YYYY&month=MM — Story 107.
+
+        Returns trade count and PnL per calendar day for the requested month.
+
+        Response shape
+        --------------
+        {
+          "year": int,
+          "month": int,
+          "days": [
+            {"day": 1, "count": 3, "pnl_usd": 42.5, "win_count": 2, "loss_count": 1},
+            ...
+          ],
+          "generated_at": str
+        }
+        """
+        from datetime import datetime, timezone  # noqa: WPS433
+
+        qs = request.rel_url.query
+        now_utc = datetime.now(timezone.utc)
+        try:
+            year = int(qs.get("year", str(now_utc.year)))
+        except (ValueError, TypeError):
+            year = now_utc.year
+        try:
+            month = int(qs.get("month", str(now_utc.month)))
+            month = max(1, min(month, 12))
+        except (ValueError, TypeError):
+            month = now_utc.month
+
+        try:
+            days_data = await MekkaRepository.get_monthly_trade_calendar(year=year, month=month)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)}, status=500)
+
+        return web.json_response({
+            "year": year,
+            "month": month,
+            "days": days_data,
+            "generated_at": now_utc.isoformat(),
+        })
+
+    async def _handle_pnl_hourly(self, request: web.Request) -> web.Response:
+        """
+        GET /api/pnl/hourly?days=30 — Story 109.
+
+        Returns PnL statistics grouped by UTC hour (0-23) for the last N days.
+        Useful for identifying which hours of the day are most profitable.
+
+        Response shape
+        --------------
+        {
+          "hourly": {
+            "9":  {"hour": 9, "avg_pnl": 12.5, "total_pnl": 125.0, "count": 10,
+                   "win_count": 7, "loss_count": 3},
+            ...
+          },
+          "lookback_days": int,
+          "generated_at": str
+        }
+        """
+        from datetime import datetime, timezone  # noqa: WPS433
+
+        qs = request.rel_url.query
+        try:
+            days = max(1, min(int(qs.get("days", "30")), 365))
+        except (ValueError, TypeError):
+            days = 30
+
+        try:
+            hourly = await MekkaRepository.get_pnl_by_hour(days=days)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)}, status=500)
+
+        return web.json_response({
+            "hourly": hourly,
+            "lookback_days": days,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    async def _handle_gates_timeline(self, request: web.Request) -> web.Response:
+        """
+        GET /api/gates/timeline?limit=50 — Story 112.
+
+        Returns the most recent gate rejection events logged by Batman.
+        Useful for understanding which risk gates are firing most often.
+
+        Response shape
+        --------------
+        {
+          "events": [
+            {
+              "timestamp_utc": str,
+              "symbol": str,
+              "gate_id": str,
+              "reason": str,
+              "breached": [str]
+            },
+            ...
+          ],
+          "count": int,
+          "generated_at": str
+        }
+        """
+        from datetime import datetime, timezone  # noqa: WPS433
+
+        qs = request.rel_url.query
+        try:
+            limit = max(1, min(int(qs.get("limit", "50")), 500))
+        except (ValueError, TypeError):
+            limit = 50
+
+        try:
+            events = await MekkaRepository.get_gate_rejections(limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)}, status=500)
+
+        return web.json_response({
+            "events": events,
+            "count": len(events),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    async def _handle_signals_export(self, request: web.Request) -> web.Response:
+        """
+        GET /api/signals/export?format=csv|json&limit=5000 — Story 093.
+        Downloads all Vision signals as CSV or JSON.
+        """
+        import csv as _csv  # noqa: WPS433
+        import io as _io    # noqa: WPS433
+        from datetime import datetime, timezone  # noqa: WPS433
+
+        qs = request.rel_url.query
+        fmt = qs.get("format", "csv").lower()
+        try:
+            limit = max(1, min(int(qs.get("limit", "5000")), 50_000))
+        except (ValueError, TypeError):
+            limit = 5_000
+
+        try:
+            rows = await MekkaRepository.export_signals(limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)}, status=500)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M")
+
+        if fmt == "json":
+            body = json.dumps({"signals": rows, "count": len(rows), "exported_at": ts}, indent=2)
+            return web.Response(
+                body=body.encode(),
+                content_type="application/json",
+                headers={"Content-Disposition": f'attachment; filename="mekka_signals_{ts}.json"'},
+            )
+
+        _FIELDS = ["id", "timestamp_utc", "symbol", "action", "confidence",
+                   "entry_price", "stop_loss", "take_profit", "risk_reward_ratio",
+                   "size_pct", "leverage", "risk_verdict", "signal_quality_score"]
+        buf = _io.StringIO()
+        writer = _csv.DictWriter(buf, fieldnames=_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+        csv_bytes = buf.getvalue().encode("utf-8-sig")
+        return web.Response(
+            body=csv_bytes,
+            content_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="mekka_signals_{ts}.csv"',
+                "Content-Length": str(len(csv_bytes)),
+            },
+        )
+
+    async def _handle_session_stats(self, _: web.Request) -> web.Response:
+        """
+        GET /api/session/stats — Story 092.
+
+        Returns today's session summary: trades, PnL, win rate, best/worst.
+
+        Response shape
+        --------------
+        {
+          "trades_today": int,
+          "pnl_today_usd": float,
+          "wins_today": int,
+          "losses_today": int,
+          "win_rate_today": float | null,
+          "best_trade_usd": float | null,
+          "worst_trade_usd": float | null,
+          "equity_usd": float,
+          "generated_at": str
+        }
+        """
+        from datetime import datetime, timezone, timedelta  # noqa: WPS433
+
+        now_utc = datetime.now(timezone.utc)
+        today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        try:
+            all_rows = await MekkaRepository.export_trades(
+                limit=500, status_filter=["FILLED", "PAPER"]
+            )
+            today_rows = [
+                r for r in all_rows
+                if r.get("timestamp_utc") and
+                datetime.fromisoformat(r["timestamp_utc"]).replace(tzinfo=timezone.utc) >= today_start
+            ]
+            pnls = [r["realized_pnl_usd"] for r in today_rows if r.get("realized_pnl_usd") is not None]
+            wins = sum(1 for p in pnls if p > 0)
+            losses = sum(1 for p in pnls if p < 0)
+            decided = wins + losses
+            equity = await MekkaRepository.get_today_peak_equity()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("session_stats error: %s", exc)
+            return web.json_response({"error": str(exc)}, status=500)
+
+        return web.json_response({
+            "trades_today": len(today_rows),
+            "pnl_today_usd": round(sum(pnls), 2) if pnls else 0.0,
+            "wins_today": wins,
+            "losses_today": losses,
+            "win_rate_today": round(wins / decided, 3) if decided > 0 else None,
+            "best_trade_usd": round(max(pnls), 2) if pnls else None,
+            "worst_trade_usd": round(min(pnls), 2) if pnls else None,
+            "equity_usd": round(equity, 2),
+            "generated_at": now_utc.isoformat(),
+        })
+
     async def _handle_positions(self, _: web.Request) -> web.Response:
         """Open positions read via the Hyperliquid `info.user_state` endpoint.
 
-        Falls back to the stub shape (empty list, `source="stub"`) whenever
-        we can't reach Hyperliquid, paper trading is on, or credentials are
-        missing — the frontend renders both shapes uniformly.
+        [Story 099] In paper mode, passes the current mark-price cache so
+        unrealised PnL and duration are shown.  Falls back to the stub shape
+        on every sad path so the dashboard never breaks.
         """
         from src.dashboard.positions_provider import fetch_positions
 
+        # Pass cached mark prices so paper positions show live uPnL (Story 099)
+        _mark_prices: dict[str, float] = dict(self._hl_prices) if self._hl_prices else {}
+
         try:
-            data = await fetch_positions()
+            data = await fetch_positions(mark_prices=_mark_prices)
         except Exception as exc:  # noqa: BLE001
             logger.exception("positions provider crashed: %s", exc)
             data = {
@@ -2270,6 +2863,102 @@ class MekkaDashboardServer:
 
         return web.json_response({"days": days, "series": result})
 
+    async def _handle_equity_curve(self, _: web.Request) -> web.Response:
+        """
+        GET /api/pnl/equity-curve — Story 077
+
+        Builds a day-by-day equity curve from the DailyPnLRecord table.
+        Computes cumulative P&L, drawdown from peak, and win-rate per day.
+
+        Response shape
+        --------------
+        {
+          "labels":         ["2026-05-01", ...],  // date strings
+          "equity":         [10000.0, ...],        // cumulative equity (base + cum_pnl)
+          "daily_pnl":      [+52.3, -18.0, ...],  // raw daily P&L USD
+          "drawdown_pct":   [0.0, -0.5, ...],      // drawdown from running peak (%)
+          "cum_return_pct": [0.0, 0.52, ...],      // cumulative return %
+          "win_rate_30d":   float,                 // wins / total (last 30 days)
+          "sharpe_30d":     float | null,
+          "max_drawdown_pct": float,
+          "total_days":     int,
+          "winning_days":   int,
+          "losing_days":    int,
+          "generated_at":   str
+        }
+        """
+        from datetime import datetime, timezone  # noqa: WPS433
+
+        now_utc = datetime.now(timezone.utc)
+        try:
+            rows = await MekkaRepository.list_recent_daily_pnl(limit=180)
+
+            if not rows:
+                return web.json_response({
+                    "labels": [], "equity": [], "daily_pnl": [], "drawdown_pct": [],
+                    "cum_return_pct": [], "win_rate_30d": 0.0, "sharpe_30d": None,
+                    "max_drawdown_pct": 0.0, "total_days": 0, "winning_days": 0,
+                    "losing_days": 0, "generated_at": now_utc.isoformat(),
+                })
+
+            base_equity = settings.paper_equity_usd
+            labels, equity_curve, daily_pnl, drawdown_pct, cum_return = [], [], [], [], []
+
+            cum_pnl = 0.0
+            peak = base_equity
+            min_dd = 0.0
+
+            for row in rows:
+                pnl = float(row.pnl_usd or 0.0)
+                cum_pnl += pnl
+                eq = base_equity + cum_pnl
+                peak = max(peak, eq)
+                dd = (eq - peak) / peak * 100.0 if peak > 0 else 0.0
+                min_dd = min(min_dd, dd)
+                ret = (eq - base_equity) / base_equity * 100.0 if base_equity > 0 else 0.0
+
+                labels.append(str(row.date_utc))
+                equity_curve.append(round(eq, 2))
+                daily_pnl.append(round(pnl, 2))
+                drawdown_pct.append(round(dd, 3))
+                cum_return.append(round(ret, 3))
+
+            # Stats: last 30 rows
+            recent = rows[-30:]
+            wins = sum(1 for r in recent if (r.pnl_usd or 0) > 0)
+            losses = sum(1 for r in recent if (r.pnl_usd or 0) < 0)
+            total = len(recent)
+            win_rate = round(wins / total * 100, 1) if total > 0 else 0.0
+
+            # Sharpe (annualised, daily returns / std)
+            sharpe = None
+            pnl_pcts = [(float(r.pnl_usd or 0) / base_equity) for r in recent if base_equity > 0]
+            if len(pnl_pcts) >= 5:
+                import statistics  # noqa: WPS433
+                avg_r = statistics.mean(pnl_pcts)
+                std_r = statistics.stdev(pnl_pcts) if len(pnl_pcts) > 1 else 0
+                if std_r > 1e-9:
+                    sharpe = round(avg_r / std_r * (365 ** 0.5), 3)
+
+            return web.json_response({
+                "labels": labels,
+                "equity": equity_curve,
+                "daily_pnl": daily_pnl,
+                "drawdown_pct": drawdown_pct,
+                "cum_return_pct": cum_return,
+                "win_rate_30d": win_rate,
+                "sharpe_30d": sharpe,
+                "max_drawdown_pct": round(min_dd, 3),
+                "total_days": total,
+                "winning_days": wins,
+                "losing_days": losses,
+                "generated_at": now_utc.isoformat(),
+            })
+
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[EquityCurve] error: %s", exc)
+            return web.json_response({"error": str(exc)}, status=500)
+
     async def _handle_pnl_summary(self, request: web.Request) -> web.Response:
         days = _safe_limit(request.query.get("days"), default=30, max_value=365)
         try:
@@ -2399,6 +3088,28 @@ class MekkaDashboardServer:
             )
         except asyncio.TimeoutError:
             return web.json_response({"error": "report send timed out"}, status=504)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)}, status=500)
+        return web.json_response(result)
+
+    async def _handle_report_weekly(self, request: web.Request) -> web.Response:
+        """
+        GET /api/report/weekly[?force=1]
+
+        [Story 090] Trigger the weekly Deadpool report on-demand.
+        Does not require auth — reporting is read-only and non-destructive.
+        """
+        force = request.query.get("force", "0") not in ("0", "false", "")
+        if self._daily_reporter is None:
+            from src.dashboard.daily_reporter import DailyReporter
+            self._daily_reporter = DailyReporter()
+        try:
+            result = await asyncio.wait_for(
+                self._daily_reporter.send_weekly_report(force=force),
+                timeout=20.0,
+            )
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "weekly report send timed out"}, status=504)
         except Exception as exc:  # noqa: BLE001
             return web.json_response({"error": str(exc)}, status=500)
         return web.json_response(result)

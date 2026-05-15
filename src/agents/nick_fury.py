@@ -554,6 +554,40 @@ class NickFury(BaseAgent[list[CycleReport]]):
         if not approval.is_executable:
             return CycleReport(symbol=symbol, signal=signal, approval=approval)
 
+        # ── Story 074 — Telegram Trade Approval ─────────────────────
+        # Request operator confirmation via Telegram before IronMan executes.
+        # Falls open: any error in the approval flow skips and proceeds.
+        if settings.telegram_trade_approval_enabled:
+            try:
+                import uuid as _uuid  # noqa: WPS433
+                from src.services.trade_approval import request_approval as _req_approval  # noqa: WPS433
+                _trade_id = f"T-{_uuid.uuid4().hex[:10].upper()}"
+                _approved = await _req_approval(
+                    trade_id=_trade_id,
+                    signal_symbol=symbol,
+                    signal_action=signal.action.value,
+                    signal_confidence=signal.confidence,
+                    entry_price=signal.entry_price,
+                    stop_loss=signal.stop_loss,
+                    take_profit=signal.take_profit,
+                    size_pct=approval.adjusted_size_pct,
+                    leverage=approval.adjusted_leverage,
+                    reasons=approval.reasons,
+                    timeout_s=settings.telegram_trade_approval_timeout_s,
+                )
+                if not _approved:
+                    await MekkaRepository.log_event(
+                        agent="NickFury",
+                        event="TRADE_APPROVAL_REJECTED",
+                        severity="INFO",
+                        symbol=symbol,
+                        message=f"[074] Trade {_trade_id} rejected by operator (or timeout in live mode)",
+                        payload={"trade_id": _trade_id, "symbol": symbol, "action": signal.action.value},
+                    )
+                    return CycleReport(symbol=symbol, signal=signal, approval=approval)
+            except Exception as _appr_exc:  # noqa: BLE001
+                self._log.warning("[NickFury] Trade approval gate error (skipped): %s", _appr_exc)
+
         # 4. Iron Man execution
         execution = await self._ironman.run(
             signal=signal,

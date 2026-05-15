@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod +x scripts/kill.sh)",
+      "Bash(./scripts/kill.sh status *)",
+      "Bash(./scripts/kill.sh on *)",
+      "Bash(./scripts/kill.sh off *)",
+      "Bash(/Users/gustavovicente/Documents/Mekka-Trading/.venv/bin/python -m py_compile scripts/check_roster_consistency.py src/services/breakers.py src/agents/nick_fury.py src/agents/batman.py src/config/settings.py tests/test_phase5_safety_net.py)",
+      "Bash(/Users/gustavovicente/Documents/Mekka-Trading/.venv/bin/python -m pytest tests/test_phase5_safety_net.py -v)",
+      "Bash(/Users/gustavovicente/Documents/Mekka-Trading/.venv/bin/python -m pytest tests/ -v)",
+      "Bash(/Users/gustavovicente/Documents/Mekka-Trading/.venv/bin/python -m pytest tests/test_dashboard_replay.py::TestReplayExport::test_utc_filter_excludes_out_of_range tests/test_phase4_daily_pnl.py::test_peak_is_monotonic_within_day --ignore=tests/test_phase5_safety_net.py -v)",
+      "Bash(git stash *)"
+    ]
+  }
+}

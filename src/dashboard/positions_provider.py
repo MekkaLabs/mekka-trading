@@ -97,13 +97,19 @@ def map_user_state_to_positions(user_state: dict[str, Any]) -> list[dict[str, An
     return out
 
 
-async def _fetch_paper_positions() -> dict[str, Any]:
+async def _fetch_paper_positions(
+    mark_prices: dict[str, float] | None = None,
+) -> dict[str, Any]:
     """Synthesise open positions from paper FILLED/PAPER trades in the DB.
 
-    Groups by (symbol, side), sums quantities, and computes a weighted
-    average entry price. Mark price equals entry price (no live feed in
-    paper mode) so unrealised PnL shows as 0.
+    [Story 099] Groups by (symbol, side), sums quantities, computes
+    weighted avg entry price and estimated unrealised PnL from the
+    optional ``mark_prices`` map.  Also adds ``duration_minutes`` (time
+    since first opening trade) so the UI can show how long the position
+    has been open.
     """
+    prices: dict[str, float] = mark_prices or {}
+
     try:
         from src.persistence.repository import MekkaRepository  # noqa: WPS433
 
@@ -182,19 +188,62 @@ async def _fetch_paper_positions() -> dict[str, Any]:
             if total_qty > 0 else 0.0
         )
 
+        # [Story 099] Mark price + estimated unrealised PnL
+        mark_px = prices.get(symbol) or prices.get(symbol.upper()) or avg_px
+        if mark_px > 0 and avg_px > 0:
+            if side == "LONG":
+                upnl = round((mark_px - avg_px) * open_qty, 2)
+            else:
+                upnl = round((avg_px - mark_px) * open_qty, 2)
+        else:
+            upnl = 0.0
+
+        # [Story 099] Duration — time since first opening trade
+        def _get_ts(t: Any) -> float:
+            ts = getattr(t, "created_at", None) or getattr(t, "timestamp", None)
+            if ts is None:
+                return 0.0
+            if hasattr(ts, "timestamp"):
+                return ts.timestamp()
+            try:
+                return float(ts)
+            except (TypeError, ValueError):
+                return 0.0
+
+        _ts_values = [_get_ts(t) for t in open_trades if _get_ts(t) > 0]
+        if _ts_values:
+            from datetime import datetime, timezone as _tz  # noqa: WPS433
+            _oldest_ts = min(_ts_values)
+            _now_ts = datetime.now(_tz.utc).timestamp()
+            duration_minutes = round((_now_ts - _oldest_ts) / 60, 1)
+        else:
+            duration_minutes = None
+
+        # [Story 104] R-múltiplo: (mark - entry) / |entry - sl| para LONG
+        r_multiple: float | None = None
+        if avg_sl > 0 and avg_px > 0:
+            _risk_pts = abs(avg_px - avg_sl)
+            if _risk_pts > 1e-8:
+                if side == "LONG":
+                    r_multiple = round((mark_px - avg_px) / _risk_pts, 2)
+                else:
+                    r_multiple = round((avg_px - mark_px) / _risk_pts, 2)
+
         items.append(
             {
                 "symbol": symbol,
                 "side": side,
                 "size": round(open_qty, 8),
-                "entry_price": round(avg_px, 2),
-                "mark_price": round(avg_px, 2),  # sem preço ao vivo em paper mode
-                "pnl_usd": 0.0,
+                "entry_price": round(avg_px, 4),
+                "mark_price": round(mark_px, 4),
+                "pnl_usd": upnl,
                 "leverage": None,
                 "liq_price": None,
                 "is_paper": True,
-                "sl_price": round(avg_sl, 2) if avg_sl > 0 else None,
-                "tp_price": round(avg_tp, 2) if avg_tp > 0 else None,
+                "sl_price": round(avg_sl, 4) if avg_sl > 0 else None,
+                "tp_price": round(avg_tp, 4) if avg_tp > 0 else None,
+                "duration_minutes": duration_minutes,
+                "r_multiple": r_multiple,  # Story 104
             }
         )
 
@@ -306,11 +355,17 @@ async def get_paper_equity_summary(
     }
 
 
-async def fetch_positions() -> dict[str, Any]:
+async def fetch_positions(
+    mark_prices: dict[str, float] | None = None,
+) -> dict[str, Any]:
     """Best-effort live read. Falls back to the stub shape on every
-    sad path so the UI never breaks the dashboard layout."""
+    sad path so the UI never breaks the dashboard layout.
+
+    [Story 099] ``mark_prices`` is forwarded to ``_fetch_paper_positions``
+    so estimated unrealised PnL can be shown in paper mode.
+    """
     if settings.paper_trading:
-        return await _fetch_paper_positions()
+        return await _fetch_paper_positions(mark_prices=mark_prices)
 
     address = (settings.hyperliquid_wallet_address or "").strip()
     if not address:

@@ -2811,13 +2811,15 @@ if (pnlWindowSelect) {
 const _PAGE_SECTIONS = {
   overview:    ['sec-office', 'sec-live-market', 'sec-metrics'],
   wallet:      ['sec-killswitch', 'sec-pnl', 'sec-positions', 'sec-funding'],
-  performance: ['sec-trades-timeline', 'sec-replay-charts', 'sec-hero-sla'],
+  performance: ['sec-equity-curve', 'sec-trades-timeline', 'sec-replay-charts', 'sec-hero-sla'],
   agents:      ['sec-layers', 'sec-agents', 'sec-internals'],
   trades:      ['sec-signals', 'sec-trades'],
-  risk:        ['sec-risk', 'sec-anomalies', 'sec-incident-queue'],
+  risk:        ['sec-risk-panel', 'sec-risk', 'sec-anomalies', 'sec-incident-queue'],
   logs:        ['sec-audit', 'sec-replay-player', 'sec-manual', 'sec-timeline', 'sec-symbol-timeline'],
   settings:    ['sec-trading-settings', 'sec-settings', 'sec-filters'],
   live:        ['sec-live-trading'],
+  memory:      ['sec-memory'],
+  leaderboard: ['sec-leaderboard'],
 };
 const _ALL_PAGE_SECTIONS = Object.values(_PAGE_SECTIONS).flat();
 
@@ -3388,8 +3390,8 @@ function _initLightweightChart() {
       timeVisible: true,
       secondsVisible: false,
     },
-    width:  container.offsetWidth || container.clientWidth || 800,
-    height: container.clientHeight || 500,
+    width:  container.offsetWidth  || container.clientWidth  || 900,
+    height: container.offsetHeight || container.clientHeight || 500,
   });
 
   _liveCandleSeries = _liveChart.addCandlestickSeries({
@@ -3415,10 +3417,14 @@ function _initLightweightChart() {
     _liveRenderLegend(candle || (_liveLastCandles.length ? _liveLastCandles[_liveLastCandles.length - 1] : null));
   });
 
-  // Resize observer
+  // Resize observer — guard against zero-dimension updates (display:none transition)
   new ResizeObserver(() => {
     if (_liveChart && container) {
-      _liveChart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      if (w > 0 && h > 0) {
+        _liveChart.applyOptions({ width: w, height: h });
+      }
     }
   }).observe(container);
 
@@ -4013,9 +4019,15 @@ async function _bootLiveChart() {
 
   if (!document.getElementById('live-chart')) return;
 
-  // Wait one animation frame so the browser paints the section before
-  // measuring container.offsetWidth (avoids width=0 when section was display:none)
-  await new Promise(r => requestAnimationFrame(r));
+  // Double-RAF: first frame removes display:none, second frame lets the
+  // browser complete layout so container.offsetWidth/clientHeight are non-zero.
+  // Falls back to a 60ms timeout as final safety net for slower devices.
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  // Extra guard: if container still has no height after double-RAF, wait a bit more.
+  const _chartContainerCheck = document.getElementById('live-chart');
+  if (_chartContainerCheck && _chartContainerCheck.clientHeight === 0) {
+    await new Promise(r => setTimeout(r, 60));
+  }
 
   // Init chart
   if (!_initLightweightChart()) return;
@@ -4392,6 +4404,210 @@ async function loadMemory() {
   }
 }
 
+// ============================================================
+// Story 077 — Equity Curve Chart
+// ============================================================
+
+let _eqChart = null, _ddChart = null, _eqTimer = null;
+
+async function loadEquityCurve() {
+  try {
+    const headers = {};
+    const tok = getDashboardToken();
+    if (tok) headers['X-Mekka-Token'] = tok;
+    const res = await fetch('/api/pnl/equity-curve', { headers });
+    if (!res.ok) return;
+    const d = await res.json();
+    if (!d.labels || !d.labels.length) return;
+
+    // ── Stats row ─────────────────────────────────────────────
+    const statsRow = document.getElementById('eq-stats-row');
+    if (statsRow) {
+      const winColor = d.win_rate_30d >= 50 ? 'var(--good)' : 'var(--bad)';
+      const ddColor  = d.max_drawdown_pct < -10 ? 'var(--bad)' : d.max_drawdown_pct < -5 ? '#f59e0b' : 'var(--good)';
+      const cumLast  = d.cum_return_pct.length ? d.cum_return_pct[d.cum_return_pct.length - 1] : 0;
+      statsRow.innerHTML = `
+        <div class="eq-stat"><span class="eq-stat-lbl">Retorno Total</span><span class="eq-stat-val" style="color:${cumLast>=0?'var(--good)':'var(--bad)'}">${cumLast>=0?'+':''}${cumLast.toFixed(2)}%</span></div>
+        <div class="eq-stat"><span class="eq-stat-lbl">Win Rate (30d)</span><span class="eq-stat-val" style="color:${winColor}">${d.win_rate_30d.toFixed(1)}%</span></div>
+        <div class="eq-stat"><span class="eq-stat-lbl">Max Drawdown</span><span class="eq-stat-val" style="color:${ddColor}">${d.max_drawdown_pct.toFixed(2)}%</span></div>
+        <div class="eq-stat"><span class="eq-stat-lbl">Sharpe (30d)</span><span class="eq-stat-val">${d.sharpe_30d != null ? d.sharpe_30d.toFixed(3) : '—'}</span></div>
+        <div class="eq-stat"><span class="eq-stat-lbl">Dias Win/Loss</span><span class="eq-stat-val">${d.winning_days}W / ${d.losing_days}L</span></div>
+      `;
+    }
+
+    if (typeof Chart === 'undefined') return;
+
+    const baseColor = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#7c3aed';
+    const goodColor = '#26d07c', badColor = '#e94560';
+
+    // ── Equity chart ──────────────────────────────────────────
+    const eqCanvas = document.getElementById('eq-equity-canvas');
+    if (eqCanvas) {
+      if (_eqChart) { _eqChart.destroy(); _eqChart = null; }
+      _eqChart = new Chart(eqCanvas.getContext('2d'), {
+        type: 'line',
+        data: {
+          labels: d.labels,
+          datasets: [{
+            label: 'Equity (USD)',
+            data: d.equity,
+            borderColor: baseColor,
+            backgroundColor: baseColor + '18',
+            borderWidth: 2,
+            pointRadius: 0,
+            fill: true,
+            tension: 0.3,
+          }],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } },
+          scales: {
+            x: { ticks: { color: '#7a90bb', maxTicksLimit: 8 }, grid: { color: '#0e1a30' } },
+            y: { ticks: { color: '#7a90bb', callback: v => '$' + v.toLocaleString() }, grid: { color: '#0e1a30' } },
+          },
+        },
+      });
+    }
+
+    // ── Drawdown chart ────────────────────────────────────────
+    const ddCanvas = document.getElementById('eq-drawdown-canvas');
+    if (ddCanvas) {
+      if (_ddChart) { _ddChart.destroy(); _ddChart = null; }
+      _ddChart = new Chart(ddCanvas.getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels: d.labels,
+          datasets: [
+            {
+              label: 'PnL Diário ($)',
+              data: d.daily_pnl,
+              backgroundColor: d.daily_pnl.map(v => v >= 0 ? goodColor + 'cc' : badColor + 'cc'),
+              yAxisID: 'y',
+            },
+            {
+              label: 'Drawdown (%)',
+              data: d.drawdown_pct,
+              type: 'line',
+              borderColor: badColor,
+              backgroundColor: 'transparent',
+              borderWidth: 1.5,
+              pointRadius: 0,
+              yAxisID: 'y2',
+            },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { labels: { color: '#7a90bb' } }, tooltip: { mode: 'index', intersect: false } },
+          scales: {
+            x: { ticks: { color: '#7a90bb', maxTicksLimit: 8 }, grid: { color: '#0e1a30' } },
+            y:  { ticks: { color: goodColor }, grid: { color: '#0e1a30' }, position: 'left' },
+            y2: { ticks: { color: badColor,  callback: v => v.toFixed(1) + '%' }, grid: { display: false }, position: 'right' },
+          },
+        },
+      });
+    }
+  } catch (e) {
+    console.warn('[EquityCurve] load error:', e);
+  }
+}
+
+function bootEquityCurve() {
+  loadEquityCurve();
+  _eqTimer = _clearTimer(_eqTimer);
+  if (!document.hidden) {
+    _eqTimer = setInterval(loadEquityCurve, 60000);  // refresh 1 min
+  }
+}
+
+// ============================================================
+// Story 073 — Live Risk Panel
+// ============================================================
+
+let _riskPanelTimer = null;
+
+async function loadRiskPanel() {
+  try {
+    const headers = {};
+    const tok = getDashboardToken();
+    if (tok) headers['X-Mekka-Token'] = tok;
+    const res = await fetch('/api/risk/panel', { headers });
+    if (!res.ok) return;
+    const d = await res.json();
+
+    // Exposure bar
+    const expBar = document.getElementById('rp-exposure-bar');
+    const expVal = document.getElementById('rp-exposure-val');
+    if (expBar && d.exposure) {
+      const pct = Math.min(100, d.exposure.used_pct || 0);
+      expBar.style.width = pct + '%';
+      expBar.className = 'rp-bar' + (pct >= 90 ? ' rp-bar-danger' : pct >= 60 ? ' rp-bar-warn' : '');
+      expVal.textContent = `$${(d.exposure.open_notional_usd||0).toLocaleString('en-US',{maximumFractionDigits:0})} / $${(d.exposure.cap_usd||0).toLocaleString('en-US',{maximumFractionDigits:0})} (${pct.toFixed(1)}%)`;
+    }
+
+    // Daily PnL bar
+    const pnlBar = document.getElementById('rp-pnl-bar');
+    const pnlVal = document.getElementById('rp-pnl-val');
+    if (pnlBar && d.daily_pnl) {
+      const pnlPct = d.daily_pnl.pnl_pct || 0;
+      const target = d.daily_pnl.profit_target_pct || 5;
+      const kill = d.daily_pnl.kill_threshold_pct || 10;
+      const isPos = pnlPct >= 0;
+      const barPct = Math.min(100, Math.abs(pnlPct) / Math.max(target, kill) * 100);
+      pnlBar.style.width = barPct + '%';
+      pnlBar.className = 'rp-bar rp-bar-pnl' + (!isPos ? ' rp-bar-danger' : pnlPct >= target ? ' rp-bar-success' : '');
+      const sign = pnlPct >= 0 ? '+' : '';
+      pnlVal.textContent = `${sign}$${(d.daily_pnl.pnl_usd||0).toFixed(2)} (${sign}${pnlPct.toFixed(2)}%) | target ${target}% | kill -${kill}%`;
+      pnlVal.style.color = isPos ? 'var(--green)' : 'var(--red)';
+    }
+
+    // Cooldown chips
+    const cdChips = document.getElementById('rp-cooldown-chips');
+    if (cdChips) {
+      if (!d.cooldowns || d.cooldowns.length === 0) {
+        cdChips.innerHTML = '<span class="rp-chip rp-chip-ok">Nenhum</span>';
+      } else {
+        cdChips.innerHTML = d.cooldowns.map(c =>
+          `<span class="rp-chip rp-chip-warn" title="Expira ${c.expires_utc}">${c.symbol} ${c.remaining_min.toFixed(0)}min</span>`
+        ).join('');
+      }
+    }
+
+    // Blacklist chips
+    const blChips = document.getElementById('rp-blacklist-chips');
+    if (blChips) {
+      if (!d.blacklisted || d.blacklisted.length === 0) {
+        blChips.innerHTML = '<span class="rp-chip rp-chip-ok">Nenhum</span>';
+      } else {
+        blChips.innerHTML = d.blacklisted.map(b =>
+          `<span class="rp-chip rp-chip-danger" title="${b.consecutive_sl_hits} SLs consecutivos | expira ${b.expires_utc}">${b.symbol} ${b.remaining_h.toFixed(0)}h</span>`
+        ).join('');
+      }
+    }
+
+    // ATR grid
+    const atrGrid = document.getElementById('rp-atr-grid');
+    if (atrGrid && d.atrs && d.atrs.length > 0) {
+      atrGrid.innerHTML = d.atrs.map(a => {
+        const v = a.atr_pct != null ? a.atr_pct.toFixed(3) + '%' : '—';
+        const cls = a.atr_pct == null ? '' : a.atr_pct > 4 ? 'rp-atr-high' : a.atr_pct > 2 ? 'rp-atr-mid' : 'rp-atr-low';
+        return `<div class="rp-atr-item ${cls}"><span class="rp-atr-sym">${a.symbol}</span><span class="rp-atr-val">${v}</span></div>`;
+      }).join('');
+    }
+  } catch (e) {
+    console.warn('[RiskPanel] load error:', e);
+  }
+}
+
+function bootRiskPanel() {
+  loadRiskPanel();
+  _riskPanelTimer = _clearTimer(_riskPanelTimer);
+  if (!document.hidden) {
+    _riskPanelTimer = setInterval(loadRiskPanel, 30000);  // refresh 30s
+  }
+}
+
 function bootMemory() {
   loadMemory();
   // Refresh every 60 s when memory page is visible
@@ -4399,6 +4615,171 @@ function bootMemory() {
     const sec = document.getElementById('sec-memory');
     if (sec && !sec.classList.contains('hidden')) loadMemory();
   }, 60_000);
+}
+
+// ============================================================
+// Story 079 — Symbol Performance Leaderboard
+// ============================================================
+
+let _lbSortCol   = 'total_pnl_usd';
+let _lbSortDir   = 'desc';   // 'asc' | 'desc'
+let _lbData      = [];       // raw items cache
+let _lbDays      = 90;
+let _lbTimer     = null;
+
+function _lbPnlClass(v) {
+  if (v > 0) return 'lb-pnl-pos';
+  if (v < 0) return 'lb-pnl-neg';
+  return 'lb-pnl-zero';
+}
+
+function _lbFmt(v, prefix = '$', decimals = 2) {
+  if (v == null) return '<span class="lb-sharpe-na">—</span>';
+  const sign = v >= 0 ? '+' : '';
+  return `${sign}${prefix}${Math.abs(v).toFixed(decimals)}`;
+}
+
+function _lbRenderSummary(items) {
+  const el = document.getElementById('lb-summary-row');
+  if (!el) return;
+  if (!items || items.length === 0) { el.innerHTML = ''; return; }
+  const totalPnl = items.reduce((s, x) => s + (x.total_pnl_usd || 0), 0);
+  const totalTrades = items.reduce((s, x) => s + (x.trades || 0), 0);
+  const winners = items.filter(x => x.total_pnl_usd > 0).length;
+  const losers  = items.filter(x => x.total_pnl_usd < 0).length;
+  const best    = items.reduce((a, x) => x.total_pnl_usd > (a ? a.total_pnl_usd : -Infinity) ? x : a, null);
+  const worst   = items.reduce((a, x) => x.total_pnl_usd < (a ? a.total_pnl_usd : Infinity) ? x : a, null);
+  const sign = totalPnl >= 0 ? '+' : '';
+  el.innerHTML = `
+    <div class="lb-sum-item"><span class="lb-sum-label">PnL Total</span><span class="lb-sum-val ${_lbPnlClass(totalPnl)}">${sign}$${totalPnl.toFixed(2)}</span></div>
+    <div class="lb-sum-item"><span class="lb-sum-label">Símbolos</span><span class="lb-sum-val">${items.length}</span></div>
+    <div class="lb-sum-item"><span class="lb-sum-label">Trades</span><span class="lb-sum-val">${totalTrades}</span></div>
+    <div class="lb-sum-item"><span class="lb-sum-label">Lucrativos</span><span class="lb-sum-val lb-pnl-pos">${winners}</span></div>
+    <div class="lb-sum-item"><span class="lb-sum-label">Negativos</span><span class="lb-sum-val lb-pnl-neg">${losers}</span></div>
+    ${best ? `<div class="lb-sum-item"><span class="lb-sum-label">Melhor</span><span class="lb-sum-val lb-pnl-pos">${best.symbol} +$${best.total_pnl_usd.toFixed(2)}</span></div>` : ''}
+    ${worst ? `<div class="lb-sum-item"><span class="lb-sum-label">Pior</span><span class="lb-sum-val lb-pnl-neg">${worst.symbol} $${worst.total_pnl_usd.toFixed(2)}</span></div>` : ''}
+  `;
+}
+
+function _lbRenderTable(items) {
+  const tbody = document.getElementById('lb-tbody');
+  const emptyEl = document.getElementById('lb-empty');
+  if (!tbody) return;
+
+  if (!items || items.length === 0) {
+    tbody.innerHTML = '';
+    if (emptyEl) emptyEl.classList.remove('hidden');
+    return;
+  }
+  if (emptyEl) emptyEl.classList.add('hidden');
+
+  // Sort
+  const sorted = [...items].sort((a, b) => {
+    let av = a[_lbSortCol], bv = b[_lbSortCol];
+    if (av == null) av = _lbSortDir === 'desc' ? -Infinity : Infinity;
+    if (bv == null) bv = _lbSortDir === 'desc' ? -Infinity : Infinity;
+    return _lbSortDir === 'desc' ? bv - av : av - bv;
+  });
+
+  tbody.innerHTML = sorted.map((item, idx) => {
+    const wr  = item.win_rate != null ? (item.win_rate * 100).toFixed(1) : null;
+    const wrBar = wr != null
+      ? `<div class="lb-win-bar">
+           <div class="lb-win-track"><div class="lb-win-fill" style="width:${wr}%"></div></div>
+           <span>${wr}%</span>
+         </div>`
+      : '<span class="lb-sharpe-na">—</span>';
+    const pnlClass = _lbPnlClass(item.total_pnl_usd);
+    const avgClass = _lbPnlClass(item.avg_pnl_usd);
+    const sharpeVal = item.sharpe != null
+      ? `<span class="${item.sharpe >= 1 ? 'lb-sharpe-pos' : item.sharpe < 0 ? 'lb-sharpe-neg' : ''}">${item.sharpe.toFixed(2)}</span>`
+      : '<span class="lb-sharpe-na">—</span>';
+    const bestPnl  = item.best_trade_usd  != null ? `<span class="lb-pnl-pos">+$${item.best_trade_usd.toFixed(2)}</span>`  : '—';
+    const worstPnl = item.worst_trade_usd != null ? `<span class="lb-pnl-neg">$${item.worst_trade_usd.toFixed(2)}</span>` : '—';
+    const sign = item.total_pnl_usd >= 0 ? '+' : '';
+    return `<tr>
+      <td class="lb-rank">${idx + 1}</td>
+      <td class="lb-sym"><span class="lb-sym-pill">${item.symbol}</span></td>
+      <td class="${pnlClass}">${sign}$${(item.total_pnl_usd||0).toFixed(2)}</td>
+      <td>${wrBar}</td>
+      <td>${item.trades}</td>
+      <td class="${avgClass}">${item.avg_pnl_usd != null ? (item.avg_pnl_usd >= 0 ? '+' : '') + '$' + Math.abs(item.avg_pnl_usd).toFixed(2) : '—'}</td>
+      <td>${sharpeVal}</td>
+      <td class="lb-best">${bestPnl}</td>
+      <td class="lb-worst">${worstPnl}</td>
+    </tr>`;
+  }).join('');
+
+  // Update sort header indicators
+  document.querySelectorAll('#lb-table .lb-sortable').forEach(th => {
+    th.classList.remove('lb-sort-asc', 'lb-sort-desc');
+    if (th.dataset.col === _lbSortCol) {
+      th.classList.add(_lbSortDir === 'desc' ? 'lb-sort-desc' : 'lb-sort-asc');
+    }
+  });
+}
+
+async function loadLeaderboard(days) {
+  if (days != null) _lbDays = days;
+  const errorEl = document.getElementById('lb-error');
+  const footerEl = document.getElementById('lb-footer');
+  if (errorEl) errorEl.classList.add('hidden');
+
+  try {
+    const headers = {};
+    const tok = getDashboardToken();
+    if (tok) headers['X-Mekka-Token'] = tok;
+    const res = await fetch(`/api/leaderboard?days=${_lbDays}`, { headers });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const d = await res.json();
+    _lbData = d.items || [];
+    _lbRenderSummary(_lbData);
+    _lbRenderTable(_lbData);
+    if (footerEl) footerEl.textContent = `Atualizado ${new Date(d.generated_at).toLocaleTimeString()} · ${_lbDays}d`;
+  } catch (e) {
+    console.warn('[Leaderboard] load error:', e);
+    if (errorEl) { errorEl.textContent = `Erro ao carregar leaderboard: ${e.message}`; errorEl.classList.remove('hidden'); }
+  }
+}
+
+function _lbSetupInteractions() {
+  // Sort columns
+  document.querySelectorAll('#lb-table .lb-sortable').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      if (_lbSortCol === col) {
+        _lbSortDir = _lbSortDir === 'desc' ? 'asc' : 'desc';
+      } else {
+        _lbSortCol = col;
+        _lbSortDir = 'desc';
+      }
+      _lbRenderTable(_lbData);
+    });
+  });
+
+  // Days selector
+  const sel = document.getElementById('lb-days-select');
+  if (sel) {
+    sel.addEventListener('change', () => loadLeaderboard(parseInt(sel.value, 10)));
+  }
+
+  // Refresh button
+  const btn = document.getElementById('lb-refresh-btn');
+  if (btn) {
+    btn.addEventListener('click', () => loadLeaderboard());
+  }
+}
+
+function bootLeaderboard() {
+  _lbSetupInteractions();
+  loadLeaderboard(_lbDays);
+  _lbTimer = _clearTimer(_lbTimer);
+  if (!document.hidden) {
+    _lbTimer = setInterval(() => {
+      const sec = document.getElementById('sec-leaderboard');
+      if (sec && !sec.classList.contains('hidden')) loadLeaderboard();
+    }, 120_000);  // auto-refresh 2 min
+  }
 }
 
 // Chart.js is loaded with `defer`, so wait for DOMContentLoaded once.
@@ -4417,6 +4798,9 @@ function _mkRunAllBoots() {
   safeBoot(bootTradesTimeline,  'bootTradesTimeline');
   safeBoot(bootFunding,         'bootFunding');
   safeBoot(bootMemory,          'bootMemory');
+  safeBoot(bootRiskPanel,       'bootRiskPanel');
+  safeBoot(bootEquityCurve,    'bootEquityCurve');
+  safeBoot(bootLeaderboard,    'bootLeaderboard');
   // v2 must always run — page isolation, topbar, TradeNow
   _mkBootDashboardV2();
 }

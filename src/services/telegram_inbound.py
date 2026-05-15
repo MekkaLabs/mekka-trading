@@ -77,6 +77,14 @@ _HELP_TEXT = (
     "/mode [X]   — mostra ou muda modo (conservative/balanced/aggressive)\n"
     "/report     — envia relatório diário agora (Slack + Telegram)\n"
     "/ping       — testa conexão e exibe status do bot\n"
+    "/risk       — painel de risco ao vivo (exposure, PnL, cooldowns, blacklist, ATR)\n"
+    "/leaderboard [N] — top N símbolos por PnL (padrão: 5)\n"
+    "/stats [N]  — estatísticas globais N dias (padrão: 30)\n"
+    "/unblacklist [SYMBOL] — remove símbolo da blacklist manual\n"
+    "/dryrun [on|off] — ativa/desativa modo dry-run (sem execução)\n"
+    "/weekly     — envia relatório semanal agora (Deadpool 7 dias)\n"
+    "/equity     — breakdown de equity (inicial + realizado + não realizado)\n"
+    "/balance    — saldo live da exchange (Hyperliquid clearinghouse)\n"
     "/help       — esta mensagem"
 )
 
@@ -141,7 +149,7 @@ class TelegramInboundPoller:
         params = {
             "offset": last_update_id,
             "timeout": settings.telegram_inbound_long_poll_timeout_seconds,
-            "allowed_updates": ["message"],
+            "allowed_updates": ["message", "callback_query"],  # Story 074: include inline button callbacks
         }
         timeout = aiohttp.ClientTimeout(
             total=settings.telegram_inbound_long_poll_timeout_seconds + 5
@@ -164,7 +172,14 @@ class TelegramInboundPoller:
         """
         Route one inbound update to the appropriate handler.
         Silently drops messages from chat IDs not in the allowlist.
+        Handles both text messages AND callback_query (Story 074 inline buttons).
         """
+        # ── Story 074: callback_query (inline keyboard button press) ──────
+        callback_query = update.get("callback_query")
+        if callback_query:
+            await self._handle_callback_query(callback_query)
+            return
+
         message = update.get("message") or {}
         chat = message.get("chat") or {}
         chat_id = str(chat.get("id", ""))
@@ -210,13 +225,21 @@ class TelegramInboundPoller:
             "/mode": self._cmd_mode,
             "/report": self._cmd_report,
             "/ping": self._cmd_ping,
+            "/risk": self._cmd_risk,
+            "/leaderboard": self._cmd_leaderboard,
+            "/stats": self._cmd_stats,
+            "/unblacklist": self._cmd_unblacklist,
+            "/dryrun": self._cmd_dryrun,
+            "/weekly": self._cmd_weekly,       # Story 101
+            "/equity": self._cmd_equity,       # Story 103
+            "/balance": self._cmd_balance,     # Story 108
             "/help": self._cmd_help,
         }
 
         handler = handlers.get(command)
         if handler is None:
             reply = await self._cmd_help()
-        elif command in ("/pnl", "/perf", "/mode"):
+        elif command in ("/pnl", "/perf", "/mode", "/leaderboard", "/stats", "/unblacklist", "/dryrun"):
             reply = await handler(args)  # type: ignore[call-arg]
         else:
             reply = await handler()  # type: ignore[call-arg]
@@ -541,12 +564,464 @@ class TelegramInboundPoller:
             self._log.warning(f"_cmd_report error: {exc}")
             return f"⚠️ Erro ao enviar relatório: {exc}"
 
+    async def _cmd_weekly(self) -> str:
+        """
+        /weekly — dispara o relatório semanal Deadpool on-demand. Story 101.
+        """
+        try:
+            from src.dashboard.daily_reporter import DailyReporter  # noqa: WPS433
+            reporter = DailyReporter(repo=self._repo)
+            result = await reporter.send_weekly_report(force=True)
+            await reporter.close()
+
+            if result.get("skipped"):
+                return f"⚠️ Relatório semanal não enviado: {result.get('reason', 'sem targets')}"
+
+            parts = []
+            if result.get("sent_telegram"):
+                parts.append("Telegram ✅")
+            if result.get("sent_slack"):
+                parts.append("Slack ✅")
+            if not parts:
+                return "⚠️ Nenhum webhook respondeu com sucesso."
+
+            pnl_w = result.get("week_pnl_usd")
+            trades_w = result.get("week_trades")
+            pnl_str = f"\n  PnL semana: ${pnl_w:+.2f}" if pnl_w is not None else ""
+            trades_str = f"\n  Trades: {trades_w}" if trades_w is not None else ""
+            return (
+                f"📅 Relatório semanal enviado para {', '.join(parts)}"
+                f"\nSemana: {result.get('week', '?')}"
+                f"{pnl_str}{trades_str}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"_cmd_weekly error: {exc}")
+            return f"⚠️ Erro ao enviar relatório semanal: {exc}"
+
+    async def _cmd_equity(self) -> str:
+        """
+        /equity — breakdown de equity em tempo real. Story 103.
+        Mostra: capital inicial + PnL realizado + PnL não realizado + equity total.
+        """
+        try:
+            from src.dashboard.positions_provider import get_paper_equity_summary  # noqa: WPS433
+            summary = await get_paper_equity_summary()
+            initial = summary.get("initial_capital", 0.0)
+            realized = summary.get("realized_pnl_usd", 0.0)
+            unrealized = summary.get("unrealized_pnl_usd", 0.0)
+            equity = summary.get("equity_usd", 0.0)
+            r_emoji = "🟢" if realized >= 0 else "🔴"
+            u_emoji = "🟢" if unrealized >= 0 else "🔴"
+            e_emoji = "🟢" if equity >= initial else "🔴"
+            return (
+                f"💰 *Equity Breakdown*\n"
+                f"\n"
+                f"Capital inicial : ${initial:,.2f}\n"
+                f"{r_emoji} PnL realizado  : ${realized:+,.2f}\n"
+                f"{u_emoji} PnL n. realiz. : ${unrealized:+,.2f}\n"
+                f"──────────────────\n"
+                f"{e_emoji} *Equity total  : ${equity:,.2f}*\n"
+                f"\n"
+                f"Variação        : {((equity - initial) / max(initial, 1)) * 100:+.2f}%"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"_cmd_equity error: {exc}")
+            return f"⚠️ Erro ao calcular equity: {exc}"
+
+    async def _cmd_balance(self) -> str:
+        """
+        /balance — saldo live do Hyperliquid clearinghouse. Story 108.
+
+        Chama a API REST do Hyperliquid info endpoint para obter o estado
+        da conta: accountValue (equity), totalMarginUsed, withdrawable.
+        Funciona apenas com ACTIVE_EXCHANGE=hyperliquid.
+        """
+        try:
+            import aiohttp  # noqa: WPS433
+            from src.config.settings import settings as _s  # noqa: WPS433
+
+            _base = _s.hyperliquid_base_url  # e.g. https://api.hyperliquid-testnet.xyz
+            _url = f"{_base}/info"
+            _wallet = _s.hyperliquid_wallet_address
+
+            _payload = {"type": "clearinghouseState", "user": _wallet}
+            async with aiohttp.ClientSession() as _sess:
+                async with _sess.post(
+                    _url,
+                    json=_payload,
+                    timeout=aiohttp.ClientTimeout(total=8.0),
+                ) as _resp:
+                    if _resp.status != 200:
+                        return f"⚠️ Hyperliquid API retornou HTTP {_resp.status}"
+                    _data = await _resp.json()
+
+            # Parse marginSummary
+            _ms = _data.get("marginSummary") or {}
+            _acv = float(_ms.get("accountValue") or 0.0)
+            _tmu = float(_ms.get("totalMarginUsed") or 0.0)
+            _wtd = float(_ms.get("withdrawable") or _data.get("withdrawable") or 0.0)
+            _free = _acv - _tmu
+
+            _net = _s.hyperliquid_network.upper()
+            _eq_emoji = "🟢" if _acv > 0 else "⚪"
+            _free_emoji = "🟢" if _free >= 0 else "🔴"
+
+            return (
+                f"🏦 *Hyperliquid Balance* ({_net})\n"
+                f"\n"
+                f"{_eq_emoji} Account value  : ${_acv:,.2f}\n"
+                f"   Margin usado  : ${_tmu:,.2f}\n"
+                f"{_free_emoji} Margem livre   : ${_free:,.2f}\n"
+                f"   Withdrawable  : ${_wtd:,.2f}\n"
+                f"\n"
+                f"Carteira: `{_wallet[:8]}...{_wallet[-4:]}`"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"_cmd_balance error: {exc}")
+            return f"⚠️ Erro ao consultar balance: {exc}"
+
+    async def _cmd_stats(self, args: list[str] | None = None) -> str:
+        """
+        /stats [N] — estatísticas globais nos últimos N dias (padrão 30). Story 084.
+        """
+        window = 30
+        if args:
+            try:
+                window = max(1, min(int(args[0]), 365))
+            except (ValueError, IndexError):
+                pass
+        try:
+            s = await self._repo.get_pnl_summary(window_days=window)
+            w = s["window"]
+            at = s["all_time"]
+            eq = await self._repo.get_today_peak_equity()
+            wr_w = f"{w['win_rate']*100:.1f}%" if w.get("win_rate") is not None else "n/a"
+            wr_at = f"{at['win_rate']*100:.1f}%" if at.get("win_rate") is not None else "n/a"
+            sh = s.get("sharpe_estimate")
+            sh_str = f"{sh:.2f}" if sh is not None else "n/a"
+            pnl_icon = "🟢" if w["pnl_usd"] >= 0 else "🔴"
+            return (
+                f"📊 Stats — últimos {window}d\n"
+                f"PnL     : {pnl_icon} ${w['pnl_usd']:+.2f}\n"
+                f"Trades  : {w['trades']} (↑{w['wins']} ↓{w['losses']})\n"
+                f"Win rate: {wr_w}\n"
+                f"Drawdown: {w['max_drawdown_pct']*100:.2f}%\n"
+                f"Sharpe  : {sh_str}\n"
+                f"Equity  : ${eq:,.2f}\n\n"
+                f"All-time: ${at['pnl_usd']:+.2f} | {at['trades']} trades | WR={wr_at}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ Erro ao calcular stats: {exc}"
+
+    async def _cmd_unblacklist(self, args: list[str] | None = None) -> str:
+        """
+        /unblacklist [SYMBOL] — remove um símbolo da auto-blacklist. Story 085.
+        Se nenhum símbolo for passado, lista os símbolos em blacklist atualmente.
+        """
+        import json as _json  # noqa: WPS433
+        from datetime import datetime, timezone  # noqa: WPS433
+        from pathlib import Path  # noqa: WPS433
+
+        data_dir = Path("data")
+        now_utc = datetime.now(timezone.utc)
+
+        if not args:
+            # List active blacklists
+            active = []
+            if data_dir.exists():
+                for bf in data_dir.glob(".blacklist_*.json"):
+                    try:
+                        bl = _json.loads(bf.read_text())
+                        exp_str = bl.get("expires", "")
+                        if exp_str:
+                            exp_dt = datetime.fromisoformat(exp_str)
+                            if exp_dt.tzinfo is None:
+                                exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                            if now_utc < exp_dt:
+                                rem_h = round((exp_dt - now_utc).total_seconds() / 3600, 1)
+                                active.append(f"  🚫 {bl.get('symbol','?')} — expira em {rem_h}h")
+                    except Exception:  # noqa: BLE001
+                        pass
+            if not active:
+                return "✅ Nenhum símbolo em blacklist ativa."
+            return "Símbolos em blacklist:\n" + "\n".join(active) + "\n\nUse /unblacklist SYMBOL para remover."
+
+        symbol = args[0].upper().strip()
+        bl_file = data_dir / f".blacklist_{symbol}.json"
+        if not bl_file.exists():
+            return f"ℹ️ {symbol} não está em blacklist (ou já expirou)."
+        try:
+            bl_file.unlink()
+            self._log.warning("[Telegram] /unblacklist: %s removido da blacklist manualmente", symbol)
+            return f"✅ {symbol} removido da blacklist. Próximo sinal será avaliado normalmente."
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ Erro ao remover {symbol} da blacklist: {exc}"
+
+    async def _cmd_dryrun(self, args: list[str] | None = None) -> str:
+        """
+        /dryrun [on|off] — ativa ou desativa o modo dry-run em runtime. Story 091.
+        Dry-run = pipeline completo sem execução real de trades.
+        """
+        try:
+            from src.config.runtime_mode import get_params, set_runtime_flag  # noqa: WPS433
+        except ImportError:
+            # Fallback: use settings directly via os.environ sentinel
+            pass
+
+        try:
+            from src.config.settings import settings as _s  # noqa: WPS433
+            import os  # noqa: WPS433
+            if not args:
+                current = os.environ.get("MEKKA_DRY_RUN", "0") == "1" or getattr(_s, "dry_run_mode", False)
+                state = "ON 🚧" if current else "OFF ✅"
+                return (
+                    f"🔬 Dry-Run Mode: {state}\n"
+                    "Em dry-run, sinais são gerados e validados mas NÃO executados.\n"
+                    "Use /dryrun on|off para alternar."
+                )
+            target = args[0].lower()
+            if target == "on":
+                os.environ["MEKKA_DRY_RUN"] = "1"
+                self._log.warning("[Telegram] Dry-run mode ENABLED via /dryrun on")
+                return "🚧 Dry-Run ATIVADO — trades serão simulados mas não executados."
+            elif target == "off":
+                os.environ.pop("MEKKA_DRY_RUN", None)
+                self._log.warning("[Telegram] Dry-run mode DISABLED via /dryrun off")
+                return "✅ Dry-Run DESATIVADO — trades serão executados normalmente."
+            else:
+                return "❌ Use /dryrun on ou /dryrun off."
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ Erro no dry-run toggle: {exc}"
+
+    async def _cmd_leaderboard(self, args: list[str] | None = None) -> str:
+        """
+        /leaderboard [N] — top N símbolos por PnL total (padrão 5, máx 15).
+        Story 081.
+        """
+        limit = 5
+        days = 90
+        if args:
+            try:
+                limit = max(1, min(int(args[0]), 15))
+            except (ValueError, IndexError):
+                pass
+            if len(args) > 1:
+                try:
+                    days = max(7, min(int(args[1]), 365))
+                except (ValueError, IndexError):
+                    pass
+
+        try:
+            items = await self._repo.list_symbol_stats(lookback_days=days)
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"_cmd_leaderboard error: {exc}")
+            return f"⚠️ Erro ao buscar leaderboard: {exc}"
+
+        if not items:
+            return f"🏆 Leaderboard ({days}d): nenhum trade registrado ainda."
+
+        top = items[:limit]
+        lines = [f"🏆 Top {len(top)} Símbolos — últimos {days}d\n"]
+        medals = ["🥇", "🥈", "🥉"]
+        for i, item in enumerate(top):
+            icon = medals[i] if i < 3 else f"  {i+1}."
+            wr = f"{item['win_rate']*100:.1f}%" if item.get("win_rate") is not None else "n/a"
+            pnl = item.get("total_pnl_usd", 0)
+            sign = "+" if pnl >= 0 else ""
+            sharpe = f" Sharpe={item['sharpe']:.2f}" if item.get("sharpe") is not None else ""
+            lines.append(
+                f"{icon} {item['symbol']}: {sign}${pnl:.2f} "
+                f"({item['trades']} trades, WR={wr}{sharpe})"
+            )
+
+        # Summary footer
+        total_pnl = sum(x.get("total_pnl_usd", 0) for x in items)
+        total_trades = sum(x.get("trades", 0) for x in items)
+        sign_t = "+" if total_pnl >= 0 else ""
+        lines.append(f"\nTotal geral: {sign_t}${total_pnl:.2f} em {total_trades} trades ({len(items)} símbolos)")
+        return "\n".join(lines)
+
+    async def _cmd_risk(self) -> str:
+        """
+        /risk — painel de risco ao vivo: exposure, PnL diário, cooldowns,
+        blacklist e ATR por ativo. Story 078.
+        """
+        import json as _json  # noqa: WPS433
+        from datetime import datetime, timezone, timedelta  # noqa: WPS433
+        from pathlib import Path  # noqa: WPS433
+
+        now_utc = datetime.now(timezone.utc)
+        lines: list[str] = ["🛡️ Mekka — Painel de Risco\n"]
+
+        # ── Exposure ──────────────────────────────────────────────────
+        try:
+            _positions = await self._repo.list_paper_filled_trades(limit=500)
+            from collections import defaultdict  # noqa: WPS433
+            _lq: dict = defaultdict(float)
+            _sq: dict = defaultdict(float)
+            _ln: dict = defaultdict(float)
+            _sn: dict = defaultdict(float)
+            for t in _positions:
+                sym = (t.symbol or "").upper()
+                qty = float(t.quantity or 0)
+                price = float(t.avg_price or 0)
+                if (t.side or "long").lower() == "long":
+                    _lq[sym] += qty; _ln[sym] += qty * price
+                else:
+                    _sq[sym] += qty; _sn[sym] += qty * price
+            _notional = 0.0
+            for sym in set(_lq) | set(_sq):
+                net = _lq[sym] - _sq[sym]
+                if net > 1e-8:
+                    _notional += _ln[sym]
+                elif net < -1e-8:
+                    _notional += _sn[sym]
+            _equity = await self._repo.get_today_peak_equity()
+            _cap = _equity * settings.max_portfolio_exposure_pct
+            _used_pct = round(_notional / _cap * 100, 1) if _cap > 0 else 0.0
+            _icon = "🟢" if _used_pct < 60 else ("🟡" if _used_pct < 85 else "🔴")
+            lines.append(
+                f"📊 Exposure: {_icon} ${_notional:,.0f} / ${_cap:,.0f} "
+                f"({_used_pct}% de {settings.max_portfolio_exposure_pct*100:.0f}% equity)"
+            )
+        except Exception as _e:  # noqa: BLE001
+            lines.append(f"📊 Exposure: ⚠️ erro ({_e})")
+
+        # ── Daily PnL ─────────────────────────────────────────────────
+        try:
+            _pnl = await self._repo.get_today_pnl_usd()
+            _eq = _equity if "_equity" in dir() else await self._repo.get_today_peak_equity()
+            _pnl_pct = round(_pnl / _eq * 100, 2) if _eq > 0 else 0.0
+            _kill = settings.max_daily_drawdown_pct * 100
+            _target = settings.daily_profit_target_pct * 100
+            _pnl_icon = "🟢" if _pnl >= 0 else ("🟡" if _pnl_pct > -_kill / 2 else "🔴")
+            lines.append(
+                f"💰 PnL hoje: {_pnl_icon} ${_pnl:+.2f} ({_pnl_pct:+.2f}%) "
+                f"| target +{_target:.0f}% | kill -{_kill:.0f}%"
+            )
+        except Exception as _e:  # noqa: BLE001
+            lines.append(f"💰 PnL hoje: ⚠️ erro ({_e})")
+
+        # ── Cooldowns ─────────────────────────────────────────────────
+        cooldown_lines: list[str] = []
+        if settings.reentry_cooldown_minutes > 0:
+            try:
+                for _sym in settings.trading_assets:
+                    _sl_time = await self._repo.get_last_sl_close_time(
+                        symbol=_sym, lookback_minutes=settings.reentry_cooldown_minutes
+                    )
+                    if _sl_time is not None:
+                        _ts = _sl_time if _sl_time.tzinfo else _sl_time.replace(tzinfo=timezone.utc)
+                        _elapsed = (now_utc - _ts).total_seconds() / 60
+                        _remaining = max(0.0, settings.reentry_cooldown_minutes - _elapsed)
+                        cooldown_lines.append(f"  ⏳ {_sym}: {_remaining:.0f}min restantes")
+            except Exception:  # noqa: BLE001
+                pass
+        if cooldown_lines:
+            lines.append("🔒 Cooldowns:\n" + "\n".join(cooldown_lines))
+        else:
+            lines.append("🔒 Cooldowns: nenhum")
+
+        # ── Blacklist ─────────────────────────────────────────────────
+        bl_lines: list[str] = []
+        try:
+            _data_dir = Path("data")
+            if _data_dir.exists():
+                for _bl_file in _data_dir.glob(".blacklist_*.json"):
+                    try:
+                        _bl = _json.loads(_bl_file.read_text())
+                        _exp_str = _bl.get("expires", "")
+                        if _exp_str:
+                            _exp_dt = datetime.fromisoformat(_exp_str)
+                            if _exp_dt.tzinfo is None:
+                                _exp_dt = _exp_dt.replace(tzinfo=timezone.utc)
+                            if now_utc < _exp_dt:
+                                _rem_h = round((_exp_dt - now_utc).total_seconds() / 3600, 1)
+                                _hits = _bl.get("consecutive_sl_hits", 0)
+                                bl_lines.append(
+                                    f"  🚫 {_bl.get('symbol','?')}: "
+                                    f"{_hits}× SL, expira em {_rem_h}h"
+                                )
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception:  # noqa: BLE001
+            pass
+        if bl_lines:
+            lines.append("🚫 Blacklist:\n" + "\n".join(bl_lines))
+        else:
+            lines.append("🚫 Blacklist: nenhum símbolo banido")
+
+        # ── ATR ───────────────────────────────────────────────────────
+        if settings.atr_sizing_enabled:
+            try:
+                from src.analytics.atr import compute_atr_pct as _atr_fn  # noqa: WPS433
+                atr_parts: list[str] = []
+                for _sym in settings.trading_assets:
+                    try:
+                        _atr_v = await _atr_fn(_sym, lookback=settings.atr_lookback_candles)
+                        _atr_s = f"{_atr_v:.2f}%" if _atr_v is not None else "n/a"
+                        atr_parts.append(f"{_sym}={_atr_s}")
+                    except Exception:  # noqa: BLE001
+                        atr_parts.append(f"{_sym}=err")
+                if atr_parts:
+                    lines.append("📐 ATR: " + "  ".join(atr_parts))
+            except Exception:  # noqa: BLE001
+                pass
+
+        lines.append(f"\n🕒 {now_utc.strftime('%H:%M:%S UTC')}")
+        return "\n".join(lines)
+
     async def _cmd_help(self) -> str:
         return _HELP_TEXT
 
     # ------------------------------------------------------------------
     # HTTP helper
     # ------------------------------------------------------------------
+
+    async def _handle_callback_query(self, callback_query: dict) -> None:
+        """Story 074 — Handle inline keyboard button presses (trade approval).
+
+        Expected callback_data format:  "approve:<trade_id>" or "reject:<trade_id>"
+        Resolves the pending approval event via trade_approval.resolve().
+        Always answers the callback to dismiss the Telegram loading spinner.
+        """
+        import aiohttp  # noqa: WPS433
+
+        cq_id = callback_query.get("id", "")
+        cq_from = callback_query.get("from") or {}
+        cq_chat_id = str((callback_query.get("message") or {}).get("chat", {}).get("id", ""))
+        data: str = callback_query.get("data", "")
+
+        # Security: verify sender is in allowlist
+        sender_id = str(cq_from.get("id", ""))
+        allowed = settings.telegram_inbound_allowed_chat_ids
+        if not allowed:
+            allowed = {settings.telegram_chat_id}
+        if sender_id not in allowed and cq_chat_id not in allowed:
+            self._log.warning("[TradeApproval] callback from unknown sender=%s — dropped", sender_id)
+            return
+
+        # Answer the callback query (removes the spinner)
+        try:
+            url_answer = _TG_API.format(token=settings.telegram_bot_token, method="answerCallbackQuery")
+            async with aiohttp.ClientSession() as session:
+                await session.post(url_answer, json={"callback_query_id": cq_id, "text": "✅ Recebido"})
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Parse approval/reject
+        if not data or ":" not in data:
+            return
+        action_str, trade_id = data.split(":", 1)
+        approved = action_str.strip().lower() == "approve"
+
+        try:
+            from src.services.trade_approval import resolve as _resolve  # noqa: WPS433
+            resolved = _resolve(trade_id, approved)
+            if not resolved:
+                self._log.debug("[TradeApproval] trade_id %s not found (expired?)", trade_id)
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning("[TradeApproval] resolve error: %s", exc)
 
     async def _send(self, chat_id: str, text: str) -> bool:
         """Send a reply to chat_id. Returns True on success, False on error."""

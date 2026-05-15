@@ -391,6 +391,91 @@ class MekkaRepository:
             ).scalars().all()
             return list(rows)
 
+    # ------------------------------------------------------------------
+    # Story 069 — Re-entry cooldown: last Cyclops SL close for symbol
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def get_last_sl_close_time(symbol: str, lookback_minutes: int = 120) -> Optional[datetime]:
+        """Return the timestamp of the most recent Cyclops SL-triggered close
+        for ``symbol`` within ``lookback_minutes``, or None if no such close exists.
+
+        A Cyclops close is identified by ``raw.metadata.triggered_by == 'cyclops'``
+        AND ``raw.metadata.trigger_reason`` containing 'SL'.
+        """
+        from datetime import timedelta
+        since = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
+        async with get_session() as session:
+            rows = (
+                await session.execute(
+                    select(TradeRecord)
+                    .where(
+                        TradeRecord.symbol == symbol.upper(),
+                        TradeRecord.timestamp >= since,
+                    )
+                    .order_by(desc(TradeRecord.timestamp))
+                    .limit(20)
+                )
+            ).scalars().all()
+
+        for row in rows:
+            try:
+                raw: dict = row.raw or {}
+                meta: dict = raw.get("metadata") or {}
+                if meta.get("triggered_by") == "cyclops":
+                    reason: str = meta.get("trigger_reason", "")
+                    if "SL" in reason or "sl" in reason.lower():
+                        return row.timestamp if row.timestamp.tzinfo else row.timestamp.replace(tzinfo=timezone.utc)
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
+    # ------------------------------------------------------------------
+    # Story 071 — Consecutive SL strike counter per symbol
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def count_consecutive_sl_hits(symbol: str, lookback_trades: int = 20) -> int:
+        """Return the number of consecutive Cyclops SL closes at the tail of
+        the recent trade history for ``symbol``.
+
+        Walks backwards through the last ``lookback_trades`` Cyclops-tagged
+        paper trades for the symbol. Stops as soon as it encounters a trade
+        that is NOT an SL close (e.g. TP close, manual close, scale-out).
+
+        Returns 0 if no recent SL closes are found.
+        """
+        async with get_session() as session:
+            rows = (
+                await session.execute(
+                    select(TradeRecord)
+                    .where(TradeRecord.symbol == symbol.upper())
+                    .order_by(desc(TradeRecord.timestamp))
+                    .limit(lookback_trades)
+                )
+            ).scalars().all()
+
+        consecutive = 0
+        for row in rows:
+            try:
+                raw: dict = row.raw or {}
+                meta: dict = raw.get("metadata") or {}
+                triggered_by = meta.get("triggered_by", "")
+                trigger_reason: str = meta.get("trigger_reason", "")
+                # Only count closes made by Cyclops via SL (not TP or scale-out)
+                if triggered_by == "cyclops" and (
+                    "SL" in trigger_reason or "sl" in trigger_reason.lower()
+                ):
+                    consecutive += 1
+                elif triggered_by in ("cyclops", "cyclops_scale_out"):
+                    # A TP or scale-out close breaks the SL streak
+                    break
+                # Non-Cyclops trades (manual, IronMan opens) are ignored and
+                # do NOT break the streak — only Cyclops closes count.
+            except Exception:  # noqa: BLE001
+                continue
+        return consecutive
+
     @staticmethod
     async def list_recent_daily_pnl(limit: int = 90) -> list[DailyPnLRecord]:
         """Most recent ``limit`` daily-PnL rows, oldest-first.
@@ -539,6 +624,449 @@ class MekkaRepository:
                 )
             ).scalar_one_or_none()
             return row
+
+    @staticmethod
+    async def count_trades_today_for_symbol(symbol: str) -> int:
+        """
+        Story 086 — Count FILLED/PAPER trades for symbol in current UTC day.
+        Used by Batman gate 3l (max trades per symbol per day).
+        """
+        today_start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    select(func.count(TradeRecord.id)).where(
+                        TradeRecord.symbol == symbol.upper(),
+                        TradeRecord.status.in_(["FILLED", "PAPER"]),
+                        TradeRecord.timestamp >= today_start,
+                    )
+                )
+            ).scalar_one()
+            return int(row or 0)
+
+    @staticmethod
+    async def get_symbol_week_pnl(symbol: str) -> float:
+        """
+        Story 100 — Sum of realized PnL for symbol in current UTC week (Mon-Sun).
+        Returns 0.0 when no trades exist.
+        """
+        import math as _m  # noqa: WPS433
+        from datetime import timedelta  # noqa: WPS433
+        now = datetime.now(timezone.utc)
+        week_start = (now - timedelta(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        async with get_session() as session:
+            rows = (
+                await session.execute(
+                    select(TradeRecord).where(
+                        TradeRecord.symbol == symbol.upper(),
+                        TradeRecord.status.in_(["FILLED", "PAPER"]),
+                        TradeRecord.timestamp >= week_start,
+                    )
+                )
+            ).scalars().all()
+        total = 0.0
+        for t in rows:
+            meta = (t.raw or {}).get("metadata") or {}
+            pnl = meta.get("realized_pnl_usd") or meta.get("pnl_usd")
+            if pnl is not None:
+                try:
+                    v = float(pnl)
+                    if not _m.isnan(v):
+                        total += v
+                except (TypeError, ValueError):
+                    pass
+        return round(total, 4)
+
+    @staticmethod
+    async def list_recent_closed_trades(limit: int = 10) -> list[TradeRecord]:
+        """
+        Stories 102 & 106 — Return the last `limit` FILLED/PAPER trades that
+        are "closed" (have a realized_pnl_usd in metadata), newest first.
+        Used by Batman gates 3o (consecutive losses) and 3p (directional bias).
+        Excludes zero-quantity sentinel trades (quantity > 0).
+        """
+        async with get_session() as session:
+            rows = (
+                await session.execute(
+                    select(TradeRecord)
+                    .where(
+                        TradeRecord.status.in_(["FILLED", "PAPER"]),
+                        TradeRecord.quantity > 0,
+                    )
+                    .order_by(desc(TradeRecord.timestamp))
+                    .limit(limit * 3)  # oversample, then filter for closed
+                )
+            ).scalars().all()
+
+        # Keep only rows that have a realized_pnl_usd in metadata (= closed trade)
+        closed: list[TradeRecord] = []
+        for t in rows:
+            raw: dict = getattr(t, "raw", {}) or {}
+            meta: dict = raw.get("metadata") or {}
+            if meta.get("realized_pnl_usd") is not None or meta.get("pnl_usd") is not None:
+                closed.append(t)
+            if len(closed) >= limit:
+                break
+
+        # Attach realized_pnl_usd as an ad-hoc attribute for convenience
+        for t in closed:
+            raw = getattr(t, "raw", {}) or {}
+            meta = raw.get("metadata") or {}
+            pnl_val = meta.get("realized_pnl_usd") or meta.get("pnl_usd")
+            try:
+                object.__setattr__(t, "realized_pnl_usd", float(pnl_val) if pnl_val is not None else None)
+            except (TypeError, ValueError, AttributeError):
+                pass
+
+        return closed
+
+    @staticmethod
+    async def get_monthly_trade_calendar(year: int, month: int) -> list[dict]:
+        """
+        Story 107 — Returns PnL and trade count grouped by calendar day
+        for the given UTC year/month.
+
+        Returns a list of dicts sorted by day:
+          [{day, count, pnl_usd, win_count, loss_count}, ...]
+        Only days with at least one trade are included.
+        """
+        import calendar as _cal
+        from datetime import datetime, timezone
+
+        _, days_in_month = _cal.monthrange(year, month)
+        start_ts = datetime(year, month, 1, 0, 0, 0, tzinfo=timezone.utc).timestamp()
+        end_ts = datetime(year, month, days_in_month, 23, 59, 59, tzinfo=timezone.utc).timestamp()
+
+        async with get_session() as session:
+            rows = (
+                await session.execute(
+                    select(TradeRecord)
+                    .where(
+                        TradeRecord.status.in_(["FILLED", "PAPER"]),
+                        TradeRecord.quantity > 0,
+                        TradeRecord.timestamp >= start_ts,
+                        TradeRecord.timestamp <= end_ts,
+                    )
+                    .order_by(TradeRecord.timestamp)
+                )
+            ).scalars().all()
+
+        day_data: dict[int, dict] = {}
+        for t in rows:
+            ts = getattr(t, "timestamp", None)
+            if ts is None:
+                continue
+            try:
+                dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+            except (ValueError, OSError):
+                continue
+            day = dt.day
+            if day not in day_data:
+                day_data[day] = {
+                    "day": day,
+                    "count": 0,
+                    "pnl_usd": 0.0,
+                    "win_count": 0,
+                    "loss_count": 0,
+                }
+            day_data[day]["count"] += 1
+            pnl_raw = getattr(t, "pnl_usd", None)
+            try:
+                pnl_val = float(pnl_raw) if pnl_raw is not None else 0.0
+            except (TypeError, ValueError):
+                pnl_val = 0.0
+            day_data[day]["pnl_usd"] = round(day_data[day]["pnl_usd"] + pnl_val, 4)
+            if pnl_val > 0:
+                day_data[day]["win_count"] += 1
+            elif pnl_val < 0:
+                day_data[day]["loss_count"] += 1
+
+        return [day_data[d] for d in sorted(day_data.keys())]
+
+    @staticmethod
+    async def get_pnl_by_hour(days: int = 30) -> dict:
+        """
+        Story 109 — Returns PnL statistics grouped by UTC hour (0-23)
+        for the last N days.
+
+        Returns a dict keyed by hour string "0".."23":
+          {"9": {hour, avg_pnl, total_pnl, count, win_count, loss_count}, ...}
+        Only hours with at least one trade are included.
+        """
+        from datetime import datetime, timezone, timedelta
+
+        cutoff_ts = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
+
+        async with get_session() as session:
+            rows = (
+                await session.execute(
+                    select(TradeRecord)
+                    .where(
+                        TradeRecord.status.in_(["FILLED", "PAPER"]),
+                        TradeRecord.quantity > 0,
+                        TradeRecord.timestamp >= cutoff_ts,
+                        TradeRecord.pnl_usd.isnot(None),
+                    )
+                    .order_by(TradeRecord.timestamp)
+                )
+            ).scalars().all()
+
+        hour_buckets: dict[int, list[float]] = {h: [] for h in range(24)}
+        for t in rows:
+            ts = getattr(t, "timestamp", None)
+            pnl_raw = getattr(t, "pnl_usd", None)
+            if ts is None or pnl_raw is None:
+                continue
+            try:
+                dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+                pnl_val = float(pnl_raw)
+            except (TypeError, ValueError, OSError):
+                continue
+            hour_buckets[dt.hour].append(pnl_val)
+
+        result: dict = {}
+        for hour, pnls in hour_buckets.items():
+            if not pnls:
+                continue
+            result[str(hour)] = {
+                "hour": hour,
+                "avg_pnl": round(sum(pnls) / len(pnls), 4),
+                "total_pnl": round(sum(pnls), 4),
+                "count": len(pnls),
+                "win_count": sum(1 for p in pnls if p > 0),
+                "loss_count": sum(1 for p in pnls if p < 0),
+            }
+        return result
+
+    @staticmethod
+    async def get_gate_rejections(limit: int = 50) -> list[dict]:
+        """
+        Story 112 — Returns the last `limit` gate rejection audit events
+        logged by Batman under event='GATE_REJECTED'.
+
+        Returns list of:
+          [{timestamp_utc, symbol, gate_id, reason, breached}, ...]
+        """
+        from datetime import datetime, timezone
+
+        async with get_session() as session:
+            rows = (
+                await session.execute(
+                    select(AuditRecord)
+                    .where(AuditRecord.event == "GATE_REJECTED")
+                    .order_by(desc(AuditRecord.timestamp))
+                    .limit(limit)
+                )
+            ).scalars().all()
+
+        result: list[dict] = []
+        for r in rows:
+            payload: dict = getattr(r, "payload", {}) or {}
+            ts = getattr(r, "timestamp", None)
+            ts_str: str | None = None
+            if ts is not None:
+                try:
+                    if isinstance(ts, (int, float)):
+                        ts_str = datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+                    else:
+                        ts_str = str(ts)
+                except Exception:
+                    ts_str = str(ts)
+            result.append({
+                "timestamp_utc": ts_str,
+                "symbol": getattr(r, "symbol", None) or payload.get("symbol"),
+                "gate_id": payload.get("gate_id", "?"),
+                "reason": payload.get("reason") or getattr(r, "message", ""),
+                "breached": payload.get("breached", []),
+            })
+        return result
+
+    @staticmethod
+    async def export_signals(limit: int = 5000) -> list[dict]:
+        """
+        Story 093 — Export all signals as flat dicts for CSV/JSON download.
+        """
+        async with get_session() as session:
+            rows = (
+                await session.execute(
+                    select(SignalRecord)
+                    .order_by(desc(SignalRecord.timestamp))
+                    .limit(limit)
+                )
+            ).scalars().all()
+        result: list[dict] = []
+        for s in rows:
+            raw: dict = s.raw or {}
+            result.append({
+                "id": s.id,
+                "timestamp_utc": s.timestamp.isoformat() if s.timestamp else None,
+                "symbol": s.symbol,
+                "action": s.action,
+                "confidence": s.confidence,
+                "entry_price": s.entry_price,
+                "stop_loss": raw.get("stop_loss") or (s.raw or {}).get("metadata", {}).get("stop_loss"),
+                "take_profit": raw.get("take_profit") or (s.raw or {}).get("metadata", {}).get("take_profit"),
+                "risk_reward_ratio": raw.get("risk_reward_ratio"),
+                "size_pct": raw.get("size_pct"),
+                "leverage": raw.get("leverage"),
+                "risk_verdict": raw.get("risk_verdict"),
+                "signal_quality_score": raw.get("signal_quality_score"),
+            })
+        return result
+
+    @staticmethod
+    async def export_trades(
+        limit: int = 5000,
+        status_filter: list[str] | None = None,
+    ) -> list[dict]:
+        """
+        Story 082 — Trade Export.
+
+        Returns all trades as a list of flat dicts ready for CSV/JSON export.
+        Fields include everything in TradeRecord plus common metadata keys
+        extracted from the raw JSON blob.
+
+        Parameters
+        ----------
+        limit:
+            Maximum rows to return (default 5 000 — safety cap).
+        status_filter:
+            Optional list of status strings to include (e.g. ["FILLED", "PAPER"]).
+            None → all statuses.
+        """
+        async with get_session() as session:
+            q = select(TradeRecord).order_by(desc(TradeRecord.timestamp)).limit(limit)
+            if status_filter:
+                q = q.where(TradeRecord.status.in_(status_filter))
+            rows = (await session.execute(q)).scalars().all()
+
+        result: list[dict] = []
+        for t in rows:
+            raw: dict = t.raw or {}
+            meta: dict = raw.get("metadata") or {}
+            result.append({
+                "id": t.id,
+                "timestamp_utc": t.timestamp.isoformat() if t.timestamp else None,
+                "symbol": t.symbol,
+                "status": t.status,
+                "side": t.side,
+                "quantity": t.quantity,
+                "avg_price": t.avg_price,
+                "is_paper": getattr(t, "is_paper", None),
+                "stop_loss": meta.get("stop_loss"),
+                "take_profit": meta.get("take_profit"),
+                "realized_pnl_usd": meta.get("realized_pnl_usd") or meta.get("pnl_usd"),
+                "triggered_by": meta.get("triggered_by"),
+                "trigger_reason": meta.get("trigger_reason"),
+                "signal_confidence": meta.get("signal_confidence"),
+                "signal_action": meta.get("signal_action"),
+                "risk_verdict": meta.get("risk_verdict"),
+                "notional_usd": round(float(t.quantity or 0) * float(t.avg_price or 0), 4),
+            })
+        return result
+
+    @staticmethod
+    async def list_symbol_stats(lookback_days: int = 90) -> list[dict]:
+        """
+        Story 079 — Symbol Leaderboard.
+
+        Aggregates closed/filled trades per symbol over the last
+        ``lookback_days`` and returns a list of dicts sorted by total_pnl
+        descending:
+
+        [
+          {
+            "symbol": "BTC",
+            "trades": 12,
+            "wins": 8,
+            "losses": 4,
+            "win_rate": 0.667,
+            "total_pnl_usd": 540.0,
+            "avg_pnl_usd": 45.0,
+            "best_trade_usd": 210.0,
+            "worst_trade_usd": -85.0,
+            "sharpe": 1.23,          // None when < 3 trades
+          },
+          ...
+        ]
+
+        Only FILLED / PAPER statuses are counted.  Trades without a
+        pnl_usd value are excluded from monetary calculations but still
+        count toward the trade total.
+        """
+        import math as _math  # noqa: WPS433
+        from datetime import timedelta  # noqa: WPS433
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+
+        async with get_session() as session:
+            rows = (
+                await session.execute(
+                    select(TradeRecord)
+                    .where(
+                        TradeRecord.status.in_(["FILLED", "PAPER"]),
+                        TradeRecord.timestamp >= cutoff,
+                    )
+                    .order_by(TradeRecord.timestamp)
+                )
+            ).scalars().all()
+
+        # Group by symbol
+        from collections import defaultdict  # noqa: WPS433
+        by_sym: dict[str, list[float]] = defaultdict(list)  # symbol → [pnl values]
+        for t in rows:
+            sym = (t.symbol or "?").upper()
+            raw = t.raw or {}
+            meta = raw.get("metadata") or {}
+            pnl = meta.get("realized_pnl_usd") or meta.get("pnl_usd")
+            if pnl is not None:
+                try:
+                    by_sym[sym].append(float(pnl))
+                except (TypeError, ValueError):
+                    pass
+            else:
+                # Record trade with no pnl so trade count is accurate
+                if sym not in by_sym:
+                    by_sym[sym] = []
+
+        results: list[dict] = []
+        for sym, pnls in by_sym.items():
+            n = len(pnls)
+            wins = sum(1 for p in pnls if p > 0)
+            losses = sum(1 for p in pnls if p < 0)
+            total_pnl = sum(pnls)
+            avg_pnl = total_pnl / n if n > 0 else 0.0
+            win_rate = wins / (wins + losses) if (wins + losses) > 0 else None
+            best = max(pnls) if pnls else 0.0
+            worst = min(pnls) if pnls else 0.0
+
+            # Sharpe: mean/std of trade PnLs (dimensionless, needs ≥3 trades)
+            sharpe: Optional[float] = None
+            if n >= 3 and avg_pnl != 0:
+                variance = sum((p - avg_pnl) ** 2 for p in pnls) / (n - 1)
+                std = _math.sqrt(variance) if variance > 0 else 0.0
+                sharpe = round(avg_pnl / std, 2) if std > 0 else None
+
+            results.append({
+                "symbol": sym,
+                "trades": n,
+                "wins": wins,
+                "losses": losses,
+                "win_rate": round(win_rate, 3) if win_rate is not None else None,
+                "total_pnl_usd": round(total_pnl, 2),
+                "avg_pnl_usd": round(avg_pnl, 2),
+                "best_trade_usd": round(best, 2),
+                "worst_trade_usd": round(worst, 2),
+                "sharpe": sharpe,
+            })
+
+        # Sort by total PnL descending
+        results.sort(key=lambda x: x["total_pnl_usd"], reverse=True)
+        return results
 
     @staticmethod
     async def get_overview() -> dict:
