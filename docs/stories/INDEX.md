@@ -197,3 +197,17 @@ e redução de viés de modelo único.
 
 - [130 — Iterative Vision Reflection: loop Vision↔VisionCritic até 3 rounds](story-130-vision-reflection.md)
 - [131 — Mixture of Agents Vision: GPT-4o + Claude + GPT-4o-mini → orchestrator consenso](story-131-vision-moa.md)
+
+## Milestone 21 — Memory Intelligence + Adaptive Routing + Observability
+
+Composite scoring na memória episódica (semantic + recency + importance), dedup semântico,
+pre-reasoning do Vision antes do sinal, routing adaptativo da Layer 1 por regime e
+event bus in-process para observabilidade desacoplada.
+
+Última story entregue: **136** (MekkaEventBus — pub/sub in-process).
+
+- [132 — Memory Composite Scoring: semantic + recency_decay + importance](story-132-composite-scoring.md)
+- [133 — Vision Pre-Reasoning: reflect antes de gerar TradingSignal (CrewAI Reasoning)](story-133-vision-pre-reasoning.md)
+- [134 — Memory Consolidation: dedup semântico no add() e warm_up()](story-134-memory-consolidation.md)
+- [135 — Adaptive Layer 1 Routing: skip agents por regime de mercado (Hierarchical Process)](story-135-adaptive-routing.md)
+- [136 — MekkaEventBus: pub/sub in-process para observabilidade desacoplada](story-136-event-bus.md)

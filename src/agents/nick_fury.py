@@ -565,6 +565,22 @@ class NickFury(BaseAgent[list[CycleReport]]):
         lg_thread_id: Optional[str] = None,      # [Story 127] set when running under LangGraph
         layer1_graph: Optional[Any] = None,      # [Story 129] Layer 1 subgraph compilado
     ) -> CycleReport:
+        # Story 136 — MekkaEventBus: lazy import + fail-silent publish helpers
+        _cycle_id = lg_thread_id or f"classic:{symbol}"
+        _ts_start = datetime.now(timezone.utc).isoformat()
+
+        async def _emit(topic: str, payload: dict) -> None:
+            """Fail-silent event publish."""
+            try:
+                from src.services.event_bus import get_event_bus  # noqa: WPS433
+                await get_event_bus().publish(topic, payload)
+            except Exception as _eb_exc:  # noqa: BLE001
+                logger.debug(f"[NickFury] EventBus publish skipped: {_eb_exc}")
+
+        await _emit("cycle.start", {
+            "cycle_id": _cycle_id, "symbol": symbol, "timestamp": _ts_start,
+        })
+
         # 1. Analysis fan-out
         # Story 129 — usa Layer 1 LangGraph subgraph quando disponível (modo --langgraph).
         # Fallback para ProfessorX.run() com asyncio.gather quando não disponível.
@@ -616,6 +632,13 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 self._log.warning(f"[NickFury] reflection loop failed: {exc}")
 
         signal_id = await MekkaRepository.save_signal(signal)
+
+        # Story 136 — Publish vision.signal event
+        await _emit("vision.signal", {
+            "cycle_id": _cycle_id, "symbol": symbol,
+            "action": signal.action.value, "confidence": signal.confidence,
+            "signal_id": signal_id,
+        })
 
         # Story 063 — Episodic Memory: record actionable signals so Batman/Vision
         # can query historical win-rates for similar patterns in future cycles.
@@ -672,6 +695,13 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 "breached": approval.breached_limits,
             },
         )
+
+        # Story 136 — Publish batman.gate event
+        await _emit("batman.gate", {
+            "cycle_id": _cycle_id, "symbol": symbol,
+            "verdict": approval.verdict.value, "approved": approval.is_executable,
+            "reasons": approval.reasons,
+        })
         # Story 035 — only KILL_SWITCH triggers a push by default
         if approval.verdict == RiskVerdict.KILL_SWITCH:
             await self._telegram.alert(
@@ -797,6 +827,18 @@ class NickFury(BaseAgent[list[CycleReport]]):
         # Rich trade-opened notification for every FILLED / PAPER execution
         elif execution.status in (ExecutionStatus.FILLED, ExecutionStatus.PAPER):
             await self._telegram.trade_opened(execution=execution, signal=signal)
+
+        # Story 136 — Publish ironman.exec + cycle.end events
+        await _emit("ironman.exec", {
+            "cycle_id": _cycle_id, "symbol": symbol,
+            "status": execution.status.value, "is_paper": execution.is_paper,
+            "order_id": getattr(execution, "order_id", None),
+        })
+        _ts_end = datetime.now(timezone.utc).isoformat()
+        await _emit("cycle.end", {
+            "cycle_id": _cycle_id, "symbol": symbol,
+            "timestamp": _ts_end, "outcome": execution.status.value,
+        })
 
         return CycleReport(
             symbol=symbol,

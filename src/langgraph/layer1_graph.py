@@ -2,6 +2,7 @@
 src/langgraph/layer1_graph.py
 =================================
 Story 129 — Layer 1 Parallel Subgraph.
+Story 135 — Adaptive Layer 1 Routing (Hierarchical Process).
 
 Substitui o asyncio.gather() interno do ProfessorX por um LangGraph StateGraph
 com fan-out verdadeiro. Cada agente da Layer 1 é um nó independente — o
@@ -84,8 +85,93 @@ class Layer1State(TypedDict):
     # ── Errors (reducer: acumula) ───────────────────────────────────────────
     errors: Annotated[list[str], operator.add]
 
+    # ── Story 135 — Adaptive Routing ────────────────────────────────────────
+    skip_set: Optional[list[str]]      # nós a pular neste ciclo (None = rodar tudo)
+
     # ── Saída final ─────────────────────────────────────────────────────────
     analysis: Optional[dict]           # MarketAnalysis.model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
+# Story 135 — Adaptive Routing helpers
+# ---------------------------------------------------------------------------
+
+# Regime labels detectados pelo chart (VolatilityData.regime ou derivado do ATR)
+_REGIME_EXTREME = "EXTREME"
+_REGIME_HIGH    = "HIGH"
+_REGIME_LOW     = "LOW"
+_REGIME_NORMAL  = "NORMAL"
+
+
+def _classify_regime(chart_dict: Optional[dict]) -> str:
+    """
+    Deriva o regime de volatilidade a partir do dict do chart (MarketData).
+
+    Usa `atr_pct` quando disponível: > 5% → EXTREME, > 2% → HIGH,
+    < 0.5% → LOW, caso contrário NORMAL.
+
+    Fallback: se chart ausente ou campo não encontrado → NORMAL.
+    """
+    if chart_dict is None:
+        return _REGIME_NORMAL
+    atr_pct = chart_dict.get("atr_pct") or chart_dict.get("atr_percent")
+    if atr_pct is None:
+        # Tenta derivar do trend_strength ou regime se presentes
+        regime = chart_dict.get("regime")
+        if regime in (_REGIME_EXTREME, _REGIME_HIGH, _REGIME_LOW, _REGIME_NORMAL):
+            return regime
+        return _REGIME_NORMAL
+    atr_pct = float(atr_pct)
+    if atr_pct > 5.0:
+        return _REGIME_EXTREME
+    if atr_pct > 2.0:
+        return _REGIME_HIGH
+    if atr_pct < 0.5:
+        return _REGIME_LOW
+    return _REGIME_NORMAL
+
+
+def _decide_skip_set(chart_dict: Optional[dict]) -> list[str]:
+    """
+    Story 135 — Hierarquia de roteamento por regime.
+
+    Retorna lista de nomes de nós a pular neste ciclo. Regras:
+
+    NORMAL   → [] (todos os agentes)
+    HIGH     → ["flash"] (intra-candle momentum pouco útil em alta vol)
+    EXTREME  → ["sentiment", "flash"] (macro irrelevante em vol extrema)
+    LOW      → ["onchain", "flash"] (whale flow e momentum irrelevantes em flat)
+
+    Carrega overrides de settings via `layer1_routing_*_skip` se configurado.
+    Retorna lista vazia se layer1_routing_enabled=False (routing desabilitado).
+    """
+    try:
+        from src.config.settings import settings as _s  # noqa: WPS433
+        if not getattr(_s, "layer1_routing_enabled", False):
+            return []
+    except Exception:  # noqa: BLE001
+        return []
+
+    regime = _classify_regime(chart_dict)
+
+    try:
+        from src.config.settings import settings as _s  # noqa: WPS433
+        skip_field = f"layer1_routing_{regime.lower()}_skip"
+        skip_raw = getattr(_s, skip_field, None)
+        if skip_raw is not None:
+            # CSV de nomes de nós, ex: "sentiment,flash"
+            return [n.strip() for n in skip_raw.split(",") if n.strip()]
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Defaults embutidos
+    defaults: dict[str, list[str]] = {
+        _REGIME_NORMAL:  [],
+        _REGIME_HIGH:    ["flash"],
+        _REGIME_EXTREME: ["sentiment", "flash"],
+        _REGIME_LOW:     ["onchain", "flash"],
+    }
+    return defaults.get(regime, [])
 
 
 # ---------------------------------------------------------------------------
@@ -153,11 +239,37 @@ def build_layer1_graph(professor: "ProfessorX") -> StateGraph:
         }
 
     # ------------------------------------------------------------------ #
+    # Nó 1b — Routing (Story 135 — Adaptive Layer 1 Routing)             #
+    # ------------------------------------------------------------------ #
+
+    async def routing_node(state: Layer1State) -> dict:
+        """
+        Story 135 — Decide quais agentes pular baseado no regime de mercado.
+
+        Analisa o chart do Superman (atr_pct) para classificar o regime:
+        EXTREME / HIGH / LOW / NORMAL. Escreve skip_set no estado.
+
+        Se layer1_routing_enabled=False, skip_set=[] (todos rodando).
+        """
+        chart_dict = state.get("chart")
+        skip = _decide_skip_set(chart_dict)
+        if skip:
+            logger.info(
+                f"[L1:routing] {state['symbol']} regime="
+                f"{_classify_regime(chart_dict)} — skipping: {skip}"
+            )
+        return {"skip_set": skip, "errors": []}
+
+    # ------------------------------------------------------------------ #
     # Nó 2a — DoctorStrange (sentiment, best-effort)                      #
     # ------------------------------------------------------------------ #
 
     async def sentiment_node(state: Layer1State) -> dict:
         symbol = state["symbol"]
+        # Story 135 — skip if routing decided
+        if "sentiment" in (state.get("skip_set") or []):
+            logger.debug(f"[L1:sentiment] {symbol} skipped by routing")
+            return {"sentiment": None, "errors": []}
         try:
             data = await professor._strange.run(symbol=symbol)
             return {"sentiment": data.model_dump(mode="json"), "errors": []}
@@ -171,6 +283,10 @@ def build_layer1_graph(professor: "ProfessorX") -> StateGraph:
 
     async def onchain_node(state: Layer1State) -> dict:
         symbol = state["symbol"]
+        # Story 135 — skip if routing decided
+        if "onchain" in (state.get("skip_set") or []):
+            logger.debug(f"[L1:onchain] {symbol} skipped by routing")
+            return {"onchain": None, "errors": []}
         try:
             data = await professor._panther.run(symbol=symbol)
             return {"onchain": data.model_dump(mode="json"), "errors": []}
@@ -184,6 +300,10 @@ def build_layer1_graph(professor: "ProfessorX") -> StateGraph:
 
     async def thor_node(state: Layer1State) -> dict:
         symbol = state["symbol"]
+        # Story 135 — skip if routing decided
+        if "thor" in (state.get("skip_set") or []):
+            logger.debug(f"[L1:thor] {symbol} skipped by routing")
+            return {"volatility": None, "errors": []}
         chart_dict = state.get("chart")
         if chart_dict is None:
             return {"volatility": None, "errors": []}  # Superman falhou, skip
@@ -203,6 +323,10 @@ def build_layer1_graph(professor: "ProfessorX") -> StateGraph:
 
     async def aquaman_node(state: Layer1State) -> dict:
         symbol = state["symbol"]
+        # Story 135 — skip if routing decided
+        if "aquaman" in (state.get("skip_set") or []):
+            logger.debug(f"[L1:aquaman] {symbol} skipped by routing")
+            return {"liquidity": None, "errors": []}
         try:
             data = await professor._aquaman.run(symbol=symbol)
             return {"liquidity": data.model_dump(mode="json"), "errors": []}
@@ -216,6 +340,10 @@ def build_layer1_graph(professor: "ProfessorX") -> StateGraph:
 
     async def flash_node(state: Layer1State) -> dict:
         symbol = state["symbol"]
+        # Story 135 — skip if routing decided
+        if "flash" in (state.get("skip_set") or []):
+            logger.debug(f"[L1:flash] {symbol} skipped by routing")
+            return {"momentum": None, "errors": []}
         chart_dict = state.get("chart")
         if chart_dict is None:
             return {"momentum": None, "errors": []}  # Superman falhou, skip
@@ -342,6 +470,7 @@ def build_layer1_graph(professor: "ProfessorX") -> StateGraph:
 
     # Nós
     builder.add_node("superman", superman_node)
+    builder.add_node("routing", routing_node)   # Story 135 — Adaptive Routing
     builder.add_node("sentiment", sentiment_node)
     builder.add_node("onchain", onchain_node)
     builder.add_node("thor", thor_node)
@@ -353,12 +482,16 @@ def build_layer1_graph(professor: "ProfessorX") -> StateGraph:
     # START → superman (serial, obrigatório)
     builder.add_edge(START, "superman")
 
-    # Fan-out: superman → 5 agentes paralelos
-    builder.add_edge("superman", "sentiment")
-    builder.add_edge("superman", "onchain")
-    builder.add_edge("superman", "thor")
-    builder.add_edge("superman", "aquaman")
-    builder.add_edge("superman", "flash")
+    # Story 135: superman → routing → fan-out
+    # routing_node escreve skip_set no estado; nós secundários checam antes de rodar
+    builder.add_edge("superman", "routing")
+
+    # Fan-out: routing → 5 agentes paralelos
+    builder.add_edge("routing", "sentiment")
+    builder.add_edge("routing", "onchain")
+    builder.add_edge("routing", "thor")
+    builder.add_edge("routing", "aquaman")
+    builder.add_edge("routing", "flash")
 
     # Fan-in: todos os 5 → spiderman (aguarda conclusão de todos)
     builder.add_edge("sentiment", "spiderman")
