@@ -4,8 +4,8 @@
 arquitetural. Stories abaixo são lidas em ordem numérica dentro de cada
 bloco.
 
-Última story entregue: **046** (Equity dinâmica, Wolverine execution [C1], Cyclops [C2], equity dinâmica [C3], Bybit adapter).
-Pendentes: gates humanos H1, H3, H5, H6 (ação do operador) · H2 auto-monitorado · H4 ✅ entregue.
+Última story entregue: **125** (LLM Fallback Claude, Superman Python 3.14, Telegram pt-BR, Pixel Office 2×2).
+Stories 047–124 entregues e registradas no CHANGELOG.md (versões 0.2.0–0.8.0).
 
 ---
 
@@ -166,3 +166,14 @@ execution [C1], e agente Cyclops SL/TP monitor [C2]. Adiciona Bybit/Binance como
 exchanges alternativas via CCXT (configurável por env var).
 
 - [046 — Equity Dinâmica, Wolverine Execution, Cyclops & Bybit Adapter](story-046-dynamic-equity-wolverine-cyclops-bybit.md)
+
+---
+
+## Milestone 18 — LLM Resilience + Python 3.14 + Operator UX (Stories 047–125)
+
+Stories 047–124 cobertas no CHANGELOG.md versões 0.4.0–0.8.0:
+operador UX (Telegram commands, gates avançados, leaderboard, heatmap),
+memory episódica, risk gates 3d–3q, equity curve, Cyclops partial SL,
+calendar heatmap, Pixel Office.
+
+- [125 — LLM Fallback Claude, Superman Python 3.14, Telegram pt-BR, Pixel Office 2×2](story-125-llm-fallback-superman-py314.md)
