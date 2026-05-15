@@ -438,6 +438,101 @@ class NickFury(BaseAgent[list[CycleReport]]):
 
         return reports
 
+    # ------------------------------------------------------------------
+    # Story 126 — LangGraph checkpointed cycle
+    # ------------------------------------------------------------------
+
+    async def run_with_checkpointing(
+        self,
+        equity_usd: Optional[float] = None,
+    ) -> list:
+        """
+        Versão checkpointed do ciclo principal usando LangGraph + AsyncSqliteSaver.
+
+        Cada símbolo é um super-step com checkpoint automático entre eles.
+        Se o processo morrer durante o símbolo N, na próxima execução o ciclo
+        retoma do símbolo N (via resume do thread_id salvo no SQLite).
+
+        Story 127: quando TELEGRAM_TRADE_APPROVAL_ENABLED=true, o nó
+        process_symbol_node faz interrupt() ao chegar na aprovação de trade.
+        graph.ainvoke() retorna com o grafo em estado "interrupted". O ciclo
+        continua quando TelegramInbound recebe a resposta do operador e chama
+        graph.ainvoke(Command(resume=approved), config). O estado é durável
+        no SQLite — sobrevive a restarts do processo.
+
+        Retorna lista de dicts (CycleReport.model_dump()) em vez de CycleReport
+        — necessário porque o estado do grafo deve ser JSON-serializável.
+
+        Ativado por: python3 run.py --langgraph
+        """
+        from src.langgraph.cycle_graph import make_checkpointed_graph, make_initial_state
+        from src.langgraph.interrupt_registry import register, unregister  # Story 127
+
+        effective_equity = equity_usd or 0.0
+        initial_state = make_initial_state(equity_usd=effective_equity)
+        thread_id = initial_state["cycle_id"]  # UUID único por ciclo
+
+        self._log.info(
+            f"[NickFury:LG] Iniciando ciclo checkpointed — thread_id={thread_id}"
+        )
+
+        graph, saver = await make_checkpointed_graph(self)
+
+        # Story 127 — registrar grafo para que TelegramInbound possa resumir
+        # interrupts de aprovação de trade sem precisar recriar o grafo.
+        register(thread_id, graph, saver)
+
+        config = {"configurable": {"thread_id": thread_id}}
+
+        try:
+            final_state = await graph.ainvoke(initial_state, config=config)
+            reports = final_state.get("reports", [])
+
+            # Story 127 — verificar se o grafo foi interrompido aguardando aprovação
+            try:
+                current_graph_state = await graph.aget_state(config)
+                is_interrupted = bool(current_graph_state.next)
+            except Exception as _state_exc:
+                self._log.debug(f"[NickFury:LG] aget_state check failed: {_state_exc}")
+                is_interrupted = False
+
+            if is_interrupted:
+                self._log.info(
+                    f"[NickFury:LG] Ciclo {thread_id} PAUSADO aguardando aprovação Telegram. "
+                    "TelegramInbound retomará quando operador responder. "
+                    "Estado durável no SQLite."
+                )
+                # Não fechar o saver — TelegramInbound precisa dele para resume.
+                # unregister() + saver.conn.close() serão feitos pelo TelegramInbound
+                # após o ciclo completar (ver _handle_callback_query).
+                return reports  # retorna reports parciais (pode ser [])
+            else:
+                self._log.info(
+                    f"[NickFury:LG] Ciclo {thread_id} completo — "
+                    f"{len(reports)} reports, "
+                    f"símbolos: {final_state.get('symbols_completed', [])}"
+                )
+                return reports
+
+        except Exception as exc:
+            self._log.exception(f"[NickFury:LG] Ciclo {thread_id} falhou: {exc}")
+            raise
+        finally:
+            # Só fecha saver e desregistra se o grafo NÃO está interrupted.
+            # Se interrupted, o saver precisa sobreviver para o TelegramInbound.
+            try:
+                current_graph_state = await graph.aget_state(config)
+                if not current_graph_state.next:
+                    unregister(thread_id)
+                    await saver.conn.close()
+            except Exception:
+                # Em caso de erro no finally, fechar preventivamente
+                try:
+                    unregister(thread_id)
+                    await saver.conn.close()
+                except Exception:
+                    pass
+
     async def _cycle_for_symbol(
         self,
         symbol: str,
@@ -447,6 +542,7 @@ class NickFury(BaseAgent[list[CycleReport]]):
         open_positions: int = 0,
         running_notional_usd: float = 0.0,
         current_positions: list | None = None,  # [Story 057] correlation gate
+        lg_thread_id: Optional[str] = None,      # [Story 127] set when running under LangGraph
     ) -> CycleReport:
         # 1. Analysis fan-out
         try:
@@ -554,38 +650,82 @@ class NickFury(BaseAgent[list[CycleReport]]):
         if not approval.is_executable:
             return CycleReport(symbol=symbol, signal=signal, approval=approval)
 
-        # ── Story 074 — Telegram Trade Approval ─────────────────────
+        # ── Story 074 / Story 127 — Telegram Trade Approval ─────────────
         # Request operator confirmation via Telegram before IronMan executes.
-        # Falls open: any error in the approval flow skips and proceeds.
+        # Story 127 adds LangGraph interrupt() path when lg_thread_id is set.
+        # Falls open: any non-BaseException error skips the gate and proceeds.
         if settings.telegram_trade_approval_enabled:
             try:
                 import uuid as _uuid  # noqa: WPS433
-                from src.services.trade_approval import request_approval as _req_approval  # noqa: WPS433
                 _trade_id = f"T-{_uuid.uuid4().hex[:10].upper()}"
-                _approved = await _req_approval(
-                    trade_id=_trade_id,
-                    signal_symbol=symbol,
-                    signal_action=signal.action.value,
-                    signal_confidence=signal.confidence,
-                    entry_price=signal.entry_price,
-                    stop_loss=signal.stop_loss,
-                    take_profit=signal.take_profit,
-                    size_pct=approval.adjusted_size_pct,
-                    leverage=approval.adjusted_leverage,
-                    reasons=approval.reasons,
-                    timeout_s=settings.telegram_trade_approval_timeout_s,
-                )
+
+                if lg_thread_id is not None:
+                    # ── Story 127 — LangGraph interrupt path ──────────────
+                    # Send approval message first (with lg_ buttons so
+                    # TelegramInbound can route to the LangGraph resume path).
+                    try:
+                        from src.services.trade_approval import send_lg_approval_message as _send_lg  # noqa: WPS433
+                        await _send_lg(
+                            trade_id=_trade_id,
+                            thread_id=lg_thread_id,
+                            signal_symbol=symbol,
+                            signal_action=signal.action.value,
+                            signal_confidence=signal.confidence,
+                            entry_price=signal.entry_price,
+                            stop_loss=signal.stop_loss,
+                            take_profit=signal.take_profit,
+                            size_pct=approval.adjusted_size_pct,
+                            leverage=approval.adjusted_leverage,
+                            reasons=approval.reasons,
+                            timeout_s=settings.telegram_trade_approval_timeout_s,
+                        )
+                    except Exception as _msg_exc:  # noqa: BLE001
+                        self._log.warning("[NickFury:LG] Approval message failed (non-fatal): %s", _msg_exc)
+
+                    # Suspend graph execution — NodeInterrupt (BaseException) propagates
+                    # upward, bypassing the outer except Exception handler below.
+                    # On resume via Command(resume=True/False), returns approved value.
+                    from langgraph.types import interrupt as _lg_interrupt  # noqa: WPS433
+                    _approved = _lg_interrupt({
+                        "trade_id": _trade_id,
+                        "thread_id": lg_thread_id,
+                        "symbol": symbol,
+                        "action": signal.action.value,
+                        "confidence": signal.confidence,
+                        "entry_price": signal.entry_price,
+                    })
+                else:
+                    # ── Story 074 — Classic asyncio.Event path ────────────
+                    from src.services.trade_approval import request_approval as _req_approval  # noqa: WPS433
+                    _approved = await _req_approval(
+                        trade_id=_trade_id,
+                        signal_symbol=symbol,
+                        signal_action=signal.action.value,
+                        signal_confidence=signal.confidence,
+                        entry_price=signal.entry_price,
+                        stop_loss=signal.stop_loss,
+                        take_profit=signal.take_profit,
+                        size_pct=approval.adjusted_size_pct,
+                        leverage=approval.adjusted_leverage,
+                        reasons=approval.reasons,
+                        timeout_s=settings.telegram_trade_approval_timeout_s,
+                    )
+
                 if not _approved:
                     await MekkaRepository.log_event(
                         agent="NickFury",
                         event="TRADE_APPROVAL_REJECTED",
                         severity="INFO",
                         symbol=symbol,
-                        message=f"[074] Trade {_trade_id} rejected by operator (or timeout in live mode)",
+                        message=(
+                            f"[074/127] Trade {_trade_id} rejected by operator "
+                            f"(or timeout in live mode)"
+                        ),
                         payload={"trade_id": _trade_id, "symbol": symbol, "action": signal.action.value},
                     )
                     return CycleReport(symbol=symbol, signal=signal, approval=approval)
             except Exception as _appr_exc:  # noqa: BLE001
+                # Note: NodeInterrupt inherits from BaseException — NOT caught here.
                 self._log.warning("[NickFury] Trade approval gate error (skipped): %s", _appr_exc)
 
         # 4. Iron Man execution

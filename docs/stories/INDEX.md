@@ -4,7 +4,7 @@
 arquitetural. Stories abaixo são lidas em ordem numérica dentro de cada
 bloco.
 
-Última story entregue: **125** (LLM Fallback Claude, Superman Python 3.14, Telegram pt-BR, Pixel Office 2×2).
+Última story entregue: **127** (LangGraph interrupt() + Command(resume=...) — Trade Approval durável).
 Stories 047–124 entregues e registradas no CHANGELOG.md (versões 0.2.0–0.8.0).
 
 ---
@@ -177,3 +177,12 @@ memory episódica, risk gates 3d–3q, equity curve, Cyclops partial SL,
 calendar heatmap, Pixel Office.
 
 - [125 — LLM Fallback Claude, Superman Python 3.14, Telegram pt-BR, Pixel Office 2×2](story-125-llm-fallback-superman-py314.md)
+
+## Milestone 19 — LangGraph Durable Execution (Stories 126–129)
+
+LangGraph StateGraph envolvendo o ciclo NickFury com checkpoints SQLite,
+interrupt/resume para aprovação Telegram durável, memória semântica episódica
+e subgrafo paralelo Layer 1.
+
+- [126 — LangGraph AsyncSqliteSaver: Durable Execution](story-126-langgraph-checkpointing.md)
+- [127 — LangGraph Trade Approval: interrupt() + Command(resume=...)](story-127-lg-interrupt.md)

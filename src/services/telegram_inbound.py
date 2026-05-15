@@ -979,11 +979,19 @@ class TelegramInboundPoller:
     # ------------------------------------------------------------------
 
     async def _handle_callback_query(self, callback_query: dict) -> None:
-        """Story 074 — Handle inline keyboard button presses (trade approval).
+        """
+        Story 074 / Story 127 — Handle inline keyboard button presses (trade approval).
 
-        Expected callback_data format:  "approve:<trade_id>" or "reject:<trade_id>"
-        Resolves the pending approval event via trade_approval.resolve().
-        Always answers the callback to dismiss the Telegram loading spinner.
+        Routes to one of two paths based on callback_data prefix:
+
+        • Classic (Story 074): "approve:<trade_id>" | "reject:<trade_id>"
+          → resolves asyncio.Event via trade_approval.resolve()
+
+        • LangGraph (Story 127): "lg_approve:<thread_id>:<trade_id>" | "lg_reject:..."
+          → resumes LangGraph graph via graph.ainvoke(Command(resume=...))
+          → cleans up interrupt_registry when cycle completes
+
+        Always answers the callback query to dismiss the Telegram loading spinner.
         """
         import aiohttp  # noqa: WPS433
 
@@ -1009,9 +1017,15 @@ class TelegramInboundPoller:
         except Exception:  # noqa: BLE001
             pass
 
-        # Parse approval/reject
         if not data or ":" not in data:
             return
+
+        # ── Story 127 — LangGraph interrupt/resume path ──────────────────
+        if data.startswith("lg_approve:") or data.startswith("lg_reject:"):
+            await self._handle_lg_callback(data)
+            return
+
+        # ── Story 074 — Classic asyncio.Event path ───────────────────────
         action_str, trade_id = data.split(":", 1)
         approved = action_str.strip().lower() == "approve"
 
@@ -1022,6 +1036,83 @@ class TelegramInboundPoller:
                 self._log.debug("[TradeApproval] trade_id %s not found (expired?)", trade_id)
         except Exception as exc:  # noqa: BLE001
             self._log.warning("[TradeApproval] resolve error: %s", exc)
+
+    async def _handle_lg_callback(self, data: str) -> None:
+        """
+        Story 127 — Resume a LangGraph graph that was paused via interrupt().
+
+        callback_data format: "lg_approve:<thread_id>:<trade_id>"
+                           or "lg_reject:<thread_id>:<trade_id>"
+
+        1. Lookup the compiled graph in interrupt_registry by thread_id.
+        2. Call graph.ainvoke(Command(resume=approved), config).
+        3. If graph completes (no more pending nodes), clean up registry + saver.
+        4. If graph interrupted again (another symbol needs approval), leave
+           registry intact — next operator response will resume it again.
+        """
+        parts = data.split(":", 2)
+        if len(parts) != 3:
+            self._log.warning("[LG:callback] Malformed lg callback data: %r", data)
+            return
+
+        action_prefix, thread_id, trade_id = parts
+        approved = action_prefix == "lg_approve"
+
+        self._log.info(
+            "[LG:callback] %s trade_id=%s thread_id=%s",
+            "APPROVED" if approved else "REJECTED", trade_id, thread_id,
+        )
+
+        try:
+            from src.langgraph.interrupt_registry import get_graph, unregister  # noqa: WPS433
+        except ImportError:
+            self._log.warning("[LG:callback] interrupt_registry not available")
+            return
+
+        graph = get_graph(thread_id)
+        if graph is None:
+            self._log.warning(
+                "[LG:callback] thread_id=%s not in registry (process restarted?). "
+                "Trade approval dropped — cycle may need manual intervention.",
+                thread_id,
+            )
+            return
+
+        config = {"configurable": {"thread_id": thread_id}}
+
+        try:
+            from langgraph.types import Command  # noqa: WPS433
+            # Resume the graph with the operator's decision
+            await graph.ainvoke(Command(resume=approved), config=config)
+
+            # Check if graph completed or interrupted again (next symbol)
+            try:
+                current_state = await graph.aget_state(config)
+                is_interrupted_again = bool(current_state.next)
+            except Exception as _state_exc:
+                self._log.debug(f"[LG:callback] aget_state failed: {_state_exc}")
+                is_interrupted_again = False
+
+            if is_interrupted_again:
+                self._log.info(
+                    "[LG:callback] thread_id=%s: grafo pausado novamente "
+                    "(próximo símbolo aguardando aprovação)", thread_id,
+                )
+                # Keep registry intact — next button press will resume again
+            else:
+                self._log.info(
+                    "[LG:callback] thread_id=%s: ciclo LangGraph completo — "
+                    "limpando registry", thread_id,
+                )
+                saver = unregister(thread_id)
+                if saver is not None:
+                    try:
+                        await saver.conn.close()
+                    except Exception as _close_exc:
+                        self._log.debug("[LG:callback] saver.conn.close error: %s", _close_exc)
+
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning("[LG:callback] graph.ainvoke(Command) error: %s", exc)
 
     async def _send(self, chat_id: str, text: str) -> bool:
         """Send a reply to chat_id. Returns True on success, False on error."""

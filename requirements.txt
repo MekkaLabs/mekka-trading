@@ -52,6 +52,12 @@ loguru>=0.7.0
 # --- Retry Logic ---
 tenacity>=8.2.0
 
+# --- LangGraph (Story 126+) — durable execution + checkpointing ---
+# Instalar separadamente (feature opcional, não obrigatória):
+#   pip3 install langgraph langgraph-checkpoint-sqlite --break-system-packages
+langgraph>=0.2.0
+langgraph-checkpoint-sqlite>=2.0.0
+
 # --- Dev / Testing ---
 pytest>=7.4.0
 pytest-asyncio>=0.21.0

@@ -97,15 +97,22 @@ async def _run_forever_with_inbound(equity_usd: float | None = None) -> None:
         await fury.shutdown()
 
 
-async def _run_once(equity_usd: float) -> int:
+async def _run_once(equity_usd: float, langgraph: bool = False) -> int:
     fury = NickFury()
     await fury.initialize()
     try:
-        reports = await fury.run_main_cycle(equity_usd=equity_usd)
-        executed = sum(1 for r in reports if r.is_executed())
-        logger.info(
-            f"[run] Cycle complete: {len(reports)} symbols, {executed} executed"
-        )
+        if langgraph:
+            reports = await fury.run_with_checkpointing(equity_usd=equity_usd)
+            executed = sum(1 for r in reports if r.get("execution") and r.get("execution", {}).get("status") in ("FILLED", "PAPER"))
+            logger.info(
+                f"[run:LG] Cycle complete: {len(reports)} symbols, {executed} executed"
+            )
+        else:
+            reports = await fury.run_main_cycle(equity_usd=equity_usd)
+            executed = sum(1 for r in reports if r.is_executed())
+            logger.info(
+                f"[run] Cycle complete: {len(reports)} symbols, {executed} executed"
+            )
         return 0
     finally:
         await fury.shutdown()
@@ -150,6 +157,16 @@ def main() -> int:
         default=8787,
         help="Dashboard bind port (default: 8787)",
     )
+    parser.add_argument(
+        "--langgraph",
+        action="store_true",
+        help=(
+            "[Story 126] Usa LangGraph StateGraph com AsyncSqliteSaver "
+            "em vez do ciclo NickFury direto. Habilita durable execution "
+            "e checkpoint por símbolo. Requer: pip install langgraph "
+            "langgraph-checkpoint-sqlite"
+        ),
+    )
     args = parser.parse_args()
 
     _configure_logger()
@@ -162,7 +179,7 @@ def main() -> int:
             )
             return 0
         if args.once:
-            return asyncio.run(_run_once(equity_usd=args.equity))
+            return asyncio.run(_run_once(equity_usd=args.equity, langgraph=args.langgraph))
         if args.dashboard:
             async def _run_both() -> None:
                 # TaskGroup (Python 3.11+) propagates the first exception and

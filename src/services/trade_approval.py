@@ -206,6 +206,80 @@ async def _send_approval_message(
                 logger.warning("[TradeApproval] sendMessage HTTP %s: %s", resp.status, body[:200])
 
 
+async def send_lg_approval_message(
+    trade_id: str,
+    thread_id: str,
+    signal_symbol: str,
+    signal_action: str,
+    signal_confidence: float,
+    entry_price: float,
+    stop_loss: Optional[float],
+    take_profit: Optional[float],
+    size_pct: float,
+    leverage: int,
+    reasons: list[str],
+    timeout_s: int = 120,
+) -> None:
+    """
+    Story 127 — Send a Telegram approval message for LangGraph interrupt mode.
+
+    Differs from _send_approval_message() in that the inline buttons use
+    ``lg_approve:{thread_id}:{trade_id}`` / ``lg_reject:{thread_id}:{trade_id}``
+    callback data, so TelegramInbound can route to the LangGraph resume path.
+
+    Always returns without raising — approval gate must be fail-open.
+    """
+    if not settings.telegram_enabled:
+        return
+
+    import aiohttp  # noqa: WPS433
+
+    side_emoji = "🟢" if signal_action.upper() == "LONG" else "🔴"
+    rr = round((take_profit - entry_price) / (entry_price - stop_loss), 2) if take_profit and stop_loss and stop_loss != entry_price else "?"
+    reason_text = "\n".join(f"  • {r}" for r in reasons[:4]) if reasons else "  —"
+
+    text = (
+        f"⚡ *TRADE AGUARDANDO APROVAÇÃO* [LG]\n\n"
+        f"{side_emoji} *{signal_action.upper()} {signal_symbol}* @ `{entry_price:,.4f}`\n"
+        f"🎯 Confiança: `{signal_confidence:.0%}`\n"
+        f"📐 Tamanho: `{size_pct:.1%}` × `{leverage}x`\n"
+        + (f"🛑 SL: `{stop_loss:,.4f}`\n" if stop_loss else "")
+        + (f"✅ TP: `{take_profit:,.4f}` | R:R `{rr}`\n\n" if take_profit else "\n")
+        + f"*Razões Batman:*\n{reason_text}\n\n"
+        f"🆔 `{trade_id}`\n"
+        f"⏳ Expira em {timeout_s}s (paper: auto-aprova)"
+    )
+
+    # LG-prefixed callback data encodes thread_id for graph resume
+    inline_keyboard = {
+        "inline_keyboard": [[
+            {"text": "✅ Confirmar", "callback_data": f"lg_approve:{thread_id}:{trade_id}"},
+            {"text": "❌ Recusar",   "callback_data": f"lg_reject:{thread_id}:{trade_id}"},
+        ]]
+    }
+
+    import json  # noqa: WPS433
+    payload = {
+        "chat_id": settings.telegram_chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "reply_markup": json.dumps(inline_keyboard),
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                _tg_url("sendMessage"),
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.warning("[TradeApproval/LG] sendMessage HTTP %s: %s", resp.status, body[:200])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[TradeApproval/LG] send_lg_approval_message error: %s", exc)
+
+
 async def _send_decision_notification(
     trade_id: str,
     symbol: str,
