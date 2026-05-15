@@ -4,7 +4,7 @@ Este documento descreve **como o sistema funciona hoje**. Não é
 roadmap, não é vision — é a fotografia atual da arquitetura. Atualize
 sempre que uma story mudar inputs/outputs ou bordas de responsabilidade.
 
-Última revisão: Story 025 (pipeline estratégico Python end-to-end).
+Última revisão: Story 125 (LLM Fallback Claude, Superman Python 3.14, Telegram pt-BR, Pixel Office 2×2).
 
 ---
 
@@ -87,7 +87,8 @@ normalização de erros.
 | Agente       | Input                              | Output Pydantic   | Deps externas |
 | ------------ | ---------------------------------- | ----------------- | ------------- |
 | Professor X  | `symbol: str`                      | `MarketAnalysis`  | (orquestra L1) |
-| Vision       | `analysis: MarketAnalysis`         | `TradingSignal`   | OpenAI GPT-4o  |
+| Vision       | `analysis: MarketAnalysis`         | `TradingSignal`   | `LLMClient` → OpenAI GPT-4o **ou** Claude (fallback automático) |
+| VisionCritic | `signal: TradingSignal, analysis: MarketAnalysis` | `TradingSignal` (refinado) | `LLMClient` → mesma cadeia de fallback |
 
 ### Layer 3 — Risk & Execution
 
@@ -105,17 +106,38 @@ normalização de erros.
 
 ### Services (não-agente)
 
-| Service            | Input                                     | Output Pydantic/dataclass | Deps externas |
-| ------------------ | ----------------------------------------- | ------------------------- | ------------- |
-| `DailyPnLWriter`   | `equity_usd, trades_count_today, snapshot?` | `DailyPnLSnapshot`        | `Repository.upsert_daily_pnl` |
+| Service              | Input                                       | Output Pydantic/dataclass | Deps externas |
+| -------------------- | ------------------------------------------- | ------------------------- | ------------- |
+| `DailyPnLWriter`     | `equity_usd, trades_count_today, snapshot?` | `DailyPnLSnapshot`        | `Repository.upsert_daily_pnl` |
+| `LLMClient`          | `messages, model?, temperature?`            | `str` (JSON bruto)        | OpenAI SDK + Anthropic SDK (fallback) |
+| `TelegramAlerter`    | eventos de trade/risco                      | mensagens Telegram pt-BR  | `python-telegram-bot` |
+| `TelegramInbound`    | comandos do operador                        | respostas pt-BR           | `python-telegram-bot` |
+| `FundingRateProvider`| (none — polling)                           | `dict[symbol, float]`     | aiohttp → Hyperliquid + Binance |
 
-### Heróis pendentes (Story 027+)
+#### LLMClient — camada de abstração LLM (Story 124)
 
-| Agente    | Input planejado                  | Output planejado    | Status |
-| --------- | -------------------------------- | ------------------- | ------ |
-| Wolverine | (positions snapshot + market)    | RecoveryPlan        | pendente |
-| Flash     | `MarketData + tick stream`       | `MomentumSignal`    | pendente |
-| Deadpool  | `historical signals + trades`    | BacktestReport      | pendente |
+`src/agents/llm_client.py` — cliente unificado para todos os agentes que
+fazem chamadas LLM. **Nunca instanciar `AsyncOpenAI` diretamente em
+agentes.** Sempre usar `make_llm_client()`.
+
+Cadeia de fallback:
+```
+1. OpenAI (settings.openai_api_key) — modelo settings.openai_model (default gpt-4o)
+2. Anthropic Claude (settings.anthropic_api_key) — modelo settings.anthropic_model (default claude-sonnet-4-6)
+```
+
+Se `openai_api_key` for vazio ou a chamada retornar erro de autenticação,
+`LLMClient` tenta automaticamente o Anthropic. O fallback é transparente
+para Vision e VisionCritic — a lógica de negócio não muda.
+
+### Heróis ativos (além do core)
+
+| Agente    | Input                             | Output Pydantic       | Status    |
+| --------- | --------------------------------- | --------------------- | --------- |
+| Wolverine | `positions + market`              | `RecoveryPlan`        | ✅ ativo   |
+| Flash     | `MarketData + tick stream`        | `MomentumSignal`      | ✅ ativo   |
+| Deadpool  | `historical signals + trades`     | `BacktestReport`      | ✅ ativo   |
+| Cyclops   | `positions` (monitor SL/TP)       | `MonitorResult`       | ✅ ativo   |
 
 ## 5. Models Pydantic — contratos de dados
 
@@ -229,9 +251,11 @@ observability/
 
 | Env var                      | Default        | Onde lê                          |
 | ---------------------------- | -------------- | -------------------------------- |
-| `OPENAI_API_KEY`             | (obrigatório)  | Vision                           |
-| `OPENAI_MODEL`               | `gpt-4o`       | Vision                           |
-| `OPENAI_TEMPERATURE`         | `0.2`          | Vision                           |
+| `OPENAI_API_KEY`             | `""` (opcional) | LLMClient (primário)            |
+| `OPENAI_MODEL`               | `gpt-4o`       | LLMClient                        |
+| `OPENAI_TEMPERATURE`         | `0.2`          | LLMClient                        |
+| `ANTHROPIC_API_KEY`          | `""` (opcional) | LLMClient (fallback automático) |
+| `ANTHROPIC_MODEL`            | `claude-sonnet-4-6` | LLMClient fallback          |
 | `HYPERLIQUID_PRIVATE_KEY`    | (obrigatório)  | Iron Man (live)                  |
 | `HYPERLIQUID_WALLET_ADDRESS` | (obrigatório)  | Iron Man (live)                  |
 | `HYPERLIQUID_NETWORK`        | `testnet`      | Iron Man, Black Panther, Aquaman |
@@ -262,7 +286,34 @@ observability/
 Nenhum caminho propaga exceção até o topo do loop. Todas as falhas
 viram dado estruturado.
 
-## 12. Quando atualizar este arquivo
+## 12. Compatibilidade Python 3.14 — Superman indicadores manuais
+
+Superman calcula RSI, EMA, Bollinger Bands, MACD e ATR com pandas puro.
+`pandas_ta` e `numba` **não são compatíveis com Python ≥ 3.14** e foram
+removidos do path crítico. O código tenta importar `pandas_ta` e, em caso
+de falha, usa os cálculos manuais internos — sem alteração no output
+(`MarketData`).
+
+Cálculos manuais implementados em `src/agents/superman.py`:
+
+| Indicador    | Método                                       |
+| ------------ | -------------------------------------------- |
+| RSI(14)      | diff → clip → rolling mean gain/loss → RS formula |
+| EMA(20/50)   | `pandas.Series.ewm(span=N, adjust=False)`    |
+| BB(20, 2σ)   | rolling mean ± 2 × rolling std              |
+| MACD(12,26,9)| EMA12 − EMA26 → sinal EMA9 → histograma     |
+| ATR(14)      | True Range → EWM span=14                     |
+
+## 13. Dashboard
+
+- **URL**: `http://localhost:8787`
+- **Pixel Office**: `http://localhost:8787/office-v2/`
+- **Como iniciar**: `python3 run.py --dashboard` (obrigatório a flag)
+- **Modo só dashboard** (sem pipeline): `python3 run.py --dashboard-only`
+- **WebSocket**: `ws://localhost:8787/ws` (atualizações em tempo real)
+- **Não escrever no SQLite a partir do dashboard** — dashboard é read-only.
+
+## 14. Quando atualizar este arquivo
 
 - Quando uma story mudar input/output de qualquer agente.
 - Quando criar um novo agente.

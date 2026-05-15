@@ -49,6 +49,7 @@ Antes de escrever código, leia nesta ordem:
    story-026.
 5. `src/config/settings.py` — todas as flags de comportamento moram
    aqui, nunca em constantes mágicas.
+6. `src/agents/llm_client.py` — cliente unificado OpenAI→Claude. **Sempre** usar `make_llm_client()` em agentes LLM, nunca instanciar `AsyncOpenAI` diretamente.
 
 Se você for tocar em um agente específico, leia o arquivo Python dele e
 o respectivo Pydantic model em `src/models/` antes de qualquer edição.

@@ -7,6 +7,27 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-05-15 — Stories 113-125: LLM Fallback Claude, Superman Python 3.14, Telegram pt-BR, Pixel Office 2x2, Fix Funding Rate
+
+### Added
+- **llm_client.py**: cliente unificado `LLMClient` com fallback automático OpenAI → Anthropic Claude. Quando a chave OpenAI é inválida ou ausente, o sistema usa Claude (`claude-sonnet-4-6`) transparentemente
+- **Pixel Office layout 2x2**: office ocupa toda a largura no topo; abaixo dois painéis lado a lado (Agent Card + Trading Mode); Roster dos agentes em linha completa; grade de heróis em 4 colunas
+- **Novos heróis no Pixel Office**: Flash, Wolverine, Cyclops e Deadpool adicionados com sprites e animações
+- **Telegram pt-BR completo**: todas as mensagens do `TelegramAlerter` traduzidas para português do Brasil
+- **Explicação leiga no alerta de trade**: campo `💡 Por que entrar agora?` com linguagem acessível explicando o motivo do trade (tendência, RSI, suporte, volume, etc.)
+- **Estimativa de duração no alerta de trade**: campo `⏱ Duração estimada` calculado com base na distância SL/TP e alavancagem (Scalp / Curto prazo / Médio prazo / Swing)
+
+### Fixed
+- **Superman — Python 3.14 compatibility**: `pandas_ta` e `numba` não compilam no Python 3.14. Superman agora calcula RSI, EMA, Bollinger Bands, MACD e ATR manualmente com pandas puro, sem depender de `pandas_ta`
+- **Funding rate bug** (`funding_provider.py`): `asyncio.timeout(5)` retornava um objeto `Timeout` (context manager) em vez de um número, causando `'>' not supported between instances of 'Timeout' and 'int'`. Corrigido para `aiohttp.ClientTimeout(total=5)`
+- **Dashboard — flag obrigatória**: dashboard só sobe com `python3 run.py --dashboard`. Documentado para evitar confusão
+- **.gitignore**: adicionados `data/dashboard_snapshots/`, `data/mekka_trading.db`, `.agent-os/` para não versionar dados de runtime
+
+### Changed
+- `vision.py` + `vision_critic.py`: migrados de cliente OpenAI direto para `LLMClient` — fallback automático sem alterar lógica de negócio
+- `settings.py`: `openai_api_key` agora opcional (default `""`); novos campos `anthropic_api_key` e `anthropic_model`
+- `telegram_alerter.py`: método `_format` com rótulos em pt-BR e emojis por severidade; `trade_opened()` com bloco de explicação leiga + duração estimada; helpers `_layman_explanation()` e `_estimate_duration()` adicionados
+
 ## [0.8.0] — 2026-05-15 — Stories 107-112: Calendar, Balance, Hourly PnL, Gate 3q, Cyclops Reset, Gates Timeline
 
 ### Added
