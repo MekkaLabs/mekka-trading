@@ -706,6 +706,32 @@ class Settings(BaseSettings):
     )
 
     # --------------------------------------------------------------------------
+    # Mixture of Agents Vision (Story 131)
+    # --------------------------------------------------------------------------
+    vision_moa_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, Vision uses the Mixture of Agents (MoA) pattern: "
+            "3 LLMs (GPT-4o, Claude Sonnet, GPT-4o-mini) generate TradingSignal "
+            "proposals in parallel, then an orchestrator synthesizes the consensus. "
+            "Adds ~2 extra LLM calls per symbol per cycle but increases signal "
+            "diversity and reduces single-model bias. "
+            "Set VISION_MOA_ENABLED=true to activate. "
+            "Requires at least OPENAI_API_KEY or ANTHROPIC_API_KEY."
+        ),
+    )
+    vision_moa_min_proposals: int = Field(
+        default=2,
+        ge=1,
+        le=3,
+        description=(
+            "Minimum number of successful proposals required for MoA synthesis. "
+            "If fewer proposals succeed (due to API failures), VisionMoA falls "
+            "back to the single Vision._run() path. Default 2 of 3."
+        ),
+    )
+
+    # --------------------------------------------------------------------------
     # Telegram alerter (Story 035)
     # --------------------------------------------------------------------------
     telegram_alert_min_severity: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(

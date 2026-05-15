@@ -108,6 +108,17 @@ class NickFury(BaseAgent[list[CycleReport]]):
         # Story 129 — Layer 1 subgraph compilado, injetado por make_checkpointed_graph().
         # None = fallback para ProfessorX.run() com asyncio.gather (modo clássico).
         self._layer1_graph: Any = None
+        # Story 131 — VisionMoA: 3 LLMs em paralelo + orchestrator consenso.
+        # Instanciado apenas se vision_moa_enabled=True para evitar 3 LLMClients
+        # desnecessários quando MoA está desligado.
+        self._vision_moa: Optional[Any] = None
+        if settings.vision_moa_enabled:
+            try:
+                from src.agents.vision_moa import VisionMoA  # noqa: WPS433
+                self._vision_moa = VisionMoA()
+                self._log.info("[NickFury] VisionMoA enabled (Story 131)")
+            except Exception as _moa_exc:  # noqa: BLE001
+                self._log.warning(f"[NickFury] VisionMoA init failed (disabled): {_moa_exc}")
 
     # ------------------------------------------------------------------
     # Public API
@@ -156,6 +167,12 @@ class NickFury(BaseAgent[list[CycleReport]]):
         """Close exchange connections held by sub-agents."""
         await self._professor.close()
         await self._vision.close()
+        # Story 131 — fechar VisionMoA se ativo (4 LLMClients internos)
+        if self._vision_moa is not None:
+            try:
+                await self._vision_moa.close()
+            except Exception:  # noqa: BLE001
+                pass
         await MekkaRepository.log_event(
             agent="NickFury",
             event="SHUTDOWN",
@@ -565,7 +582,19 @@ class NickFury(BaseAgent[list[CycleReport]]):
             return CycleReport(symbol=symbol, error=f"Analysis failed: {exc}")
 
         # 2. Vision strategic decision
-        signal = await self._vision.run(analysis=analysis)
+        # Story 131 — MoA path: 3 LLMs em paralelo quando vision_moa_enabled=True.
+        # Fallback silencioso para Vision clássico se VisionMoA indisponível ou falhar.
+        if self._vision_moa is not None:
+            try:
+                signal = await self._vision_moa.run(analysis=analysis)
+            except Exception as _moa_run_exc:  # noqa: BLE001
+                self._log.warning(
+                    f"[NickFury] VisionMoA.run() failed: {_moa_run_exc} — "
+                    "falling back to single Vision"
+                )
+                signal = await self._vision.run(analysis=analysis)
+        else:
+            signal = await self._vision.run(analysis=analysis)
 
         # 2b. Vision Reflection Loop — Story 130 (supersedes Story 031 one-shot).
         # Iterative Vision↔VisionCritic loop (AutoGen Reflection pattern).

@@ -4,7 +4,7 @@
 arquitetural. Stories abaixo são lidas em ordem numérica dentro de cada
 bloco.
 
-Última story entregue: **130** (Iterative Vision Reflection — loop Vision↔VisionCritic com até 3 rounds, padrão AutoGen Reflection).
+Última story entregue: **131** (Mixture of Agents Vision — 3 LLMs em paralelo + orchestrator consenso, padrão AutoGen MoA).
 Stories 047–124 entregues e registradas no CHANGELOG.md (versões 0.2.0–0.8.0).
 
 ---
@@ -191,7 +191,9 @@ e subgrafo paralelo Layer 1.
 
 ## Milestone 20 — Decision Quality
 
-Loop iterativo Vision↔VisionCritic inspirado no padrão AutoGen Reflection. A Vision
-recebe o feedback do Critic no contexto e regenera o sinal — em vez de ajuste mecânico.
+Loop iterativo Vision↔VisionCritic (AutoGen Reflection) e Mixture of Agents com 3 LLMs
+em paralelo sintetizados por um orchestrator (AutoGen MoA). Foco em diversidade de sinal
+e redução de viés de modelo único.
 
 - [130 — Iterative Vision Reflection: loop Vision↔VisionCritic até 3 rounds](story-130-vision-reflection.md)
+- [131 — Mixture of Agents Vision: GPT-4o + Claude + GPT-4o-mini → orchestrator consenso](story-131-vision-moa.md)
