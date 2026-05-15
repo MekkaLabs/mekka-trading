@@ -706,6 +706,116 @@ class Settings(BaseSettings):
     )
 
     # --------------------------------------------------------------------------
+    # Adaptive Layer 1 Routing (Story 135)
+    # --------------------------------------------------------------------------
+    layer1_routing_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, a routing_node after Superman inspects the chart regime "
+            "(ATR%) and selects which Layer 1 agents to skip for this cycle. "
+            "Skipped agents return None immediately — MarketAnalysis is assembled "
+            "from the remaining agents. Set LAYER1_ROUTING_ENABLED=true to activate."
+        ),
+    )
+    layer1_routing_normal_skip: str = Field(
+        default="",
+        description="CSV of Layer 1 node names to skip in NORMAL volatility regime.",
+    )
+    layer1_routing_high_skip: str = Field(
+        default="flash",
+        description="CSV of Layer 1 node names to skip in HIGH volatility regime.",
+    )
+    layer1_routing_extreme_skip: str = Field(
+        default="sentiment,flash",
+        description=(
+            "CSV of Layer 1 node names to skip in EXTREME volatility regime. "
+            "In extreme vol, macro sentiment is less useful than hard price data."
+        ),
+    )
+    layer1_routing_low_skip: str = Field(
+        default="onchain,flash",
+        description=(
+            "CSV of Layer 1 node names to skip in LOW volatility (flat market). "
+            "Whale flow and intra-candle momentum add little in consolidation."
+        ),
+    )
+
+    # --------------------------------------------------------------------------
+    # Vision Pre-Reasoning (Story 133)
+    # --------------------------------------------------------------------------
+    vision_pre_reasoning_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, Vision makes an extra LLM call before generating the "
+            "TradingSignal — asking the model to reflect on signal alignment, "
+            "key risks, and preliminary bias (CrewAI Reasoning pattern). "
+            "The reflection is injected into the signal prompt as context, "
+            "improving decision quality at the cost of ~1 extra LLM call. "
+            "Set VISION_PRE_REASONING_ENABLED=true to activate. "
+            "Fails silently — Vision proceeds normally if pre-reasoning errors."
+        ),
+    )
+
+    # --------------------------------------------------------------------------
+    # Semantic Memory Composite Scoring (Story 132) + Consolidation (Story 134)
+    # --------------------------------------------------------------------------
+    semantic_memory_semantic_weight: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Weight applied to the cosine-similarity score in the composite "
+            "semantic memory ranking formula. Must sum to ~1.0 with recency and "
+            "importance weights (not enforced, but recommended)."
+        ),
+    )
+    semantic_memory_recency_weight: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Weight applied to the exponential recency decay in composite scoring. "
+            "Higher values prioritize recent memories over semantically similar older ones."
+        ),
+    )
+    semantic_memory_importance_weight: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Weight applied to the PnL-normalized importance score in composite "
+            "scoring. Higher values surface high-PnL trades more prominently."
+        ),
+    )
+    semantic_memory_recency_half_life_days: float = Field(
+        default=30.0,
+        gt=0.0,
+        description=(
+            "Half-life in days for the exponential recency decay. "
+            "A memory recorded exactly half_life_days ago receives a decay of 0.5. "
+            "Smaller values age out memories faster."
+        ),
+    )
+    semantic_memory_consolidation_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True (Story 134), duplicate-like memories are suppressed during "
+            "add() and collapsed after warm_up_from_db(). Dedup threshold is "
+            "controlled by semantic_memory_consolidation_threshold."
+        ),
+    )
+    semantic_memory_consolidation_threshold: float = Field(
+        default=0.92,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Cosine similarity threshold above which a candidate memory is "
+            "considered a duplicate and skipped/removed. 0.92 keeps variants "
+            "with ≥8% semantic difference."
+        ),
+    )
+
+    # --------------------------------------------------------------------------
     # Mixture of Agents Vision (Story 131)
     # --------------------------------------------------------------------------
     vision_moa_enabled: bool = Field(

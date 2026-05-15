@@ -2,6 +2,8 @@
 src/langgraph/semantic_memory.py
 ==================================
 Story 128 — Memória Episódica Semântica com OpenAI text-embedding-3-small.
+Story 132 — Composite Scoring: semantic + recency_decay + importance (PnL).
+Story 134 — Memory Consolidation: dedup semântico no add() e warm_up().
 
 Substitui a busca por igualdade/range da Story 063 (AgentMemoryStore.query_similar)
 por busca vetorial de similaridade cossenoidal no modo --langgraph.
@@ -37,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from loguru import logger
@@ -107,11 +110,47 @@ def build_query_text(
 # Store
 # ---------------------------------------------------------------------------
 
+def _compute_importance(pnl_usd: Optional[float], max_pnl: float = 200.0) -> float:
+    """
+    Story 132 — Normaliza |pnl_usd| para [0, 1] como score de importância.
+
+    Trades com PnL maior (positivo ou negativo) são mais informativos
+    e recebem peso maior no composite score.
+
+    max_pnl: valor de referência para normalização (USD). Trades acima
+             deste valor recebem importance=1.0.
+    """
+    if pnl_usd is None:
+        return 0.5  # neutro quando PnL desconhecido
+    return min(1.0, abs(pnl_usd) / max(max_pnl, 1.0))
+
+
+def _compute_recency_decay(
+    recorded_at: Optional[datetime],
+    half_life_days: float = 30.0,
+) -> float:
+    """
+    Story 132 — Decaimento exponencial por idade: 0.5^(age_days / half_life_days).
+
+    Hoje → 1.0. Em half_life_days → 0.5. Em 2×half_life_days → 0.25.
+    """
+    if recorded_at is None:
+        return 0.5  # neutro quando data desconhecida
+    now = datetime.now(timezone.utc)
+    if recorded_at.tzinfo is None:
+        recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+    age_days = max(0.0, (now - recorded_at).total_seconds() / 86400.0)
+    return 0.5 ** (age_days / max(half_life_days, 0.1))
+
+
 @dataclass
 class _Entry:
     text: str
     embedding: list[float]
     metadata: dict[str, Any]
+    # Story 132 — campos para composite scoring
+    recorded_at: Optional[datetime] = None  # timestamp do trade
+    importance: float = 0.5               # score de importância (0-1)
 
 
 class SemanticEpisodicStore:
@@ -128,6 +167,15 @@ class SemanticEpisodicStore:
         self._model = model
         self._entries: list[_Entry] = []
         self._warmed_up = False
+        # Story 134 — configuração de consolidação (dedup semântico)
+        # Lê do settings se disponível, com fallback seguro
+        try:
+            from src.config.settings import settings as _s  # noqa: WPS433
+            self._consolidation_enabled: bool = getattr(_s, "semantic_memory_consolidation_enabled", True)
+            self._consolidation_threshold: float = getattr(_s, "semantic_memory_consolidation_threshold", 0.92)
+        except Exception:  # noqa: BLE001
+            self._consolidation_enabled = True
+            self._consolidation_threshold = 0.92
 
     # -----------------------------------------------------------------------
     # Startup: carregar memórias do SQLite
@@ -195,6 +243,9 @@ class SemanticEpisodicStore:
             }
             for r in rows
         ]
+        # Story 132 — extrair timestamps e calcular importance por PnL
+        timestamps = [getattr(r, "timestamp", None) for r in rows]
+        importances = [_compute_importance(r.pnl_usd) for r in rows]
 
         try:
             embeddings = await self._embed_batch(texts)
@@ -203,8 +254,15 @@ class SemanticEpisodicStore:
             self._warmed_up = True
             return 0
 
-        for text, emb, meta in zip(texts, embeddings, metas):
-            self._entries.append(_Entry(text=text, embedding=emb, metadata=meta))
+        for text, emb, meta, ts, imp in zip(texts, embeddings, metas, timestamps, importances):
+            self._entries.append(_Entry(
+                text=text, embedding=emb, metadata=meta,
+                recorded_at=ts, importance=imp,
+            ))
+
+        # Story 134 — consolidar entradas muito similares após warm_up
+        if self._consolidation_enabled and len(self._entries) > 1:
+            await self._consolidate_entries()
 
         self._warmed_up = True
         logger.info(
@@ -246,6 +304,20 @@ class SemanticEpisodicStore:
             logger.debug(f"[SemanticMemory] add() embed failed: {exc}")
             return
 
+        # Story 134 — dedup: skip se já existe entrada muito similar
+        if self._consolidation_enabled and self._entries:
+            max_sim = self._max_cosine_similarity(emb)
+            if max_sim >= self._consolidation_threshold:
+                logger.debug(
+                    f"[SemanticMemory] add() skipped dup "
+                    f"(similarity={max_sim:.3f} >= {self._consolidation_threshold})"
+                )
+                return
+
+        # Story 132 — calcular importance a partir do PnL
+        imp = _compute_importance(pnl_usd)
+        now_ts = datetime.now(timezone.utc)
+
         self._entries.append(_Entry(
             text=text,
             embedding=emb,
@@ -256,10 +328,12 @@ class SemanticEpisodicStore:
                 "pnl_usd": pnl_usd, "holding_hours": holding_hours,
                 "memory_id": memory_id,
             },
+            recorded_at=now_ts,
+            importance=imp,
         ))
         logger.debug(
             f"[SemanticMemory] Added {action} {symbol} {outcome} "
-            f"(total={len(self._entries)})"
+            f"imp={imp:.2f} (total={len(self._entries)})"
         )
 
     # -----------------------------------------------------------------------
@@ -273,14 +347,18 @@ class SemanticEpisodicStore:
         filter_fn: Any = None,
     ) -> list[dict[str, Any]]:
         """
-        Busca as ``limit`` entradas mais similares por similaridade cossenoidal.
+        Busca as ``limit`` entradas pelo composite score (Story 132).
+
+        Composite = semantic_weight × similarity
+                  + recency_weight × recency_decay
+                  + importance_weight × importance
 
         Parâmetros:
             query     : texto da query (usar build_query_text())
             limit     : número máximo de resultados
             filter_fn : callable(metadata) → bool para filtrar entradas
 
-        Retorna lista de dicts com {score, text, **metadata}.
+        Retorna lista de dicts com {score, semantic_score, text, **metadata}.
         """
         if not self._entries:
             return []
@@ -291,8 +369,44 @@ class SemanticEpisodicStore:
             logger.debug(f"[SemanticMemory] search embed failed: {exc}")
             return []
 
-        # Cosine similarity: puro Python (evita import numpy aqui; numpy está disponível
-        # via pandas mas importamos inline para não quebrar se ausente)
+        # Cosine similarities via numpy (fallback puro Python se numpy ausente)
+        semantic_scores = self._cosine_similarities(q_emb)
+
+        # Story 132 — Composite scoring
+        from src.config.settings import settings as _s  # noqa: WPS433
+        sem_w = getattr(_s, "semantic_memory_semantic_weight", 0.5)
+        rec_w = getattr(_s, "semantic_memory_recency_weight", 0.3)
+        imp_w = getattr(_s, "semantic_memory_importance_weight", 0.2)
+        half_life = getattr(_s, "semantic_memory_recency_half_life_days", 30.0)
+
+        composite_scores: list[float] = []
+        for i, entry in enumerate(self._entries):
+            sem = float(semantic_scores[i])
+            rec = _compute_recency_decay(entry.recorded_at, half_life_days=half_life)
+            imp = entry.importance
+            composite = sem_w * sem + rec_w * rec + imp_w * imp
+            composite_scores.append(composite)
+
+        # Filtra e ordena por composite score
+        candidates = [
+            (composite_scores[i], float(semantic_scores[i]), self._entries[i])
+            for i in range(len(self._entries))
+            if filter_fn is None or filter_fn(self._entries[i].metadata)
+        ]
+        candidates.sort(key=lambda x: -x[0])
+
+        return [
+            {
+                "score": comp,
+                "semantic_score": sem,
+                "text": entry.text,
+                **entry.metadata,
+            }
+            for comp, sem, entry in candidates[:limit]
+        ]
+
+    def _cosine_similarities(self, q_emb: list[float]) -> list[float]:
+        """Calcula similaridade cossenoidal de q_emb contra todas as entradas."""
         try:
             import numpy as np  # noqa: WPS433
             all_embs = np.array([e.embedding for e in self._entries], dtype=np.float32)
@@ -300,33 +414,86 @@ class SemanticEpisodicStore:
             norms = np.linalg.norm(all_embs, axis=1)
             q_norm = float(np.linalg.norm(q))
             if q_norm < 1e-10:
-                return []
+                return [0.0] * len(self._entries)
             sims = (all_embs @ q) / (norms * q_norm + 1e-10)
-            scores = sims.tolist()
+            return sims.tolist()
         except ImportError:
-            # Fallback puro Python (mais lento mas funciona sem numpy)
             q_norm = math.sqrt(sum(x * x for x in q_emb))
             if q_norm < 1e-10:
-                return []
-            scores = []
+                return [0.0] * len(self._entries)
+            result = []
             for entry in self._entries:
                 e = entry.embedding
                 e_norm = math.sqrt(sum(x * x for x in e))
                 dot = sum(a * b for a, b in zip(q_emb, e))
-                scores.append(dot / (e_norm * q_norm + 1e-10))
+                result.append(dot / (e_norm * q_norm + 1e-10))
+            return result
 
-        # Filtra e ordena
-        candidates = [
-            (float(scores[i]), self._entries[i])
-            for i in range(len(self._entries))
-            if filter_fn is None or filter_fn(self._entries[i].metadata)
-        ]
-        candidates.sort(key=lambda x: -x[0])
+    def _max_cosine_similarity(self, emb: list[float]) -> float:
+        """Story 134 — Retorna a maior similaridade cossenoidal de emb contra o índice."""
+        if not self._entries:
+            return 0.0
+        sims = self._cosine_similarities(emb)
+        return max(sims) if sims else 0.0
 
-        return [
-            {"score": score, "text": entry.text, **entry.metadata}
-            for score, entry in candidates[:limit]
-        ]
+    async def _consolidate_entries(self) -> int:
+        """
+        Story 134 — Remove duplicatas semânticas do índice in-memory.
+
+        Algoritmo O(N²) — adequado para N ≤ 500 (warm_up limit).
+        Itera pelas entradas em ordem de chegada; descarta qualquer entrada
+        posterior cuja similaridade cossenoidal com uma entrada anterior já
+        confirmada seja >= _consolidation_threshold.
+
+        Retorna o número de entradas removidas.
+        """
+        if len(self._entries) < 2:
+            return 0
+
+        threshold = self._consolidation_threshold
+        kept: list[_Entry] = []
+
+        for entry in self._entries:
+            if not kept:
+                kept.append(entry)
+                continue
+            # Computa similaridade apenas contra as entradas já aceitas
+            try:
+                import numpy as np  # noqa: WPS433
+                all_embs = [e.embedding for e in kept]
+                arr = __import__("numpy").array(all_embs, dtype=__import__("numpy").float32)
+                q = __import__("numpy").array(entry.embedding, dtype=__import__("numpy").float32)
+                norms = __import__("numpy").linalg.norm(arr, axis=1)
+                q_norm = float(__import__("numpy").linalg.norm(q))
+                if q_norm < 1e-10:
+                    kept.append(entry)
+                    continue
+                sims = (arr @ q) / (norms * q_norm + 1e-10)
+                max_sim = float(sims.max())
+            except ImportError:
+                q_norm = math.sqrt(sum(x * x for x in entry.embedding))
+                if q_norm < 1e-10:
+                    kept.append(entry)
+                    continue
+                max_sim = 0.0
+                for k in kept:
+                    e_norm = math.sqrt(sum(x * x for x in k.embedding))
+                    dot = sum(a * b for a, b in zip(entry.embedding, k.embedding))
+                    sim = dot / (e_norm * q_norm + 1e-10)
+                    if sim > max_sim:
+                        max_sim = sim
+
+            if max_sim < threshold:
+                kept.append(entry)
+
+        removed = len(self._entries) - len(kept)
+        if removed > 0:
+            self._entries = kept
+            logger.info(
+                f"[SemanticMemory] _consolidate_entries: removed {removed} duplicates "
+                f"(threshold={threshold}, remaining={len(self._entries)})"
+            )
+        return removed
 
     async def build_context_snippet(
         self,
@@ -397,7 +564,7 @@ class SemanticEpisodicStore:
         if recent_line:
             parts.append(recent_line)
         parts.append(
-            f"[Semantic score range: {results[0]['score']:.3f}–{results[-1]['score']:.3f}]"
+            f"[Composite score range: {results[0]['score']:.3f}–{results[-1]['score']:.3f}]"
         )
         return "\n".join(parts)
 

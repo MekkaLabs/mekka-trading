@@ -84,6 +84,25 @@ For HOLD, set entry_price = current price, stop_loss = entry × 0.97,
 take_profit = entry × 1.03 (geometry must still validate).
 """
 
+# Story 133 — Vision Pre-Reasoning
+# Prompt separado que solicita ao LLM raciocinar step-by-step antes de emitir
+# o sinal. O output desta etapa é injetado no prompt final como contexto.
+_PRE_REASONING_SYSTEM = """You are Vision's pre-analysis reasoning module.
+Your task is NOT to produce a trade signal. Instead, produce a structured
+analytical reflection about the current market conditions.
+
+Format your response in 3 short paragraphs (no JSON, no code fences):
+
+1. **Signal Alignment**: Are the indicators pointing in the same direction?
+   Note any conflicts (e.g., bullish price vs. bearish sentiment).
+2. **Key Risks**: What are the top 2–3 risks if a trade is taken right now?
+   Be specific (e.g., high funding rate, weak liquidity, recent anomaly).
+3. **Preliminary Bias**: Based purely on this reflection, what is your
+   initial lean — LONG, SHORT, or HOLD — and your confidence level (LOW/MED/HIGH)?
+
+Be concise. No fluff. Max 120 words total.
+"""
+
 
 # ---------------------------------------------------------------------------
 # Vision Agent
@@ -157,6 +176,22 @@ class Vision(BaseAgent[TradingSignal]):
                 prompt = prompt + "\n\n" + memory_block
         except Exception as _mem_exc:  # noqa: BLE001
             self._log.debug(f"[Vision] Episodic memory fetch skipped: {_mem_exc}")
+
+        # Story 133 — Vision Pre-Reasoning: reflect before generating signal.
+        # Adds ~1 extra LLM call when enabled. Fails silently.
+        if settings.vision_pre_reasoning_enabled:
+            try:
+                reasoning = await self._pre_reason(prompt)
+                if reasoning:
+                    prompt = (
+                        prompt
+                        + "\n\n=== Pre-Analysis Reasoning (internal reflection) ===\n"
+                        + reasoning
+                        + "\n\nNow produce the final TradingSignal JSON based on the above."
+                    )
+                    self._log.debug(f"[Vision] Pre-reasoning injected ({len(reasoning)} chars)")
+            except Exception as _pr_exc:  # noqa: BLE001
+                self._log.debug(f"[Vision] Pre-reasoning skipped: {_pr_exc}")
 
         try:
             raw = await self._call_llm(prompt)
@@ -354,6 +389,25 @@ class Vision(BaseAgent[TradingSignal]):
 
     async def _call_llm(self, user_prompt: str) -> str:
         return await self._llm.chat(_SYSTEM_PROMPT, user_prompt)
+
+    async def _pre_reason(self, analysis_prompt: str) -> str:
+        """
+        Story 133 — Vision Pre-Reasoning step (CrewAI Reasoning pattern).
+
+        Calls the LLM once with _PRE_REASONING_SYSTEM to produce a free-text
+        analytical reflection. The returned text is injected into the final
+        TradingSignal prompt as a "Pre-Analysis Reasoning" block, enriching
+        the context before the structured JSON call.
+
+        - Uses the same LLM client (_llm) but a different system prompt.
+        - Fails silently: caller catches exceptions and skips injection.
+        - Returns empty string if response is blank or very short (< 20 chars).
+        """
+        raw = await self._llm.chat(_PRE_REASONING_SYSTEM, analysis_prompt)
+        text = raw.strip()
+        if len(text) < 20:
+            return ""
+        return text
 
     # ------------------------------------------------------------------
     # Parsing & validation
