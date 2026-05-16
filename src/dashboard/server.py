@@ -403,6 +403,18 @@ class MekkaDashboardServer:
         self._app.router.add_post("/api/auth/logout", self._handle_auth_logout)
         self._app.router.add_get("/api/auth/me", self._handle_auth_me)
         self._app.router.add_get("/metrics", self._handle_metrics)
+        self._app.router.add_get("/api/cost", self._handle_cost)          # Story 147
+        self._app.router.add_get("/api/benchmarks", self._handle_benchmarks)  # Story 151
+        self._app.router.add_get("/api/kernel", self._handle_kernel)      # Story 153
+        self._app.router.add_post("/api/kernel/invoke", self._handle_kernel_invoke)  # Story 153
+        self._app.router.add_get("/api/events", self._handle_events)          # Story 154
+        self._app.router.add_get("/api/events/stream", self._handle_events_stream)  # Story 172
+        self._app.router.add_get("/api/step-guard", self._handle_step_guard)  # Story 155
+        self._app.router.add_get("/api/microagents", self._handle_microagents)  # Story 156
+        self._app.router.add_get("/api/context-window", self._handle_context_window)    # Story 159
+        self._app.router.add_get("/api/signal-validator", self._handle_signal_validator)  # Story 158
+        self._app.router.add_get("/api/repo-map", self._handle_repo_map)              # Story 160
+        self._app.router.add_get("/api/signal-changelog", self._handle_signal_changelog)  # Story 162
         self._app.router.add_get("/ws", self._handle_ws)
         self._app.router.add_get("/api/hl/candles", self._handle_hl_candles)
         self._app.router.add_get("/ws/live", self._handle_ws_live)
@@ -3380,6 +3392,586 @@ class MekkaDashboardServer:
             # Lazy retention: prune oldest snapshots/bundles when the new
             # minute lands. Cheap (1x/min) and keeps disk usage bounded.
             await asyncio.to_thread(self._prune_snapshot_dir)
+
+    # ------------------------------------------------------------------
+    # LLM Cost Dashboard — GET /api/cost                    (Story 147)
+    # ------------------------------------------------------------------
+
+    async def _handle_cost(self, request: web.Request) -> web.Response:
+        """GET /api/cost — LLM cost and token usage aggregations.
+
+        Returns per-session totals, per-model breakdown, per-agent breakdown,
+        and the last 20 individual calls for live monitoring.
+        No auth required (read-only metrics).
+        """
+        import json as _json
+        try:
+            from src.services.llm_cost_tracker import get_llm_cost_tracker
+            tracker = get_llm_cost_tracker(auto_register=True)
+            data = tracker.summary()
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, "cost": data}),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return web.Response(
+                content_type="application/json",
+                status=500,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+
+    # ------------------------------------------------------------------
+    # Pipeline Benchmarks — GET /api/benchmarks             (Story 151)
+    # ------------------------------------------------------------------
+
+    async def _handle_benchmarks(self, request: web.Request) -> web.Response:
+        """GET /api/benchmarks — pipeline latency metrics.
+
+        Returns per-stage latency percentiles (p50/p95/p99/max), slow cycle
+        history, and histogram for monitoring end-to-end pipeline performance.
+        Alerts when cycles exceed 30s (configured via pipeline_benchmark).
+        No auth required (read-only metrics).
+        """
+        import json as _json
+        try:
+            from src.services.pipeline_benchmark import get_pipeline_benchmark
+            bench = get_pipeline_benchmark()
+            data = bench.summary()
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, "benchmarks": data}),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return web.Response(
+                content_type="application/json",
+                status=500,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+
+    # ------------------------------------------------------------------
+    # Mekka Kernel — GET /api/kernel  POST /api/kernel/invoke (Story 153)
+    # ------------------------------------------------------------------
+
+    async def _handle_kernel(self, request: web.Request) -> web.Response:
+        """GET /api/kernel — list registered plugins and tool definitions.
+
+        Returns all @mekka_function functions exposed to LLM function calling,
+        with full OpenAI-compatible schema for each tool.
+        No auth required (read-only schema discovery).
+        """
+        import json as _json
+        try:
+            from src.services.mekka_kernel import get_mekka_kernel
+            kernel = get_mekka_kernel()
+            tag_filter = request.rel_url.query.get("tags", "").split(",") if request.rel_url.query.get("tags") else None
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({
+                    "ok": True,
+                    "plugins": kernel.plugin_names,
+                    "tool_count": len(kernel.get_tool_definitions()),
+                    "tools": kernel.get_tool_definitions(tags=tag_filter),
+                    "function_map": kernel.get_function_map(),
+                }),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return web.Response(
+                content_type="application/json",
+                status=500,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+
+    async def _handle_kernel_invoke(self, request: web.Request) -> web.Response:
+        """POST /api/kernel/invoke — invoke a kernel function by tool call name.
+
+        Body: {"name": "market__detect_regime", "arguments": {"btc_trend": "BULLISH"}}
+        Returns the function result as JSON.
+        Requires auth (executes agent code).
+        """
+        import json as _json
+        try:
+            body = await request.json()
+            name = body.get("name", "")
+            arguments = body.get("arguments", {})
+            if not name:
+                return web.Response(
+                    content_type="application/json",
+                    status=400,
+                    text=_json.dumps({"ok": False, "error": "Missing 'name' field"}),
+                )
+            from src.services.mekka_kernel import get_mekka_kernel
+            kernel = get_mekka_kernel()
+            result = await kernel.invoke_from_tool_call(
+                name=name,
+                arguments_json=_json.dumps(arguments),
+            )
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, "result": result}),
+            )
+        except (KeyError, ValueError) as exc:
+            return web.Response(
+                content_type="application/json",
+                status=400,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return web.Response(
+                content_type="application/json",
+                status=500,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+
+    # ------------------------------------------------------------------
+    # CycleEventLog — GET /api/events              (Story 154)
+    # ------------------------------------------------------------------
+
+    async def _handle_events(self, request: web.Request) -> web.Response:
+        """GET /api/events — return CycleEventLog summary (OpenHands EventLog pattern).
+
+        Query params:
+          ?symbol=BTC   — filter events by symbol
+          ?type=CYCLE_START — filter events by event_type
+          ?cycle_id=abc — replay a specific cycle
+          ?last=N       — return last N events (default: summary)
+        """
+        import json as _json
+        try:
+            from src.services.cycle_event_log import get_cycle_event_log
+            log = get_cycle_event_log()
+
+            symbol = request.rel_url.query.get("symbol", "")
+            event_type = request.rel_url.query.get("type", "")
+            cycle_id = request.rel_url.query.get("cycle_id", "")
+            last_n_str = request.rel_url.query.get("last", "")
+
+            if cycle_id:
+                data = log.cycle_summary(cycle_id)
+            elif symbol:
+                events = log.filter_by_symbol(symbol)
+                data = {"symbol": symbol, "events": [e.to_dict() for e in events]}
+            elif event_type:
+                events = log.filter_by_type(event_type)
+                data = {"event_type": event_type, "events": [e.to_dict() for e in events]}
+            elif last_n_str:
+                try:
+                    n = int(last_n_str)
+                    events = log.last_n(n)
+                    data = {"last_n": n, "events": [e.to_dict() for e in events]}
+                except ValueError:
+                    data = log.summary()
+            else:
+                data = log.summary()
+
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, **data}),
+            )
+        except Exception as exc:  # noqa: BLE001
+            import json as _json
+            return web.Response(
+                content_type="application/json",
+                status=500,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+
+    # ------------------------------------------------------------------
+    # CycleEventLog SSE Stream — GET /api/events/stream    (Story 172)
+    # ------------------------------------------------------------------
+
+    async def _handle_events_stream(self, request: web.Request) -> web.StreamResponse:
+        """GET /api/events/stream — Server-Sent Events stream of CycleEventLog.
+
+        Streams new events as they appear in the CycleEventLog rolling window.
+        Clients receive a heartbeat every 15 seconds to detect disconnection.
+
+        Query params:
+          ?symbol=BTC  — filter events by symbol (optional)
+          ?last=20     — seed stream with the last N events before live polling
+                         (default: 10; max: 100)
+
+        SSE format (each event):
+          data: {"event_type": "CYCLE_START", "symbol": "BTC", ...}\\n\\n
+
+        Heartbeat (every 15s, no event):
+          : heartbeat\\n\\n
+
+        Pattern based on aiohttp SSE best practices — StreamResponse with
+        text/event-stream content type, async polling loop, graceful disconnect.
+        """
+        import json as _json
+        import asyncio as _asyncio
+
+        symbol_filter = request.rel_url.query.get("symbol", "").strip().upper()
+        try:
+            seed_n = max(0, min(int(request.rel_url.query.get("last", "10")), 100))
+        except (ValueError, TypeError):
+            seed_n = 10
+
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+        await resp.prepare(request)
+
+        async def _send(payload: str) -> bool:
+            """Write one SSE data frame. Returns False if client disconnected."""
+            try:
+                await resp.write(f"data: {payload}\n\n".encode())
+                return True
+            except (ConnectionResetError, asyncio.CancelledError):
+                return False
+
+        async def _heartbeat() -> bool:
+            try:
+                await resp.write(b": heartbeat\n\n")
+                return True
+            except (ConnectionResetError, asyncio.CancelledError):
+                return False
+
+        try:
+            from src.services.cycle_event_log import get_cycle_event_log
+            log = get_cycle_event_log()
+
+            # --- Seed: send last N events so the UI has initial state ---
+            if seed_n > 0:
+                seed_events = log.last_n(seed_n)
+                if symbol_filter:
+                    seed_events = [e for e in seed_events if getattr(e, "symbol", "").upper() == symbol_filter]
+                for ev in seed_events:
+                    d = ev.to_dict() if hasattr(ev, "to_dict") else {"raw": str(ev)}
+                    if not await _send(_json.dumps(d)):
+                        return resp
+
+            # --- Live polling loop ---
+            # Track the last seen event count to detect new events.
+            # CycleEventLog is an append-only rolling deque — we compare
+            # the current deque length to detect additions.
+            last_seen: int = log.total_count() if hasattr(log, "total_count") else len(log.last_n(1000))
+            heartbeat_counter = 0
+
+            while True:
+                await _asyncio.sleep(1.0)  # 1-second poll interval
+
+                # Check if client disconnected (connection_lost sets closed)
+                if resp.task is not None and resp.task.done():
+                    break
+                if request.transport is None or request.transport.is_closing():
+                    break
+
+                # Fetch new events since last check
+                try:
+                    current_count = log.total_count() if hasattr(log, "total_count") else len(log.last_n(1000))
+                    if current_count > last_seen:
+                        delta = current_count - last_seen
+                        new_events = log.last_n(min(delta, 50))
+                        if symbol_filter:
+                            new_events = [e for e in new_events if getattr(e, "symbol", "").upper() == symbol_filter]
+                        for ev in new_events:
+                            d = ev.to_dict() if hasattr(ev, "to_dict") else {"raw": str(ev)}
+                            if not await _send(_json.dumps(d)):
+                                return resp
+                        last_seen = current_count
+                except Exception:  # noqa: BLE001
+                    pass  # log unavailable — keep streaming, send heartbeat
+
+                # Heartbeat every ~15 seconds (15 × 1s poll)
+                heartbeat_counter += 1
+                if heartbeat_counter >= 15:
+                    heartbeat_counter = 0
+                    if not await _heartbeat():
+                        break
+
+        except _asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            try:
+                await resp.write_eof()
+            except Exception:  # noqa: BLE001
+                pass
+
+        return resp
+
+    # ------------------------------------------------------------------
+    # AgentStepGuard — GET /api/step-guard          (Story 155)
+    # ------------------------------------------------------------------
+
+    async def _handle_step_guard(self, request: web.Request) -> web.Response:
+        """GET /api/step-guard — return global AgentStepGuard statistics."""
+        import json as _json
+        try:
+            from src.services.agent_step_guard import NickFuryStepGuard
+            from src.config.settings import settings
+            data = {
+                **NickFuryStepGuard.global_summary(),
+                "configured_max_iterations": settings.agent_max_step_iterations,
+                "configured_stuck_threshold": settings.agent_stuck_threshold,
+            }
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, **data}),
+            )
+        except Exception as exc:  # noqa: BLE001
+            import json as _json
+            return web.Response(
+                content_type="application/json",
+                status=500,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+
+    # ------------------------------------------------------------------
+    # MicroagentRegistry — GET /api/microagents     (Story 156)
+    # ------------------------------------------------------------------
+
+    async def _handle_microagents(self, request: web.Request) -> web.Response:
+        """GET /api/microagents — list loaded microagents and their metadata.
+
+        Query params:
+          ?regime=BEAR — return regime-specific prompt injection text
+          ?trigger=SMALL_CAP&type=risk — filter by trigger + type
+        """
+        import json as _json
+        try:
+            from src.services.microagent_registry import get_microagent_registry
+            registry = get_microagent_registry()
+
+            regime = request.rel_url.query.get("regime", "")
+            trigger = request.rel_url.query.get("trigger", "")
+            agent_type = request.rel_url.query.get("type", "")
+
+            if regime:
+                prompt = registry.get_regime_prompt(regime)
+                data = {
+                    "regime": regime,
+                    "prompt_injection": prompt,
+                    "has_prompt": bool(prompt),
+                }
+            elif trigger:
+                agents = registry.get_by_trigger(trigger, agent_type=agent_type)
+                data = {
+                    "trigger": trigger,
+                    "type_filter": agent_type,
+                    "agents": [a.to_dict() for a in agents],
+                }
+            else:
+                data = registry.summary()
+
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, **data}),
+            )
+        except Exception as exc:  # noqa: BLE001
+            import json as _json
+            return web.Response(
+                content_type="application/json",
+                status=500,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+
+    # ------------------------------------------------------------------
+    # ContextWindowTracker — GET /api/context-window          (Story 159)
+    # ------------------------------------------------------------------
+
+    async def _handle_context_window(self, request: web.Request) -> web.Response:
+        """GET /api/context-window — Context window usage por ciclo/estágio.
+
+        Query params:
+          ?cycle_id=BTC_123 — summary de um ciclo específico
+          ?top=10           — N maiores consumidores (default 10)
+
+        Baseado no SWE-agent ContextWindowManager:
+          "The LLM Controller handles context window management and
+           provides visibility into token usage per pipeline stage."
+        """
+        import json as _json
+        try:
+            from src.services.context_window_tracker import get_context_window_tracker
+            tracker = get_context_window_tracker()
+
+            cycle_id = request.rel_url.query.get("cycle_id", "")
+            top_n_str = request.rel_url.query.get("top", "10")
+            try:
+                top_n = int(top_n_str)
+            except (ValueError, TypeError):
+                top_n = 10
+
+            if cycle_id:
+                data = tracker.cycle_summary(cycle_id)
+            else:
+                data = tracker.summary()
+                data["top_consumers"] = tracker.get_top_consumers(n=top_n)
+
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, **data}),
+            )
+        except Exception as exc:  # noqa: BLE001
+            import json as _json
+            return web.Response(
+                content_type="application/json",
+                status=500,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+
+    # ------------------------------------------------------------------
+    # SignalValidator — GET /api/signal-validator              (Story 158)
+    # ------------------------------------------------------------------
+
+    async def _handle_signal_validator(self, request: web.Request) -> web.Response:
+        """GET /api/signal-validator — configuração e thresholds do validador.
+
+        Retorna os thresholds configurados no SignalValidator singleton.
+        Útil para auditoria: "por que este signal foi rejeitado?".
+
+        Baseado no linting do SWE-agent:
+          "Edits are validated by a built-in linter, with syntactically
+           invalid changes automatically rejected."
+        """
+        import json as _json
+        try:
+            from src.services.signal_validator import get_signal_validator
+            validator = get_signal_validator()
+
+            data = {
+                "min_confidence_long": validator._min_conf_long,
+                "min_confidence_short": validator._min_conf_short,
+                "min_confidence_hold": validator._min_conf_hold,
+                "min_risk_reward": validator._min_rr,
+                "max_total_risk_pct": validator._max_total_risk,
+                "require_reasoning": validator._require_reasoning,
+                "min_reasoning_chars": validator._min_reasoning_chars,
+                "description": (
+                    "Pre-Batman signal linter (SWE-agent pattern). "
+                    "Signals failing validation are rejected before Batman gates."
+                ),
+            }
+
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, **data}),
+            )
+        except Exception as exc:  # noqa: BLE001
+            import json as _json
+            return web.Response(
+                content_type="application/json",
+                status=500,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+
+    # ------------------------------------------------------------------
+    # MekkaRepoMap — GET /api/repo-map                         (Story 160)
+    # ------------------------------------------------------------------
+
+    async def _handle_repo_map(self, request: web.Request) -> web.Response:
+        """GET /api/repo-map — compact symbol map of the Mekka codebase.
+
+        Query params:
+          ?dir=agents   — filtra por subdiretório (agents/services/models)
+          ?symbol=Batman — busca arquivos que contêm um símbolo
+          ?format=compact — retorna string compacta pronta para prompt
+
+        Baseado em aider/repomap.py:
+          "Aider builds a tree-sitter based repository map to give the LLM
+           a compact overview of the codebase."
+        """
+        import json as _json
+        try:
+            from src.services.repo_map import get_repo_map
+            rmap = get_repo_map()
+
+            dir_filter = request.rel_url.query.get("dir", "")
+            symbol = request.rel_url.query.get("symbol", "")
+            fmt = request.rel_url.query.get("format", "summary")
+
+            if symbol:
+                files = rmap.find_symbol(symbol)
+                data = {"symbol": symbol, "found_in": files}
+            elif fmt == "compact":
+                dirs = (dir_filter,) if dir_filter else None
+                data = {
+                    "compact": rmap.to_compact_string(dirs=dirs),
+                    "prompt_section": rmap.to_prompt_section(dirs=dirs),
+                }
+            elif dir_filter == "agents":
+                data = {"agent_map": rmap.get_agent_map()}
+            elif dir_filter == "services":
+                data = {"service_map": rmap.get_service_map()}
+            else:
+                data = rmap.summary()
+
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, **data}),
+            )
+        except Exception as exc:  # noqa: BLE001
+            import json as _json
+            return web.Response(
+                content_type="application/json",
+                status=500,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+
+    # ------------------------------------------------------------------
+    # SignalChangeLog — GET /api/signal-changelog               (Story 162)
+    # ------------------------------------------------------------------
+
+    async def _handle_signal_changelog(self, request: web.Request) -> web.Response:
+        """GET /api/signal-changelog — histórico de diffs entre signals consecutivos.
+
+        Query params:
+          ?symbol=BTC  — records recentes de um símbolo específico
+          ?n=10        — número de records (default 10)
+          ?flips=1     — somente records com mudança de action
+
+        Baseado em aider/commands.py auto-commit + editblock_coder.py:
+          "Aider auto-commits each change with a descriptive commit message.
+           SEARCH/REPLACE format makes it explicit what changed."
+        """
+        import json as _json
+        try:
+            from src.services.signal_changelog import get_signal_changelog
+            log = get_signal_changelog()
+
+            symbol = request.rel_url.query.get("symbol", "")
+            n_str = request.rel_url.query.get("n", "10")
+            flips_only = request.rel_url.query.get("flips", "") == "1"
+
+            try:
+                n = int(n_str)
+            except (ValueError, TypeError):
+                n = 10
+
+            if symbol:
+                if flips_only:
+                    records = log.get_action_flips(symbol)[-n:]
+                else:
+                    records = log.get_recent(symbol, n=n)
+                data = {
+                    "symbol": symbol,
+                    "records": [r.to_dict() for r in records],
+                    "total_returned": len(records),
+                }
+            else:
+                data = log.summary()
+
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, **data}, default=str),
+            )
+        except Exception as exc:  # noqa: BLE001
+            import json as _json
+            return web.Response(
+                content_type="application/json",
+                status=500,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
 
     # ------------------------------------------------------------------
     # Widget Prefs — GET /api/prefs  POST /api/prefs          (Story 042)

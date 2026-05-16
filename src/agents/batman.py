@@ -1176,6 +1176,102 @@ class Batman(BaseAgent[RiskApproval]):
             adjusted_leverage = _max_lev
 
         # ---------------------------------------------------------------
+        # 5b. Market Regime Gate (Story 148)
+        #
+        # Uses MarketRegimeDetector output (passed via signal.metadata
+        # or resolved from BTC data) to apply regime-aware adjustments:
+        #
+        #   BEAR:     leverage capped to bear_regime_max_leverage (default 2x)
+        #             LONG signals require signal RSI < bear_long_max_rsi (default 40)
+        #   VOLATILE: size × volatile_regime_size_multiplier (default 0.7)
+        #   BULL:     no restrictions (potentially more permissive in future)
+        #   SIDEWAYS: no restrictions
+        #
+        # Regime is read from signal.metadata["market_regime"] (string).
+        # Fails open when metadata is missing or detector is unavailable.
+        # ---------------------------------------------------------------
+        if settings.market_regime_gate_enabled:
+            try:
+                _regime_str = (signal.metadata or {}).get("market_regime", "")
+                if _regime_str:
+                    _regime_str = _regime_str.upper()
+                    if _regime_str == "BEAR":
+                        # Cap leverage for BEAR regime
+                        _bear_lev = settings.bear_regime_max_leverage
+                        if adjusted_leverage > _bear_lev:
+                            reasons.append(
+                                f"[5b] BEAR regime: leverage {adjusted_leverage}x → {_bear_lev}x"
+                            )
+                            breached.append("bear_regime_max_leverage")
+                            adjusted_leverage = _bear_lev
+                        # LONG gate: RSI must be oversold
+                        _signal_rsi = (signal.metadata or {}).get("rsi")
+                        if (
+                            signal.action == TradeAction.LONG
+                            and _signal_rsi is not None
+                            and float(_signal_rsi) >= settings.bear_regime_long_max_rsi
+                        ):
+                            reasons.append(
+                                f"[5b] BEAR regime: LONG rejected — RSI {_signal_rsi:.1f} "
+                                f">= {settings.bear_regime_long_max_rsi:.0f} (not oversold enough)"
+                            )
+                            breached.append("bear_regime_long_rsi_gate")
+                            return RiskApproval(
+                                symbol=symbol,
+                                verdict=RiskVerdict.REJECTED,
+                                reasons=reasons,
+                                breached_limits=breached,
+                            )
+                    elif _regime_str == "VOLATILE":
+                        # Reduce size in volatile regime
+                        _vmult = settings.volatile_regime_size_multiplier
+                        if _vmult < 1.0:
+                            _prev_sz = adjusted_size
+                            adjusted_size = round(adjusted_size * _vmult, 6)
+                            reasons.append(
+                                f"[5b] VOLATILE regime: size ×{_vmult:.2f} "
+                                f"({_prev_sz:.4f} → {adjusted_size:.4f})"
+                            )
+                            breached.append("volatile_regime_size_reduction")
+            except Exception as _regime_exc:  # noqa: BLE001
+                self._log.debug("[Batman] Market regime gate skipped: %s", _regime_exc)
+
+        # ---------------------------------------------------------------
+        # 5c. Asset Classifier Gate (Story 149)
+        #
+        # Uses AssetClassifier cap tier to apply per-tier leverage limits:
+        #   SMALL_CAP → settings.small_cap_max_leverage (default 2x)
+        #   MID_CAP   → settings.mid_cap_max_leverage   (default 3x)
+        #   LARGE_CAP → normal _max_lev (no restriction beyond global cap)
+        #
+        # Tier is read from signal.metadata["cap_tier"] (string).
+        # Falls back to AssetClassifier.cap_tier(symbol) when missing.
+        # Fails open when classifier is unavailable.
+        # ---------------------------------------------------------------
+        if settings.asset_classifier_gate_enabled:
+            try:
+                _cap_tier_str = (signal.metadata or {}).get("cap_tier", "")
+                if not _cap_tier_str:
+                    # Resolve tier dynamically (stateless — no I/O)
+                    from src.services.asset_classifier import AssetClassifier
+                    _cap_tier_str = AssetClassifier().cap_tier(symbol).value
+                _cap_tier_str = _cap_tier_str.upper()
+                if _cap_tier_str == "SMALL_CAP":
+                    _tier_lev_cap = settings.small_cap_max_leverage
+                elif _cap_tier_str == "MID_CAP":
+                    _tier_lev_cap = settings.mid_cap_max_leverage
+                else:
+                    _tier_lev_cap = _max_lev  # LARGE_CAP — no extra restriction
+                if adjusted_leverage > _tier_lev_cap:
+                    reasons.append(
+                        f"[5c] {_cap_tier_str}: leverage {adjusted_leverage}x → {_tier_lev_cap}x"
+                    )
+                    breached.append(f"{_cap_tier_str.lower()}_max_leverage")
+                    adjusted_leverage = _tier_lev_cap
+            except Exception as _tier_exc:  # noqa: BLE001
+                self._log.debug("[Batman] Asset classifier gate skipped: %s", _tier_exc)
+
+        # ---------------------------------------------------------------
         # 6. Final verdict
         # ---------------------------------------------------------------
         if adjusted_size <= 0:

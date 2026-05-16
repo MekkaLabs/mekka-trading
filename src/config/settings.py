@@ -706,6 +706,229 @@ class Settings(BaseSettings):
     )
 
     # --------------------------------------------------------------------------
+    # Opportunity Scanner (Story 145) — pre-scan phase before deep analysis
+    # --------------------------------------------------------------------------
+    opportunity_scan_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, NickFury runs a lightweight pre-scan before deep Layer 1 "
+            "analysis. Symbols are scored by volume spike, RSI extreme, ATR activity, "
+            "and EMA momentum. Only the top-N scoring symbols proceed to full analysis. "
+            "Set OPPORTUNITY_SCAN_ENABLED=true to activate."
+        ),
+    )
+    opportunity_scan_top_n: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description=(
+            "Maximum number of symbols selected for deep analysis after pre-scan. "
+            "When fewer symbols are configured than top_n, all proceed."
+        ),
+    )
+    opportunity_scan_min_score: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Minimum OpportunityScore required to proceed to deep analysis. "
+            "0.0 (default) disables score filtering — all non-blacklisted symbols "
+            "are considered. Set to e.g. 0.1 to skip flat/quiet markets."
+        ),
+    )
+
+    # --------------------------------------------------------------------------
+    # Mock Realism (Story 144) — paper trading with realistic friction
+    # --------------------------------------------------------------------------
+    mock_realism_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True and paper_trading=True, IronMan simulates realistic "
+            "market friction: random network latency (50-500ms), partial fills "
+            "(50-100%% of quantity), and extra randomized slippage (0-3× base). "
+            "Useful for stress-testing the pipeline before real capital. "
+            "Set MOCK_REALISM_ENABLED=true to activate."
+        ),
+    )
+    mock_realism_latency_min_ms: int = Field(
+        default=50,
+        ge=0,
+        description="Minimum simulated exchange latency in milliseconds.",
+    )
+    mock_realism_latency_max_ms: int = Field(
+        default=500,
+        ge=0,
+        description="Maximum simulated exchange latency in milliseconds.",
+    )
+    mock_realism_partial_fill_min_pct: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Minimum fill ratio for partial fill simulation (0.5 = fills at least 50%%)."
+        ),
+    )
+    mock_realism_extra_slippage_max_bps: float = Field(
+        default=10.0,
+        ge=0.0,
+        description=(
+            "Maximum additional randomized slippage in basis points on top of "
+            "paper_slippage_bps. Applied uniformly at random in [0, max]."
+        ),
+    )
+
+    # --------------------------------------------------------------------------
+    # DEGRADED_MODE formal (Story 140)
+    # --------------------------------------------------------------------------
+    degraded_mode_recovery_cycles: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description=(
+            "Number of consecutive successful Vision/LLM cycles required to "
+            "exit DEGRADED_MODE and resume normal operation (new entries allowed). "
+            "Default 5: after 5 clean cycles in a row the system self-heals."
+        ),
+    )
+
+    # --------------------------------------------------------------------------
+    # Market Regime Gate — Batman adjustments by market regime (Story 148)
+    # --------------------------------------------------------------------------
+    market_regime_gate_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, Batman adjusts gates based on MarketRegime (BULL/BEAR/SIDEWAYS/VOLATILE). "
+            "In BEAR: leverage capped to bear_regime_max_leverage, LONGs need RSI < bear_long_max_rsi. "
+            "In VOLATILE: size multiplied by volatile_regime_size_multiplier."
+        ),
+    )
+    bear_regime_max_leverage: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="Max leverage allowed when market regime is BEAR. Default 2x (half of normal 5x).",
+    )
+    bear_regime_long_max_rsi: float = Field(
+        default=40.0,
+        ge=10.0,
+        le=60.0,
+        description=(
+            "In BEAR regime, LONG signals are only approved when the signal RSI is below this threshold. "
+            "Default 40: only oversold LONG opportunities allowed in a bear market."
+        ),
+    )
+    volatile_regime_size_multiplier: float = Field(
+        default=0.7,
+        ge=0.1,
+        le=1.0,
+        description=(
+            "Position size multiplier when market regime is VOLATILE. "
+            "Default 0.7: reduces position size by 30% during high-volatility regimes."
+        ),
+    )
+
+    # --------------------------------------------------------------------------
+    # Asset Classifier Gate — Batman adjustments by cap tier (Story 149)
+    # --------------------------------------------------------------------------
+    asset_classifier_gate_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, Batman applies per-cap-tier leverage limits. "
+            "SMALL_CAP → small_cap_max_leverage, MID_CAP → mid_cap_max_leverage, "
+            "LARGE_CAP → normal max_leverage."
+        ),
+    )
+    small_cap_max_leverage: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="Max leverage for SMALL_CAP assets (default 2x — higher risk, smaller positions).",
+    )
+    mid_cap_max_leverage: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Max leverage for MID_CAP assets (default 3x — moderate risk).",
+    )
+
+    # --------------------------------------------------------------------------
+    # Agent Step Guard (Story 155 — OpenHands-inspired MAX_ITERATIONS guard)
+    # --------------------------------------------------------------------------
+    agent_max_step_iterations: int = Field(
+        default=100,
+        ge=5,
+        le=1000,
+        description=(
+            "Maximum pipeline steps per agent cycle before AgentStepGuard "
+            "triggers graceful abort (OpenHands MAX_ITERATIONS pattern). "
+            "Prevents infinite loops without crashing the executor."
+        ),
+    )
+    agent_stuck_threshold: int = Field(
+        default=5,
+        ge=2,
+        le=20,
+        description=(
+            "Number of consecutive identical result hashes that triggers "
+            "stuck-loop detection in AgentStepGuard. If the last N steps "
+            "all produce the same hash → stuck → graceful abort."
+        ),
+    )
+
+    # --------------------------------------------------------------------------
+    # Circuit Breaker Matrix — gaps (Story 138)
+    # --------------------------------------------------------------------------
+    llm_error_rate_window: int = Field(
+        default=10,
+        ge=2,
+        le=100,
+        description=(
+            "Sliding window size for LLM error rate circuit breaker. "
+            "Counts the last N LLM calls and measures the fraction that errored."
+        ),
+    )
+    llm_error_rate_threshold: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "If LLM error rate in the sliding window exceeds this fraction, "
+            "NickFury enters DEGRADED_MODE (zero new entries). Default 0.5 = 50%."
+        ),
+    )
+    stale_price_window: int = Field(
+        default=3,
+        ge=2,
+        le=10,
+        description=(
+            "Number of consecutive identical prices before the feed is considered stale. "
+            "StalePriceDetector trips when last N prices vary by < stale_price_min_variation_pct."
+        ),
+    )
+    stale_price_min_variation_pct: float = Field(
+        default=0.0001,
+        gt=0.0,
+        description=(
+            "Minimum fractional price variation across the stale window. "
+            "0.0001 = 0.01% — any change larger than this resets the stale detector."
+        ),
+    )
+    spread_history_window: int = Field(
+        default=20,
+        ge=3,
+        le=200,
+        description="Number of ticks in the SpreadBreaker moving average window.",
+    )
+    spread_max_multiplier: float = Field(
+        default=3.0,
+        gt=1.0,
+        description=(
+            "Spread is considered abnormal when current_spread > "
+            "spread_max_multiplier × moving_average_spread. "
+            "Triggers skip-trade for the current cycle."
+        ),
+    )
+
+    # --------------------------------------------------------------------------
     # Adaptive Layer 1 Routing (Story 135)
     # --------------------------------------------------------------------------
     layer1_routing_enabled: bool = Field(

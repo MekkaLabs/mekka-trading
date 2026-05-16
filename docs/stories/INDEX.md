@@ -4,7 +4,7 @@
 arquitetural. Stories abaixo são lidas em ordem numérica dentro de cada
 bloco.
 
-Última story entregue: **131** (Mixture of Agents Vision — 3 LLMs em paralelo + orchestrator consenso, padrão AutoGen MoA).
+Última story entregue: **172** (CycleEventLog SSE Dashboard Endpoint — streaming em tempo real do audit trail para o Live Trading Panel).
 Stories 047–124 entregues e registradas no CHANGELOG.md (versões 0.2.0–0.8.0).
 
 ---
@@ -211,3 +211,88 @@ event bus in-process para observabilidade desacoplada.
 - [134 — Memory Consolidation: dedup semântico no add() e warm_up()](story-134-memory-consolidation.md)
 - [135 — Adaptive Layer 1 Routing: skip agents por regime de mercado (Hierarchical Process)](story-135-adaptive-routing.md)
 - [136 — MekkaEventBus: pub/sub in-process para observabilidade desacoplada](story-136-event-bus.md)
+
+## Milestone 22 — Resilience II + Observability + Intelligence Gaps
+
+DEGRADED_MODE formal (state machine NORMAL↔DEGRADED), snapshot fingerprinting,
+custo de LLM via EventBus, prompt versioning, mock realism para testes de stress,
+opportunity scanner e asset classifier com market regime detection.
+
+Última story entregue: **146** (Asset Classifier + Market Regime Detection).
+
+- [137 — Teste do Milhão: gate checklist completo antes de capital real](story-137-teste-do-milhao.md)
+- [138 — Circuit Breaker Matrix Gaps: RateWindowBreaker + StalePriceDetector + SpreadBreaker](story-138-circuit-breakers.md)
+- [139 — Degradation Matrix: doc de comportamento por dependência + chaos tests](story-139-degradation-matrix.md)
+- [140 — DEGRADED_MODE Formal: state machine NORMAL↔DEGRADED + recovery automático](story-140-degraded-mode.md)
+- [141 — MarketSnapshot snapshot_id: SHA-256 fingerprint no MarketAnalysis](story-141-snapshot-id.md)
+- [142 — LLM Cost Metrics: evento llm.call.completed com tokens e custo](story-142-llm-cost-metrics.md)
+- [143 — Prompt Versioning: SHA-256 hash de prompts no audit trail](story-143-prompt-versioning.md)
+- [144 — Mock Realism IronMan: latência aleatória, partial fills, slippage extra](story-144-mock-realism.md)
+- [145 — Opportunity Scanner: pré-scan de símbolos antes da análise profunda](story-145-opportunity-scanner.md)
+- [146 — Asset Classifier + Market Regime: classificação cap tier + bull/bear/sideways/volatile](story-146-asset-classifier.md)
+
+## Milestone 24 — Pipeline Integration: Connecting AI Framework Patterns into the Live Cycle
+
+Conecta todos os serviços criados nas Stories 152–162 diretamente no _cycle_for_symbol do NickFury e no Vision,
+fechando o ciclo entre construção e execução real.
+
+Última story entregue: **167** (ContextWindowTracker NickFury Integration).
+
+- [163 — Signal Metadata Pipeline: NickFury auto-inject market_regime + cap_tier antes do Batman](story-163-signal-metadata-pipeline.md)
+- [164 — Vision MicroagentRegistry + RepoMap Injection: regime-aware prompt + compact agent map no Vision](story-164-vision-context-injection.md)
+- [165 — CycleEventLog NickFury Integration: CYCLE_START/ANALYSIS_DONE/SIGNAL_EMITTED/RISK_VERDICT/EXECUTION_DONE/CYCLE_END](story-165-cycle-event-log-integration.md)
+- [166 — AgentStepGuard NickFury Integration: stuck loop detection + graceful abort após Vision e Batman](story-166-step-guard-integration.md)
+- [167 — SignalChangeLog + ContextWindowTracker NickFury Integration: diff audit trail + token tracking por ciclo](story-167-changelog-cwt-integration.md)
+
+## Milestone 25 — Pipeline Integration Wave 2: Validation, Compression & Observability Live
+
+Completa a integração dos serviços restantes de AI Framework Patterns no pipeline vivo:
+SignalValidator bloqueia sinais inválidos antes do Batman, BoundedOutput e ChatHistoryCompressor
+protegem o contexto do Vision contra overflow, ObservabilityPlugin expõe todo o telemetry via
+MekkaKernel function calling, e o endpoint SSE entrega o CycleEventLog em tempo real para o
+Live Trading Panel.
+
+Última story entregue: **172** (CycleEventLog SSE Dashboard Endpoint).
+
+- [168 — SignalValidator NickFury Integration: valida sinal antes do Batman, retorna CycleReport(error=...) se inválido](story-168-signal-validator-integration.md)
+- [169 — BoundedOutput Vision Integration: truncate_str(12k) no prompt de análise + bound_prompt_section(3k) no bloco de memória](story-169-bounded-output-vision.md)
+- [170 — ChatHistoryCompressor Vision Integration: compress antes do LLM call quando CWT reporta near-limit](story-170-chat-compressor-vision.md)
+- [171 — ObservabilityPlugin MekkaKernel Integration: 5 @mekka_function expondo CycleEventLog/SignalChangeLog/CWT/StepGuard/Validator](story-171-observability-plugin.md)
+- [172 — CycleEventLog SSE Dashboard Endpoint: GET /api/events/stream com Server-Sent Events para Live Trading Panel](story-172-sse-endpoint.md)
+
+## Milestone 23 — Cost Intelligence + Regime-Aware Gates + Chaos Validation + AI Framework Patterns
+
+LLM Cost Dashboard com agregações em memória e endpoint HTTP, integração do
+MarketRegimeDetector e AssetClassifier no Batman (gates 5b e 5c), testes de
+chaos engineering automatizados (CH-01–CH-07), benchmarks de latência
+end-to-end com alertas de ciclos lentos, e padrões de dois frameworks líderes:
+
+- **Microsoft Semantic Kernel**: filter chain (InvocationFilter) + plugin registry
+  com decorator @mekka_function gerando OpenAI function calling schema
+- **OpenHands (OpenDevin)**: append-only CycleEventLog (event sourcing), AgentStepGuard
+  (MAX_ITERATIONS + stuck loop detection) e MicroagentRegistry (regime-aware Markdown prompts)
+- **SWE-agent**: BoundedOutput (ACI output limiter — truncação explícita de strings/listas/dicts),
+  SignalValidator (linter-on-edit pré-Batman — geometria SL/TP, R:R, leverage), ContextWindowTracker
+  (token usage por estágio + alertas 80% + compress_history last_n_observations)
+- **Aider (Aider-AI/aider)**: MekkaRepoMap (compact symbol index sem tree-sitter — scan regex,
+  to_prompt_section() para Vision), ChatHistoryCompressor (compressão estrutural de prompt history
+  quando >80% context window), SignalChangeLog (SEARCH/REPLACE diff entre signals + auto-commit message)
+
+Última story entregue: **162** (SignalChangeLog — Aider auto-commit + SEARCH/REPLACE diff pattern).
+
+- [147 — LLM Cost Dashboard: subscriber llm.call.completed + GET /api/cost](story-147-llm-cost-dashboard.md)
+- [148 — MarketRegime Integration Batman: gate 5b BEAR/VOLATILE leverage+size adjustments](story-148-batman-market-regime.md)
+- [149 — Asset Classifier Integration Batman: gate 5c SMALL/MID/LARGE_CAP leverage caps](story-149-batman-asset-classifier.md)
+- [150 — Chaos Engineering Tests: CH-01 a CH-07 automatizados com mocks](story-150-chaos-engineering.md)
+- [151 — Performance Benchmarks: latência p50/p95/p99 por estágio + GET /api/benchmarks](story-151-performance-benchmarks.md)
+- [152 — Mekka Kernel Filter Chain: SK-style InvocationFilter + AuditLog/Retry/CircuitBreaker/EventPublish](story-152-invocation-filter.md)
+- [153 — @mekka_function + MekkaPlugin Registry: decorator SK-inspired + MekkaKernel OpenAI tool calling](story-153-mekka-kernel.md)
+- [154 — CycleEventLog: append-only event sourcing do ciclo (OpenHands EventLog pattern)](story-154-cycle-event-log.md)
+- [155 — AgentStepGuard: MAX_ITERATIONS + stuck loop detection + graceful recovery (OpenHands PR #5500)](story-155-agent-step-guard.md)
+- [156 — MicroagentRegistry: regime-aware prompts via Markdown microagents (OpenHands microagent system)](story-156-microagent-registry.md)
+- [157 — BoundedOutput: ACI output limiter SWE-agent — truncate_str/list/dict/output, format_observation, last_n_observations](story-157-bounded-output.md)
+- [158 — SignalValidator: linter-on-edit pré-Batman — geometria SL/TP/entry, R:R mínimo, leverage, confidence, reasoning](story-158-signal-validator.md)
+- [159 — ContextWindowTracker: token usage por estágio pipeline + alertas 80% + compress_history (SWE-agent ContextWindowManager)](story-159-context-window-tracker.md)
+- [160 — MekkaRepoMap: compact symbol index sem tree-sitter — scan regex, to_prompt_section() para Vision (Aider repomap.py)](story-160-repo-map.md)
+- [161 — ChatHistoryCompressor: compressão estrutural de prompt history quando >80% context window (Aider history.py)](story-161-chat-history-compressor.md)
+- [162 — SignalChangeLog: SEARCH/REPLACE diff entre TradingSignals consecutivos + auto-commit message (Aider editblock_coder + commands)](story-162-signal-changelog.md)

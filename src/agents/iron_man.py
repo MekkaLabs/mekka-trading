@@ -29,6 +29,7 @@ import this module even when the SDK is not installed.
 from __future__ import annotations
 
 import asyncio
+import random
 import uuid
 from typing import Any, Optional
 
@@ -190,23 +191,66 @@ class IronMan(BaseAgent[ExecutionResult]):
 
         # --------------------------------------------------------------
         # Paper trading branch
+        # Story 144 — Mock Realism: when enabled, simulate realistic friction:
+        #   • Random network latency (50-500ms)
+        #   • Partial fills (50-100% of requested quantity)
+        #   • Extra randomized slippage (0-10 bps on top of paper_slippage_bps)
         # --------------------------------------------------------------
         if settings.paper_trading:
             order_id = f"PAPER-{uuid.uuid4().hex[:12]}"
             sl_id = f"PAPER-SL-{uuid.uuid4().hex[:8]}"
             tp_id = f"PAPER-TP-{uuid.uuid4().hex[:8]}"
-            # [B5] Apply synthetic slippage so paper metrics reflect real-world
-            # fill costs. LONG fills at slightly higher price, SHORT at lower.
+
+            # [B5] Base synthetic slippage
             slip_pct = settings.paper_slippage_bps / 10_000.0
             is_long = signal.action == TradeAction.LONG
+            filled_quantity = quantity  # default: full fill
+            _realism_meta: dict = {}
+
+            # Story 144 — Mock Realism friction
+            if settings.mock_realism_enabled:
+                # 1. Simulate exchange latency
+                latency_ms = random.uniform(
+                    settings.mock_realism_latency_min_ms,
+                    settings.mock_realism_latency_max_ms,
+                )
+                await asyncio.sleep(latency_ms / 1000.0)
+
+                # 2. Partial fill simulation
+                fill_ratio = random.uniform(
+                    settings.mock_realism_partial_fill_min_pct, 1.0
+                )
+                filled_quantity = quantity * fill_ratio
+
+                # 3. Extra randomized slippage
+                extra_bps = random.uniform(0.0, settings.mock_realism_extra_slippage_max_bps)
+                slip_pct += extra_bps / 10_000.0
+
+                _realism_meta = {
+                    "mock_realism": True,
+                    "simulated_latency_ms": round(latency_ms, 1),
+                    "fill_ratio": round(fill_ratio, 4),
+                    "extra_slippage_bps": round(extra_bps, 2),
+                }
+                self._log.debug(
+                    f"[IronMan:MockRealism] {symbol} latency={latency_ms:.0f}ms "
+                    f"fill={fill_ratio:.1%} extra_slip={extra_bps:.1f}bps"
+                )
+
             avg_price = round(entry * (1.0 + slip_pct if is_long else 1.0 - slip_pct), 6)
-            paper_notional = round(quantity * avg_price, 2)
+            paper_notional = round(filled_quantity * avg_price, 2)
+            _exec_status = (
+                ExecutionStatus.PARTIAL
+                if settings.mock_realism_enabled and filled_quantity < quantity * 0.999
+                else ExecutionStatus.PAPER
+            )
+
             result = ExecutionResult(
                 symbol=symbol,
-                status=ExecutionStatus.PAPER,
+                status=_exec_status,
                 is_paper=True,
                 side=side,
-                quantity=round(quantity, 8),
+                quantity=round(filled_quantity, 8),
                 avg_price=avg_price,
                 notional_usd=paper_notional,
                 order_id=order_id,
@@ -218,6 +262,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                     "stop_loss": signal.stop_loss,
                     "take_profit": signal.take_profit,
                     "slippage_bps": settings.paper_slippage_bps,
+                    **_realism_meta,
                 },
             )
             self._log.info(result.summary())

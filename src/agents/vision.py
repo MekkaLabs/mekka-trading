@@ -33,6 +33,7 @@ from src.agents.base import BaseAgent
 from src.config.settings import settings
 from src.models.market_data import MarketAnalysis
 from src.models.signal import TradeAction, TradingSignal
+from src.services.prompt_registry import prompt_version  # Story 143
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +165,21 @@ class Vision(BaseAgent[TradingSignal]):
 
         prompt = analysis.to_prompt()
 
+        # Story 169 — BoundedOutput: limit analysis prompt to avoid context overflow.
+        # Applies truncate_str to the raw analysis prompt (max 12k chars ≈ ~3k tokens).
+        # Fails silently — original prompt used if BoundedOutput unavailable.
+        try:
+            from src.services.bounded_output import BoundedOutput as _BO  # noqa: WPS433
+            _prompt_len_before = len(prompt)
+            prompt = _BO.truncate_str(prompt, max_chars=12_000)
+            if len(prompt) < _prompt_len_before:
+                self._log.debug(
+                    f"[Vision:169] analysis prompt bounded "
+                    f"{_prompt_len_before}→{len(prompt)} chars"
+                )
+        except Exception as _bo169_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:169] BoundedOutput skipped: {_bo169_exc}")
+
         # Story 063 / Story 128 — Episodic Memory: enrich prompt with historical
         # pattern context. Story 128 uses semantic search when _semantic_store is
         # available (LangGraph mode); falls back to SQL equality search otherwise.
@@ -173,9 +189,62 @@ class Vision(BaseAgent[TradingSignal]):
                 analysis, semantic_store=self._semantic_store
             )
             if memory_block:
+                # Story 169 — Bound the memory block before injection (max 3k chars)
+                try:
+                    from src.services.bounded_output import BoundedOutput as _BO2  # noqa: WPS433
+                    memory_block = _BO2.bound_prompt_section(
+                        "Episodic Memory", memory_block, max_chars=3_000
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 prompt = prompt + "\n\n" + memory_block
         except Exception as _mem_exc:  # noqa: BLE001
             self._log.debug(f"[Vision] Episodic memory fetch skipped: {_mem_exc}")
+
+        # Story 164 — MicroagentRegistry regime-aware prompt injection.
+        # Detects the current market regime from the analysis chart data and
+        # appends the matching Markdown microagent prompt to Vision's context.
+        # Fails silently — Vision always proceeds without the context if unavailable.
+        try:
+            from src.services.microagent_registry import get_microagent_registry  # noqa: WPS433
+            _chart164 = analysis.chart if analysis else None
+            _regime164 = "UNKNOWN"
+            if _chart164 and hasattr(_chart164, "trend"):
+                _t164 = _chart164.trend.value if hasattr(_chart164.trend, "value") else str(_chart164.trend)
+                _r164 = float(_chart164.rsi_14) if _chart164.rsi_14 is not None else 50.0
+                _atr164 = float(_chart164.atr_pct) if (hasattr(_chart164, "atr_pct") and _chart164.atr_pct is not None) else 0.0
+                if _atr164 > 0.05:
+                    _regime164 = "VOLATILE"
+                elif _t164 in ("BULLISH", "STRONG_BULL") and _r164 > 55:
+                    _regime164 = "BULL"
+                elif _t164 in ("BEARISH", "STRONG_BEAR") and _r164 < 45:
+                    _regime164 = "BEAR"
+                else:
+                    _regime164 = "SIDEWAYS"
+            _regime_prompt = get_microagent_registry().get_regime_prompt(_regime164)
+            if _regime_prompt:
+                prompt = (
+                    prompt
+                    + f"\n\n=== Market Context ({_regime164} regime) ===\n"
+                    + _regime_prompt
+                )
+                self._log.debug(
+                    f"[Vision:164] Regime prompt injected ({_regime164}, {len(_regime_prompt)} chars)"
+                )
+        except Exception as _mic164_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:164] Microagent injection skipped: {_mic164_exc}")
+
+        # Story 164 — MekkaRepoMap: inject compact agent symbol index.
+        # Lets Vision know which agents exist when formulating reasoning.
+        # Bounded at 800 chars to avoid context bloat. Fails silently.
+        try:
+            from src.services.repo_map import get_repo_map  # noqa: WPS433
+            _rmap_section = get_repo_map().to_prompt_section(max_chars=800, dirs=["src/agents"])
+            if _rmap_section:
+                prompt = prompt + "\n\n" + _rmap_section
+                self._log.debug(f"[Vision:164] RepoMap injected ({len(_rmap_section)} chars)")
+        except Exception as _rmap164_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:164] RepoMap injection skipped: {_rmap164_exc}")
 
         # Story 133 — Vision Pre-Reasoning: reflect before generating signal.
         # Adds ~1 extra LLM call when enabled. Fails silently.
@@ -192,6 +261,34 @@ class Vision(BaseAgent[TradingSignal]):
                     self._log.debug(f"[Vision] Pre-reasoning injected ({len(reasoning)} chars)")
             except Exception as _pr_exc:  # noqa: BLE001
                 self._log.debug(f"[Vision] Pre-reasoning skipped: {_pr_exc}")
+
+        # Story 170 — ChatHistoryCompressor: compress prompt if approaching context limit.
+        # Treats the current prompt as a single-turn "history" and compresses it
+        # when it's too long (>80% of model token limit). Deterministic, zero LLM cost.
+        # Fails silently — original prompt used if compressor unavailable.
+        try:
+            from src.services.chat_history_compressor import get_chat_compressor  # noqa: WPS433
+            from src.services.context_window_tracker import get_context_window_tracker  # noqa: WPS433
+            _symbol170 = getattr(analysis, "symbol", symbol) if analysis else symbol
+            _cwt170 = get_context_window_tracker()
+            # Use cycle_id from symbol if available, else derive from symbol
+            _cid170 = f"vision:{_symbol170}"
+            _cwt170.start_cycle(_cid170, _symbol170, settings.openai_model)
+            _cwt170.record_stage(_cid170, "pre_llm_prompt", prompt, settings.openai_model, _symbol170)
+            if _cwt170.check_limit(_cid170):
+                _fake_history = [{"role": "user", "content": prompt}]
+                _comp_result = get_chat_compressor(keep_last=1).compress(
+                    _fake_history, keep_last=1
+                )
+                if _comp_result.tokens_saved > 0 and _comp_result.turns:
+                    prompt = _comp_result.turns[-1].get("content", prompt)
+                    self._log.debug(
+                        f"[Vision:170] prompt compressed "
+                        f"{_comp_result.tokens_before}→{_comp_result.tokens_after} tokens "
+                        f"(saved {_comp_result.tokens_saved})"
+                    )
+        except Exception as _comp170_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:170] ChatHistoryCompressor skipped: {_comp170_exc}")
 
         try:
             raw = await self._call_llm(prompt)
@@ -493,6 +590,8 @@ class Vision(BaseAgent[TradingSignal]):
             metadata={
                 "model": settings.openai_model,
                 "fallback": False,
+                # Story 143 — prompt version fingerprint for audit trail
+                "prompt_version": prompt_version(_SYSTEM_PROMPT),
             },
         )
 

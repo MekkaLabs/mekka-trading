@@ -16,9 +16,29 @@ The returned string is the raw model output (JSON text for Vision/VisionCritic).
 from __future__ import annotations
 
 import os
-from typing import Optional
+import time
+from typing import Optional, Tuple
 
 from loguru import logger
+
+# Story 142 — LLM Cost Metrics
+# Cost table (USD per 1M tokens) — approximate, valid as of 2026-05.
+# Update when provider pricing changes.
+_COST_TABLE: dict[str, dict[str, float]] = {
+    "gpt-4o":           {"input": 5.00,  "output": 15.00},
+    "gpt-4o-mini":      {"input": 0.15,  "output": 0.60},
+    "gpt-4-turbo":      {"input": 10.00, "output": 30.00},
+    "claude-opus-4-6":  {"input": 15.00, "output": 75.00},
+    "claude-sonnet-4-6":{"input": 3.00,  "output": 15.00},
+    "claude-haiku-4-5-20251001": {"input": 0.25, "output": 1.25},
+}
+_DEFAULT_COST = {"input": 5.00, "output": 15.00}  # conservative fallback
+
+
+def _estimate_cost_usd(model: str, tokens_in: int, tokens_out: int) -> float:
+    """Estimate API cost in USD for a single LLM call."""
+    rates = _COST_TABLE.get(model, _DEFAULT_COST)
+    return (tokens_in * rates["input"] + tokens_out * rates["output"]) / 1_000_000
 
 # ── OpenAI ────────────────────────────────────────────────────────────────────
 try:
@@ -120,36 +140,96 @@ class LLMClient:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    async def chat(self, system_prompt: str, user_prompt: str) -> str:
+    async def chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        agent_id: str = "",
+    ) -> str:
         """
         Send a chat request and return the raw text response.
 
         Tries OpenAI first; on any authentication/rate/API error
         automatically falls back to Anthropic Claude.
 
+        Story 142: publishes `llm.call.completed` event with token usage,
+        estimated cost, provider, model, and agent_id for observability.
+
         Raises RuntimeError if no provider is available or both fail.
         """
         if not self._has_openai and not self._has_anthropic:
             raise RuntimeError("No LLM provider configured (set OPENAI_API_KEY or ANTHROPIC_API_KEY)")
 
-        # Try OpenAI first
-        if self._has_openai:
-            try:
-                return await self._call_openai(system_prompt, user_prompt)
-            except (OpenAIAPIError, OpenAITimeoutError, OpenAIRateLimitError) as exc:
-                logger.warning(
-                    f"[LLMClient] OpenAI failed ({type(exc).__name__}: {exc}) "
-                    f"— falling back to Claude"
-                )
-                if not self._has_anthropic:
-                    raise RuntimeError(f"OpenAI error and no Claude fallback: {exc}") from exc
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[LLMClient] OpenAI unexpected error: {exc} — trying Claude")
-                if not self._has_anthropic:
-                    raise
+        _t0 = time.monotonic()
+        _provider = "none"
+        _model = "none"
+        _tokens_in = 0
+        _tokens_out = 0
+        _content = "{}"
 
-        # Fallback: Anthropic Claude
-        return await self._call_anthropic(system_prompt, user_prompt)
+        try:
+            # Try OpenAI first
+            if self._has_openai:
+                try:
+                    _content, _tokens_in, _tokens_out = await self._call_openai(
+                        system_prompt, user_prompt
+                    )
+                    _provider = "openai"
+                    _model = self._openai_model
+                except (OpenAIAPIError, OpenAITimeoutError, OpenAIRateLimitError) as exc:
+                    logger.warning(
+                        f"[LLMClient] OpenAI failed ({type(exc).__name__}: {exc}) "
+                        f"— falling back to Claude"
+                    )
+                    if not self._has_anthropic:
+                        raise RuntimeError(f"OpenAI error and no Claude fallback: {exc}") from exc
+                    _content, _tokens_in, _tokens_out = await self._call_anthropic(
+                        system_prompt, user_prompt
+                    )
+                    _provider = "anthropic"
+                    _model = self._anthropic_model
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[LLMClient] OpenAI unexpected error: {exc} — trying Claude")
+                    if not self._has_anthropic:
+                        raise
+                    _content, _tokens_in, _tokens_out = await self._call_anthropic(
+                        system_prompt, user_prompt
+                    )
+                    _provider = "anthropic"
+                    _model = self._anthropic_model
+            else:
+                # OpenAI not configured — use Anthropic directly
+                _content, _tokens_in, _tokens_out = await self._call_anthropic(
+                    system_prompt, user_prompt
+                )
+                _provider = "anthropic"
+                _model = self._anthropic_model
+
+            return _content
+
+        finally:
+            # Story 142 — publish cost event (fail-silent, always in finally)
+            _elapsed_ms = round((time.monotonic() - _t0) * 1000, 1)
+            _cost = _estimate_cost_usd(_model, _tokens_in, _tokens_out)
+            try:
+                from src.services.event_bus import get_event_bus  # noqa: WPS433
+                _eb = get_event_bus()
+                _eb.publish_sync("llm.call.completed", {
+                    "provider": _provider,
+                    "model": _model,
+                    "agent_id": agent_id,
+                    "tokens_in": _tokens_in,
+                    "tokens_out": _tokens_out,
+                    "cost_usd": round(_cost, 8),
+                    "elapsed_ms": _elapsed_ms,
+                })
+                logger.debug(
+                    f"[LLMClient] {_provider}/{_model} agent={agent_id or '?'} "
+                    f"in={_tokens_in} out={_tokens_out} "
+                    f"cost=${_cost:.6f} {_elapsed_ms}ms"
+                )
+            except Exception as _ev_exc:  # noqa: BLE001
+                logger.debug(f"[LLMClient] cost event publish skipped: {_ev_exc}")
 
     # ── Internal: OpenAI ──────────────────────────────────────────────────────
 
@@ -158,7 +238,10 @@ class LLMClient:
             self._openai_client = AsyncOpenAI(api_key=self._openai_key)
         return self._openai_client
 
-    async def _call_openai(self, system_prompt: str, user_prompt: str) -> str:
+    async def _call_openai(
+        self, system_prompt: str, user_prompt: str
+    ) -> Tuple[str, int, int]:
+        """Returns (content, tokens_in, tokens_out)."""
         client = self._get_openai()
         response = await client.chat.completions.create(
             model=self._openai_model,
@@ -170,7 +253,11 @@ class LLMClient:
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return response.choices[0].message.content or "{}"
+        content = response.choices[0].message.content or "{}"
+        usage = response.usage
+        tokens_in = usage.prompt_tokens if usage else 0
+        tokens_out = usage.completion_tokens if usage else 0
+        return content, tokens_in, tokens_out
 
     # ── Internal: Anthropic ───────────────────────────────────────────────────
 
@@ -179,7 +266,10 @@ class LLMClient:
             self._anthropic_client = AsyncAnthropic(api_key=self._anthropic_key)
         return self._anthropic_client
 
-    async def _call_anthropic(self, system_prompt: str, user_prompt: str) -> str:
+    async def _call_anthropic(
+        self, system_prompt: str, user_prompt: str
+    ) -> Tuple[str, int, int]:
+        """Returns (content, tokens_in, tokens_out)."""
         client = self._get_anthropic()
 
         # Claude doesn't have a JSON mode — append instruction to system prompt
@@ -201,7 +291,10 @@ class LLMClient:
         for block in response.content:
             if hasattr(block, "text"):
                 content += block.text
-        return content.strip() or "{}"
+        usage = response.usage
+        tokens_in = usage.input_tokens if usage else 0
+        tokens_out = usage.output_tokens if usage else 0
+        return content.strip() or "{}", tokens_in, tokens_out
 
 
 def make_llm_client() -> LLMClient:

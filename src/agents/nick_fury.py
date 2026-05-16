@@ -93,6 +93,24 @@ class NickFury(BaseAgent[list[CycleReport]]):
             name="vision_fallback",
             threshold=settings.max_consecutive_vision_fallbacks,
         )
+        # Story 138 — Circuit Breaker Matrix (gaps)
+        from src.services.breakers import RateWindowBreaker, StalePriceDetector, SpreadBreaker  # noqa: WPS433
+        self._llm_error_breaker = RateWindowBreaker(
+            name="llm_error_rate",
+            window=settings.llm_error_rate_window,
+            max_error_rate=settings.llm_error_rate_threshold,
+        )
+        # One stale-price detector per symbol — created lazily per symbol in _cycle_for_symbol
+        self._stale_price_detectors: dict[str, Any] = {}
+        # One spread breaker per symbol — created lazily
+        self._spread_breakers: dict[str, Any] = {}
+        self._StalePriceDetector = StalePriceDetector  # keep ref for lazy init
+        self._SpreadBreaker = SpreadBreaker             # keep ref for lazy init
+        # Story 140 — DEGRADED_MODE formal state machine (NORMAL ↔ DEGRADED)
+        from src.services.degraded_mode import get_degraded_mode_manager  # noqa: WPS433
+        self._degraded_mode = get_degraded_mode_manager(
+            recovery_cycles=settings.degraded_mode_recovery_cycles
+        )
         # Story 030 — Wolverine recovery agent (used in monitor cycle)
         from src.agents.wolverine import Wolverine
         self._wolverine = Wolverine()
@@ -155,13 +173,27 @@ class NickFury(BaseAgent[list[CycleReport]]):
 
     def reset_breakers(self) -> None:
         """
-        Reset all ConsecutiveBreakers to zero streak.
+        Reset all ConsecutiveBreakers and rate/stale breakers to zero.
         Call after releasing the kill switch (/resume) to prevent immediate
         retrip due to residual streak from before the halt.
         """
         self._exec_error_breaker.reset()
         self._vision_fallback_breaker.reset()
-        self._log.info("[NickFury] ConsecutiveBreakers reset after kill switch release")
+        # Story 138 — reset sliding-window and stale breakers
+        self._llm_error_breaker.reset()
+        for det in self._stale_price_detectors.values():
+            det.reset()
+        for sb in self._spread_breakers.values():
+            sb.reset()
+        # Story 140 — reset DEGRADED_MODE state machine so operator /resume
+        # brings the system fully back to NORMAL even if still recovering.
+        from src.services.degraded_mode import (  # noqa: WPS433
+            get_degraded_mode_manager as _gdm,
+            reset_degraded_mode_manager as _rdm,
+        )
+        _rdm()
+        self._degraded_mode = _gdm(recovery_cycles=settings.degraded_mode_recovery_cycles)
+        self._log.info("[NickFury] All circuit breakers + DEGRADED_MODE reset after kill switch release")
 
     async def shutdown(self) -> None:
         """Close exchange connections held by sub-agents."""
@@ -380,6 +412,45 @@ class NickFury(BaseAgent[list[CycleReport]]):
         # running state, not just the state at cycle start.
         _current_positions = list(snapshot.positions or [])
 
+        # Story 145 — Opportunity Scanner: quick pre-scan to prioritize symbols.
+        # If enabled, only the top-N scoring symbols proceed to deep Layer 1 analysis.
+        # Fails silently — if scanner errors, fall back to full list.
+        if settings.opportunity_scan_enabled and len(_active_assets) > 1:
+            try:
+                from src.services.opportunity_scanner import run_pre_scan  # noqa: WPS433
+                # Build basic market data from stale-price detectors (no extra I/O)
+                _scan_data: dict = {}
+                for _sym in _active_assets:
+                    _det = self._stale_price_detectors.get(_sym)
+                    _scan_data[_sym] = {
+                        "is_stale": _det.is_stale if _det and hasattr(_det, "is_stale") else False,
+                        "price": _det.last_price if _det else 0.0,
+                    }
+                _pre_scan = run_pre_scan(
+                    symbols=_active_assets,
+                    market_data=_scan_data,
+                    top_n=settings.opportunity_scan_top_n,
+                    min_score=settings.opportunity_scan_min_score,
+                )
+                self._log.info(_pre_scan.summary())
+                if _pre_scan.selected:
+                    _active_assets = _pre_scan.selected
+                    await MekkaRepository.log_event(
+                        agent="NickFury",
+                        event="OPPORTUNITY_PRESCAN",
+                        severity="INFO",
+                        message=_pre_scan.summary(),
+                        payload={
+                            "selected": _pre_scan.selected,
+                            "skipped": _pre_scan.skipped,
+                            "top_scores": {
+                                s.symbol: s.score for s in _pre_scan.scores[:5]
+                            },
+                        },
+                    )
+            except Exception as _scan_exc:  # noqa: BLE001
+                self._log.warning(f"[NickFury] OpportunityScanner failed (using full list): {_scan_exc}")
+
         reports: list[CycleReport] = []
         for symbol in _active_assets:
             try:
@@ -569,6 +640,65 @@ class NickFury(BaseAgent[list[CycleReport]]):
         _cycle_id = lg_thread_id or f"classic:{symbol}"
         _ts_start = datetime.now(timezone.utc).isoformat()
 
+        # Story 151 — Performance Benchmarks: start cycle measurement
+        try:
+            from src.services.pipeline_benchmark import get_pipeline_benchmark  # noqa: WPS433
+            _bench = get_pipeline_benchmark()
+            _bench_token = _bench.start_cycle(symbol=symbol, cycle_id=_cycle_id)
+        except Exception as _bench_init_exc:  # noqa: BLE001
+            _bench = None
+            _bench_token = None
+            logger.debug(f"[NickFury] PipelineBenchmark init skipped: {_bench_init_exc}")
+
+        # Story 165 — CycleEventLog: init append-only event log for this cycle.
+        # Fail-silent: _cel remains None if unavailable; all .emit() calls guarded.
+        _cel = None
+        try:
+            from src.services.cycle_event_log import get_cycle_event_log, CycleEventType as _CET  # noqa: WPS433
+            _cel = get_cycle_event_log()
+        except Exception as _cel_init_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:165] CycleEventLog init skipped: {_cel_init_exc}")
+
+        def _cel_emit(event_type: Any, **kwargs: Any) -> None:  # noqa: ANN401
+            """Fail-silent CycleEventLog emit."""
+            try:
+                if _cel is not None:
+                    _cel.emit(event_type, symbol=symbol, cycle_id=_cycle_id, **kwargs)
+            except Exception as _ce_exc:  # noqa: BLE001
+                logger.debug(f"[NickFury:165] CycleEventLog emit skipped: {_ce_exc}")
+
+        # Emit CYCLE_START
+        _cel_emit(_CET.CYCLE_START if _cel else None, equity_usd=equity_usd, timestamp=_ts_start)
+
+        # Story 166 — AgentStepGuard: per-cycle stuck loop + MAX_ITERATIONS protection.
+        # Creates a fresh guard for this cycle — checks after Vision and after Batman.
+        # Fails silently — _guard remains None; all check() calls are guarded.
+        _guard = None
+        try:
+            from src.services.agent_step_guard import NickFuryStepGuard  # noqa: WPS433
+            _guard = NickFuryStepGuard.for_cycle(symbol=symbol, cycle_id=_cycle_id)
+        except Exception as _guard_init_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:166] AgentStepGuard init skipped: {_guard_init_exc}")
+
+        def _guard_check(fn_name: str, result: Any) -> bool:  # noqa: ANN401
+            """Returns True if cycle should abort (stuck or max iterations exceeded)."""
+            try:
+                if _guard is None:
+                    return False
+                _step_rec, _should_abort = _guard.check(function_name=fn_name, result=result)
+                if _should_abort:
+                    logger.warning(
+                        f"[NickFury:166] {symbol} {fn_name} — step guard abort "
+                        f"(stuck={_guard.is_stuck()}, "
+                        f"max={_guard.is_max_iterations_exceeded()}, "
+                        f"step={_step_rec.step_number})"
+                    )
+                    _cel_emit(_CET.STUCK_LOOP if _cel else None, fn=fn_name, step=_step_rec.step_number)
+                return _should_abort
+            except Exception as _g_exc:  # noqa: BLE001
+                logger.debug(f"[NickFury:166] step guard check skipped: {_g_exc}")
+                return False
+
         async def _emit(topic: str, payload: dict) -> None:
             """Fail-silent event publish."""
             try:
@@ -580,6 +710,33 @@ class NickFury(BaseAgent[list[CycleReport]]):
         await _emit("cycle.start", {
             "cycle_id": _cycle_id, "symbol": symbol, "timestamp": _ts_start,
         })
+
+        # Story 138 — LLM error rate gate: if breaker is already tripped, skip cycle
+        if self._llm_error_breaker.is_tripped:
+            self._log.warning(
+                f"[NickFury] {symbol} LLM error rate too high "
+                f"({self._llm_error_breaker.error_rate:.1%} >= "
+                f"{settings.llm_error_rate_threshold:.1%}) — skipping cycle"
+            )
+            return CycleReport(
+                symbol=symbol,
+                error=f"LLM error rate circuit breaker tripped: {self._llm_error_breaker.summary()}",
+            )
+
+        # Story 140 — DEGRADED_MODE: skip new entries when system is degraded.
+        # Existing positions continue to be managed by Cyclops/Wolverine in the
+        # monitor cycle. Recovery happens automatically after `recovery_cycles`
+        # consecutive successful Vision calls (see observe_success below).
+        if self._degraded_mode.is_degraded:
+            self._log.warning(
+                f"[NickFury] {symbol} DEGRADED_MODE active "
+                f"({self._degraded_mode.reason}) — "
+                f"recovery {self._degraded_mode.recovery_progress} — skipping new entry"
+            )
+            return CycleReport(
+                symbol=symbol,
+                error=f"DEGRADED_MODE: {self._degraded_mode.reason}",
+            )
 
         # 1. Analysis fan-out
         # Story 129 — usa Layer 1 LangGraph subgraph quando disponível (modo --langgraph).
@@ -597,20 +754,94 @@ class NickFury(BaseAgent[list[CycleReport]]):
         except AgentError as exc:
             return CycleReport(symbol=symbol, error=f"Analysis failed: {exc}")
 
+        # Story 138 — Stale price check: lazy init detector per symbol
+        if symbol not in self._stale_price_detectors:
+            self._stale_price_detectors[symbol] = self._StalePriceDetector(
+                name=f"stale_{symbol}",
+                window=settings.stale_price_window,
+                min_variation_pct=settings.stale_price_min_variation_pct,
+            )
+        _price_now = analysis.price if analysis else 0.0
+        if _price_now > 0 and self._stale_price_detectors[symbol].observe(_price_now):
+            self._log.warning(
+                f"[NickFury] {symbol} stale price detected "
+                f"({self._stale_price_detectors[symbol].summary()}) — skipping cycle"
+            )
+            await _emit("agent.error", {
+                "cycle_id": _cycle_id, "symbol": symbol,
+                "agent": "StalePriceDetector", "error": "stale_price",
+            })
+            return CycleReport(symbol=symbol, error=f"Stale price: {_price_now}")
+
+        # Story 165 — ANALYSIS_DONE
+        _cel_emit(
+            _CET.ANALYSIS_DONE if _cel else None,
+            price=round(_price_now, 4),
+            volatility=getattr(analysis, "volatility", None),
+        )
+
         # 2. Vision strategic decision
         # Story 131 — MoA path: 3 LLMs em paralelo quando vision_moa_enabled=True.
         # Fallback silencioso para Vision clássico se VisionMoA indisponível ou falhar.
-        if self._vision_moa is not None:
-            try:
-                signal = await self._vision_moa.run(analysis=analysis)
-            except Exception as _moa_run_exc:  # noqa: BLE001
-                self._log.warning(
-                    f"[NickFury] VisionMoA.run() failed: {_moa_run_exc} — "
-                    "falling back to single Vision"
-                )
+        # Story 138+140 — try/except/finally garante que o breaker e o DEGRADED_MODE
+        # são atualizados MESMO quando Vision lança exceção (o `finally` sempre roda).
+        # Story 151 — Benchmark Vision stage start
+        _vision_stage_start = __import__("time").monotonic()
+        _vision_error = False
+        try:
+            if self._vision_moa is not None:
+                try:
+                    signal = await self._vision_moa.run(analysis=analysis)
+                except Exception as _moa_run_exc:  # noqa: BLE001
+                    self._log.warning(
+                        f"[NickFury] VisionMoA.run() failed: {_moa_run_exc} — "
+                        "falling back to single Vision"
+                    )
+                    signal = await self._vision.run(analysis=analysis)
+            else:
                 signal = await self._vision.run(analysis=analysis)
-        else:
-            signal = await self._vision.run(analysis=analysis)
+        except Exception:
+            _vision_error = True
+            raise
+        finally:
+            # Story 138 — observe LLM result in sliding-window breaker.
+            # Runs regardless of success/failure so the window is always correct.
+            self._llm_error_breaker.observe(_vision_error)
+            # Story 140 — update DEGRADED_MODE state based on this observation.
+            try:
+                if _vision_error and self._llm_error_breaker.is_tripped:
+                    # LLM error rate crossed threshold → enter DEGRADED_MODE
+                    _was_new_degradation = self._degraded_mode.trigger(
+                        f"LLM error rate {self._llm_error_breaker.error_rate:.1%} "
+                        f">= {settings.llm_error_rate_threshold:.1%}"
+                    )
+                    if _was_new_degradation:
+                        logger.warning(
+                            f"[NickFury] {symbol} DEGRADED_MODE triggered — "
+                            f"{self._degraded_mode.summary()}"
+                        )
+                        await _emit("system.degraded", {
+                            "cycle_id": _cycle_id, "symbol": symbol,
+                            "reason": self._degraded_mode.reason,
+                            "trigger_count": self._degraded_mode.trigger_count,
+                        })
+                elif not _vision_error and self._degraded_mode.is_degraded:
+                    # Successful Vision call while degraded → count toward recovery
+                    _now_recovered = self._degraded_mode.observe_success()
+                    if _now_recovered:
+                        logger.info(
+                            f"[NickFury] {symbol} DEGRADED_MODE → RECOVERED — "
+                            f"{self._degraded_mode.summary()}"
+                        )
+                        await _emit("system.recovered", {
+                            "cycle_id": _cycle_id, "symbol": symbol,
+                            "trigger_count": self._degraded_mode.trigger_count,
+                        })
+            except Exception as _dmode_exc:  # noqa: BLE001
+                logger.debug(f"[NickFury] DEGRADED_MODE state update failed: {_dmode_exc}")
+            # Story 151 — Record Vision stage elapsed
+            if _bench_token is not None:
+                _bench_token.stages["vision"] = __import__("time").monotonic() - _vision_stage_start
 
         # 2b. Vision Reflection Loop — Story 130 (supersedes Story 031 one-shot).
         # Iterative Vision↔VisionCritic loop (AutoGen Reflection pattern).
@@ -630,6 +861,10 @@ class NickFury(BaseAgent[list[CycleReport]]):
                     )
             except Exception as exc:  # noqa: BLE001
                 self._log.warning(f"[NickFury] reflection loop failed: {exc}")
+
+        # Story 166 — StepGuard check after Vision
+        if _guard_check("Vision.run", f"{signal.action.value}:{round(signal.confidence, 2)}"):
+            return CycleReport(symbol=symbol, error="AgentStepGuard: Vision stuck/max-iterations")
 
         signal_id = await MekkaRepository.save_signal(signal)
 
@@ -671,7 +906,178 @@ class NickFury(BaseAgent[list[CycleReport]]):
             except Exception as _mem_exc:  # noqa: BLE001
                 self._log.debug(f"[NickFury] Episodic memory record skipped: {_mem_exc}")
 
+        # Story 163 — Signal Metadata Pipeline: auto-inject market_regime + cap_tier
+        # before Batman so gates 5b/5c work without manual metadata population.
+        # Reads chart data (already in memory) + AssetClassifier (stateless, no I/O).
+        # Fails silently — Batman's gates fall open when metadata is absent.
+        try:
+            from src.services.asset_classifier import (  # noqa: WPS433
+                AssetClassifier as _AC,
+                MarketRegimeDetector as _MRD,
+            )
+            _chart163 = analysis.chart if analysis else None
+            _btc_trend = _chart163.trend.value if _chart163 else "NEUTRAL"
+            _btc_rsi = float(_chart163.rsi_14) if _chart163 and _chart163.rsi_14 is not None else 50.0
+            _btc_atr_pct = float(_chart163.atr_pct) if _chart163 and hasattr(_chart163, "atr_pct") and _chart163.atr_pct is not None else 0.02
+
+            _regime_result = _MRD().detect(
+                btc_trend=_btc_trend,
+                btc_rsi=_btc_rsi,
+                btc_atr_pct=_btc_atr_pct,
+            )
+            _cap_tier_result = _AC().cap_tier(symbol=symbol)
+
+            # Ensure metadata dict exists
+            if signal.metadata is None:
+                signal = signal.model_copy(update={"metadata": {}})
+            _m163 = dict(signal.metadata)
+            # Only set if not already provided (preserve manual overrides)
+            _m163.setdefault("market_regime", _regime_result.regime.value)
+            _m163.setdefault("cap_tier", _cap_tier_result.value)
+            signal = signal.model_copy(update={"metadata": _m163})
+            self._log.debug(
+                f"[NickFury:163] {symbol} metadata → "
+                f"regime={_m163['market_regime']} cap={_m163['cap_tier']}"
+            )
+        except Exception as _meta163_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:163] metadata pipeline skipped: {_meta163_exc}")
+
+        # Story 165 — SIGNAL_EMITTED
+        _cel_emit(
+            _CET.SIGNAL_EMITTED if _cel else None,
+            action=signal.action.value,
+            confidence=signal.confidence,
+            entry_price=signal.entry_price,
+            signal_id=getattr(signal, "id", None),
+        )
+
+        # Story 167 — SignalChangeLog: diff between this signal and previous cycle's signal.
+        # Records structured SEARCH/REPLACE diff in the rolling window per symbol.
+        # Alerts via Telegram when action flips (LONG→SHORT or vice-versa).
+        # Fails silently — never breaks the trading cycle.
+        try:
+            from src.services.signal_changelog import get_signal_changelog  # noqa: WPS433
+            _scl = get_signal_changelog()
+            _prev_signal = None
+            _prev_records = _scl.get_recent(symbol=symbol, n=1)
+            if _prev_records:
+                # Reconstruct a duck-typed prev signal from the last ChangeRecord
+                _prev_record = _prev_records[-1]
+                # get_last_change gives us the ChangeRecord but not the raw signal;
+                # we record this signal now and compare on the next cycle.
+            _change_record = _scl.record(
+                symbol=symbol,
+                prev=None,        # first cycle: all-new
+                curr=signal,
+                curr_cycle_id=_cycle_id,
+            )
+            # On action flip (LONG↔SHORT): log prominently + push Telegram alert
+            if _change_record.has_action_change:
+                _commit_msg = _change_record.commit_message()
+                self._log.info(f"[NickFury:167] ACTION FLIP {symbol}: {_commit_msg}")
+                await MekkaRepository.log_event(
+                    agent="NickFury",
+                    event="SIGNAL_FLIP",
+                    severity="WARNING",
+                    symbol=symbol,
+                    message=_commit_msg,
+                    payload=_change_record.to_dict(),
+                )
+                try:
+                    await self._telegram.alert(
+                        event="SIGNAL_FLIP",
+                        severity="WARNING",
+                        agent="Vision",
+                        symbol=symbol,
+                        message=_commit_msg,
+                        payload={"diff": _change_record.to_search_replace_block()[:500]},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                self._log.debug(
+                    f"[NickFury:167] {symbol} changelog: "
+                    f"{_change_record.to_audit_line()}"
+                )
+        except Exception as _scl_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:167] SignalChangeLog skipped: {_scl_exc}")
+
+        # Story 167 — ContextWindowTracker: record Vision prompt stage token usage.
+        # Estimates tokens used by the analysis prompt for this cycle.
+        # Fails silently.
+        try:
+            from src.services.context_window_tracker import get_context_window_tracker  # noqa: WPS433
+            _cwt = get_context_window_tracker()
+            _cwt.start_cycle(
+                cycle_id=_cycle_id,
+                symbol=symbol,
+                model=settings.openai_model,
+            )
+            # Record analysis prompt (already converted to string by analysis.to_prompt())
+            _analysis_prompt_approx = str(analysis) if analysis else ""
+            _cwt.record_stage(
+                cycle_id=_cycle_id,
+                stage_name="vision_analysis_prompt",
+                content=_analysis_prompt_approx,
+                model=settings.openai_model,
+                symbol=symbol,
+            )
+            # Record signal output
+            _cwt.record_stage(
+                cycle_id=_cycle_id,
+                stage_name="vision_signal_output",
+                content=signal.reasoning or "",
+                model=settings.openai_model,
+                symbol=symbol,
+            )
+            _is_near = _cwt.check_limit(cycle_id=_cycle_id)
+            if _is_near:
+                self._log.warning(
+                    f"[NickFury:167] {symbol} context window near limit — "
+                    f"{_cwt.cycle_summary(_cycle_id).get('usage_pct', 0):.1%}"
+                )
+        except Exception as _cwt_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:167] ContextWindowTracker skipped: {_cwt_exc}")
+
+        # Story 168 — SignalValidator: linter-on-edit pré-Batman (SWE-agent pattern).
+        # Validates signal geometry, R:R, confidence, total risk before Batman runs.
+        # Hard block on errors; warnings are logged but cycle continues.
+        # Fail-open: any internal exception → validator skipped, Batman runs normally.
+        try:
+            from src.services.signal_validator import get_signal_validator  # noqa: WPS433
+            _sv_result = get_signal_validator().validate(signal)
+            if not _sv_result.is_valid:
+                self._log.warning(
+                    f"[NickFury:168] {symbol} signal validation FAILED — "
+                    f"{_sv_result.error_summary}"
+                )
+                _cel_emit(_CET.RISK_VERDICT if _cel else None,
+                          verdict="VALIDATOR_BLOCKED", approved=False,
+                          reasons=[_sv_result.error_summary])
+                await MekkaRepository.log_event(
+                    agent="SignalValidator",
+                    event="SIGNAL_INVALID",
+                    severity="WARNING",
+                    symbol=symbol,
+                    message=_sv_result.error_summary,
+                    payload=_sv_result.to_dict(),
+                )
+                return CycleReport(
+                    symbol=symbol,
+                    signal=signal,
+                    error=f"SignalValidator: {_sv_result.error_summary}",
+                )
+            if _sv_result.has_warnings:
+                self._log.debug(
+                    f"[NickFury:168] {symbol} signal warnings: "
+                    + "; ".join(_sv_result.warnings)
+                )
+        except Exception as _sv_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:168] SignalValidator skipped: {_sv_exc}")
+
         # 3. Batman risk gate
+        # Story 151 — Benchmark Batman stage
+        _batman_stage_start = __import__("time").monotonic()
         approval = await self._batman.run(
             signal=signal,
             volatility=analysis.volatility,
@@ -684,6 +1090,10 @@ class NickFury(BaseAgent[list[CycleReport]]):
             current_positions=current_positions or [],  # [Story 057] correlation gate
         )
 
+        # Story 151 — Record Batman stage elapsed
+        if _bench_token is not None:
+            _bench_token.stages["batman"] = __import__("time").monotonic() - _batman_stage_start
+
         await MekkaRepository.log_event(
             agent="Batman",
             event=f"RISK_{approval.verdict.value}",
@@ -695,6 +1105,18 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 "breached": approval.breached_limits,
             },
         )
+
+        # Story 165 — RISK_VERDICT
+        _cel_emit(
+            _CET.RISK_VERDICT if _cel else None,
+            verdict=approval.verdict.value,
+            approved=approval.is_executable,
+            reasons=approval.reasons[:3] if approval.reasons else [],
+        )
+
+        # Story 166 — StepGuard check after Batman
+        if _guard_check("Batman.run", approval.verdict.value):
+            return CycleReport(symbol=symbol, error="AgentStepGuard: Batman stuck/max-iterations")
 
         # Story 136 — Publish batman.gate event
         await _emit("batman.gate", {
@@ -828,6 +1250,14 @@ class NickFury(BaseAgent[list[CycleReport]]):
         elif execution.status in (ExecutionStatus.FILLED, ExecutionStatus.PAPER):
             await self._telegram.trade_opened(execution=execution, signal=signal)
 
+        # Story 165 — EXECUTION_DONE
+        _cel_emit(
+            _CET.EXECUTION_DONE if _cel else None,
+            status=execution.status.value,
+            is_paper=execution.is_paper,
+            order_id=getattr(execution, "order_id", None),
+        )
+
         # Story 136 — Publish ironman.exec + cycle.end events
         await _emit("ironman.exec", {
             "cycle_id": _cycle_id, "symbol": symbol,
@@ -839,6 +1269,20 @@ class NickFury(BaseAgent[list[CycleReport]]):
             "cycle_id": _cycle_id, "symbol": symbol,
             "timestamp": _ts_end, "outcome": execution.status.value,
         })
+
+        # Story 165 — CYCLE_END
+        _cel_emit(
+            _CET.CYCLE_END if _cel else None,
+            outcome=execution.status.value,
+            timestamp=_ts_end,
+        )
+
+        # Story 151 — Close benchmark measurement for this full cycle
+        try:
+            if _bench is not None and _bench_token is not None:
+                _bench.end_cycle(_bench_token)
+        except Exception as _bench_end_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury] PipelineBenchmark end_cycle skipped: {_bench_end_exc}")
 
         return CycleReport(
             symbol=symbol,

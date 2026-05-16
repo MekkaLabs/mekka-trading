@@ -18,6 +18,7 @@ All models use Pydantic v2 syntax throughout.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime
 from enum import Enum
@@ -585,6 +586,36 @@ class MarketAnalysis(BaseModel):
         default=None,
         description="Intra-candle momentum signal from Flash (MomentumSignal)",
     )
+    # Story 141 — SHA-256 fingerprint of key market fields.
+    # Auto-computed by model_validator; used in audit logs for dedup and tracing.
+    # Format: first 16 hex chars (64-bit prefix), e.g. "a3f2c8d914e60b7f".
+    snapshot_id: str = Field(
+        default="",
+        description=(
+            "SHA-256 fingerprint (16-char hex prefix) of symbol + price + trend "
+            "+ rsi + timeframe. Auto-computed — do not set manually."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _compute_snapshot_id(self) -> "MarketAnalysis":
+        """
+        Story 141 — Compute a deterministic SHA-256 snapshot fingerprint.
+
+        Inputs: symbol, rounded price, trend, rsi_14, primary timeframe.
+        Rounded to avoid float noise (price: 2 dp, rsi: 1 dp).
+        The 16-char hex prefix gives 2^64 collision resistance — more than
+        sufficient for same-cycle dedup in audit logs.
+        """
+        if not self.snapshot_id:
+            _price = round(self.chart.price, 2) if self.chart else 0.0
+            _rsi = round(self.chart.rsi_14, 1) if (self.chart and self.chart.rsi_14 is not None) else 0.0
+            _trend = self.chart.trend.value if self.chart else "NEUTRAL"
+            _tf = self.chart.timeframe if self.chart else ""
+            _symbol = self.chart.symbol if self.chart else ""
+            _raw = f"{_symbol}|{_price}|{_trend}|{_rsi}|{_tf}"
+            self.snapshot_id = hashlib.sha256(_raw.encode()).hexdigest()[:16]
+        return self
 
     @property
     def symbol(self) -> str:
@@ -715,6 +746,7 @@ class MarketAnalysis(BaseModel):
     def to_json_summary(self) -> str:
         """Compact JSON summary for logging."""
         return json.dumps({
+            "snapshot_id": self.snapshot_id,  # Story 141
             "symbol": self.symbol,
             "price": self.price,
             "trend": self.chart.trend.value,
