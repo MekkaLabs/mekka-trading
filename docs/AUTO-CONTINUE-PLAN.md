@@ -12,10 +12,10 @@
 > entre sessões. A persistência é o próprio repositório git mais este
 > documento. A "continuação" é o disciplina de ler-marcar-executar.
 
-Última atualização: pós Story 032 (Python reader). 032b TS shim
-agendada para quando operador validar `npm install better-sqlite3`.
-Próxima ação automatizada: **§ 4 — Pre-testnet hardening** (operador) →
-depois **§ 5 — Story 033 (Flash)**.
+Checkpoint: **2026-05-15** — projeto avançou até **Story 136** (MekkaEventBus).
+Roadmap e histórico detalhado: `docs/stories/INDEX.md`.
+Próxima ação automatizada sugerida: começar **Milestone 22** pela Story 137
+(Teste do Milhão / checklist pré-capital real) e seguir em ordem 138–142.
 
 ---
 

@@ -415,6 +415,11 @@ class MekkaDashboardServer:
         self._app.router.add_get("/api/signal-validator", self._handle_signal_validator)  # Story 158
         self._app.router.add_get("/api/repo-map", self._handle_repo_map)              # Story 160
         self._app.router.add_get("/api/signal-changelog", self._handle_signal_changelog)  # Story 162
+        self._app.router.add_get("/api/obs/{tool_name}", self._handle_obs_tool)           # Story 175
+        self._app.router.add_get("/api/context-window/live", self._handle_context_window_live)  # Story 177
+        self._app.router.add_get("/api/cycle-sop", self._handle_cycle_sop)                    # Story 185
+        self._app.router.add_get("/api/working-memory", self._handle_working_memory)          # Story 183
+        self._app.router.add_get("/api/incremental-guard", self._handle_incremental_guard)    # Story 187
         self._app.router.add_get("/ws", self._handle_ws)
         self._app.router.add_get("/api/hl/candles", self._handle_hl_candles)
         self._app.router.add_get("/ws/live", self._handle_ws_live)
@@ -3967,6 +3972,234 @@ class MekkaDashboardServer:
             )
         except Exception as exc:  # noqa: BLE001
             import json as _json
+            return web.Response(
+                content_type="application/json",
+                status=500,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+
+    # ------------------------------------------------------------------
+    # ObservabilityPlugin widget — GET /api/obs/{tool_name}   (Story 175)
+    # ------------------------------------------------------------------
+
+    async def _handle_obs_tool(self, request: web.Request) -> web.Response:
+        """GET /api/obs/{tool_name} — invoke an ObservabilityPlugin function via kernel.
+
+        Shortcut for the dashboard to call any ObservabilityPlugin @mekka_function
+        without going through the generic POST /api/kernel/invoke endpoint.
+
+        Path param:
+          {tool_name}   — one of: cycle_events, signal_changes, context_window,
+                          step_guard_stats, validator_thresholds, vision_metrics,
+                          vision_last_signal
+
+        Query params forwarded as JSON arguments to the function:
+          ?symbol=BTC  — for symbol-scoped functions
+          ?last_n=10   — number of records
+          ?cycle_id=X  — for context_window
+
+        Pattern: each function is called as kernel.invoke("obs", fn, **query_params)
+        or kernel.invoke("vision", fn, **query_params) depending on tool_name.
+        """
+        import json as _json
+        tool_name = request.match_info.get("tool_name", "")
+        query = dict(request.rel_url.query)
+
+        # Coerce numeric params
+        for k in ("last_n", "seed", "limit"):
+            if k in query:
+                try:
+                    query[k] = int(query[k])
+                except (ValueError, TypeError):
+                    del query[k]
+
+        # Map tool_name → (plugin_name, function_name)
+        _TOOL_MAP = {
+            "cycle_events":          ("obs",    "get_cycle_events"),
+            "signal_changes":        ("obs",    "get_signal_changes"),
+            "context_window":        ("obs",    "get_context_window"),
+            "step_guard_stats":      ("obs",    "get_step_guard_stats"),
+            "validator_thresholds":  ("obs",    "get_validator_thresholds"),
+            "vision_metrics":        ("vision", "get_vision_metrics"),
+            "vision_last_signal":    ("vision", "get_last_signal"),
+            "vision_generate_signal":("vision", "generate_signal"),
+        }
+
+        if tool_name not in _TOOL_MAP:
+            return web.Response(
+                content_type="application/json",
+                status=404,
+                text=_json.dumps({
+                    "ok": False,
+                    "error": f"Unknown obs tool: '{tool_name}'",
+                    "available": list(_TOOL_MAP.keys()),
+                }),
+            )
+
+        plugin_name, fn_name = _TOOL_MAP[tool_name]
+        try:
+            from src.services.mekka_kernel import get_mekka_kernel
+            kernel = get_mekka_kernel()
+            result = await kernel.invoke(plugin_name, fn_name, **query)
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, "tool": tool_name, "result": result}, default=str),
+            )
+        except (KeyError, TypeError) as exc:
+            return web.Response(
+                content_type="application/json",
+                status=400,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return web.Response(
+                content_type="application/json",
+                status=500,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+
+    # ------------------------------------------------------------------
+    # ContextWindowTracker Live — GET /api/context-window/live (Story 177)
+    # ------------------------------------------------------------------
+
+    async def _handle_context_window_live(self, _: web.Request) -> web.Response:
+        """GET /api/context-window/live — summaries de todos os ciclos ativos.
+
+        Retorna usage em % por estágio para monitoramento em produção.
+        Cada entrada mostra: cycle_id, symbol, model, stages, total_tokens,
+        usage_pct, is_near_limit (>= 80%).
+
+        Ordenado por usage_pct decrescente — ciclos mais críticos primeiro.
+        """
+        import json as _json
+        try:
+            from src.services.context_window_tracker import get_context_window_tracker
+            cwt = get_context_window_tracker()
+
+            # Tentar get_all_summaries() se disponível, senão usar summary()
+            if hasattr(cwt, "get_all_summaries"):
+                all_summaries = cwt.get_all_summaries()
+            elif hasattr(cwt, "summary"):
+                raw = cwt.summary()
+                # Normalise: if summary returns a flat dict, wrap it
+                if isinstance(raw, dict) and "cycles" in raw:
+                    all_summaries = raw["cycles"]
+                else:
+                    all_summaries = [raw] if raw else []
+            else:
+                all_summaries = []
+
+            # Enrich each summary with is_near_limit flag
+            enriched = []
+            for s in all_summaries:
+                usage_pct = s.get("usage_pct", s.get("total_tokens_pct", 0.0))
+                enriched.append({
+                    **s,
+                    "usage_pct": usage_pct,
+                    "is_near_limit": usage_pct >= 0.80,
+                })
+
+            # Sort by usage_pct descending
+            enriched.sort(key=lambda x: x.get("usage_pct", 0.0), reverse=True)
+
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({
+                    "ok": True,
+                    "count": len(enriched),
+                    "cycles": enriched,
+                    "global_summary": cwt.summary() if hasattr(cwt, "summary") else {},
+                }, default=str),
+            )
+        except Exception as exc:  # noqa: BLE001
+            import json as _json
+            return web.Response(
+                content_type="application/json",
+                status=500,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+
+    # ------------------------------------------------------------------
+    # CycleSOP — GET /api/cycle-sop                          (Story 185)
+    # ------------------------------------------------------------------
+
+    async def _handle_cycle_sop(self, _: web.Request) -> web.Response:
+        """GET /api/cycle-sop — retorna a especificação declarativa do pipeline.
+
+        MetaGPT SOP pattern: serializa o Standard Operating Procedure do ciclo
+        de trading Mekka com todos os estágios, agentes, tipos e flags de skip.
+        Útil para dashboards, documentação automática e testes de conformidade.
+        """
+        import json as _json
+        try:
+            from src.services.cycle_sop import get_cycle_sop
+            sop = get_cycle_sop()
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, **sop.to_dict()}, default=str),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return web.Response(
+                content_type="application/json",
+                status=500,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+
+    # ------------------------------------------------------------------
+    # RoleWorkingMemory — GET /api/working-memory             (Story 183)
+    # ------------------------------------------------------------------
+
+    async def _handle_working_memory(self, request: web.Request) -> web.Response:
+        """GET /api/working-memory[?symbol=BTC] — retorna janela deslizante de ciclos.
+
+        MetaGPT RoleContext.rc.memory pattern: expõe a working memory do Vision
+        com os últimos ciclos por símbolo para diagnóstico e dashboards.
+        """
+        import json as _json
+        try:
+            from src.services.role_working_memory import get_role_working_memory
+            mem = get_role_working_memory()
+            symbol = request.rel_url.query.get("symbol", "")
+            if symbol:
+                records = mem.get_recent(symbol, limit=20)
+                data = {
+                    "ok": True,
+                    "symbol": symbol.upper(),
+                    "records": [r.to_dict() for r in records],
+                    "count": len(records),
+                }
+            else:
+                data = {"ok": True, **mem.summary()}
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps(data, default=str),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return web.Response(
+                content_type="application/json",
+                status=500,
+                text=_json.dumps({"ok": False, "error": str(exc)}),
+            )
+
+    # ------------------------------------------------------------------
+    # IncrementalCycleGuard — GET /api/incremental-guard      (Story 187)
+    # ------------------------------------------------------------------
+
+    async def _handle_incremental_guard(self, _: web.Request) -> web.Response:
+        """GET /api/incremental-guard — estatísticas do IncrementalCycleSkip.
+
+        MetaGPT Incremental Development pattern: expõe checkpoints por símbolo,
+        skip_rate e thresholds configurados.
+        """
+        import json as _json
+        try:
+            from src.services.cycle_incremental_guard import get_cycle_incremental_guard
+            guard = get_cycle_incremental_guard()
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, **guard.summary()}, default=str),
+            )
+        except Exception as exc:  # noqa: BLE001
             return web.Response(
                 content_type="application/json",
                 status=500,

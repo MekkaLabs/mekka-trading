@@ -4,7 +4,7 @@ type: project
 status: ativo
 due: 2026-12-31
 owner: Gustavo
-sprint_focus: "Stories 107-112 (calendar, /balance, hourly PnL, gate 3q, reset 3o, gates timeline)"
+sprint_focus: "Stories 126-136 (LangGraph, memory intelligence, adaptive routing, event bus)"
 tags: [project, mekka-trading]
 created: 2026-05-07
 updated: 2026-05-15
@@ -18,14 +18,14 @@ Construir um sistema autônomo de trading paper-first, modular, observável e co
 
 ## Estado Atual — 2026-05-15
 
-- **Última story entregue:** `Story 112 — Dashboard: timeline de gates ativados por ciclo`
-- **Total stories entregues:** **112 stories** ✅
-- **Milestone:** `25 — Analytics + Balance + Gate 3q + Observability (Stories 107-112)`
+- **Última story entregue:** `Story 136 — MekkaEventBus (pub/sub in-process)`
+- **Total stories entregues:** **136 stories** ✅
+- **Milestone:** `21 — Memory Intelligence + Adaptive Routing + Observability (Stories 132–136)`
 - **Modo padrão:** `PAPER_TRADING=True`
 - **Dashboard:** `http://localhost:8787` (WebSocket tempo real em todas as páginas)
 - **Gate absoluto:** Batman (gates 3a–3q) + Kill Switch
 - **Exchanges:** Hyperliquid (primary), Bybit, Binance via CCXT
-- **Agentes ativos:** NickFury, Batman, Cyclops, Wolverine, IronMan, VisionCritic, Deadpool, Thor, Superman, PortfolioManager
+- **Agentes ativos:** NickFury, Batman, Wolverine, IronMan, Vision (+ VisionCritic), Deadpool, ProfessorX, Thor, Superman, DoctorStrange, BlackPanther, Aquaman, Spider-Man, Flash, PortfolioManager
 
 ## Milestones Entregues
 
@@ -56,6 +56,10 @@ Construir um sistema autônomo de trading paper-first, modular, observável e co
 | 23 | Weekly Report, Dry-run, Heatmap, Scores, gates 3l–3n | 090–100 |
 | **24** | **/weekly /equity, gates 3o/3p, partial SL, R-múltiplo** | **101–106 ✅** |
 | **25** | **Calendar, /balance, hourly PnL, gate 3q, reset 3o, gates timeline** | **107–112 ✅** |
+| **26** | **LLM fallback + Superman Py3.14 + Telegram pt-BR + Pixel Office** | **113–125 ✅** |
+| **27** | **LangGraph durable execution + interrupt/resume + memória semântica + subgrafo L1** | **126–129 ✅** |
+| **28** | **Decision quality: reflection + mixture-of-agents** | **130–131 ✅** |
+| **29** | **Memory intelligence + routing adaptativo + event bus** | **132–136 ✅** |
 
 ## Arquitetura de Gates Batman (3a–3p)
 
@@ -141,18 +145,13 @@ Construir um sistema autônomo de trading paper-first, modular, observável e co
 
 ## Roadmap Próximo (Stories 113+)
 
-- [x] Story 107 — Dashboard: calendar heatmap mensal de trades ✅
-- [x] Story 108 — Telegram /balance (equity live de Hyperliquid) ✅
-- [x] Story 109 — Deadpool: análise de PnL por hora do dia ✅
-- [x] Story 110 — Batman gate 3q: Min ATR filter (rejeita mercados parados) ✅
-- [x] Story 111 — Cyclops: auto-reset consecutive losses counter após TP ✅
-- [x] Story 112 — Dashboard: timeline de gates ativados por ciclo ✅
-- [ ] Story 113 — Telegram /calendar (heatmap mensal por chat)
-- [ ] Story 114 — Dashboard: gauge de saúde dos agentes (latência média por agente)
-- [ ] Story 115 — Batman gate 3r: Max drawdown intraday global (% do equity do dia)
-- [ ] Story 116 — Deadpool: ranking de setups por win rate (sinal_type × timeframe)
-- [ ] Story 117 — Cyclops: alerta quando posição supera N horas sem fechar
-- [ ] Story 118 — Dashboard: painel de configuração visual (editar settings.py via UI)
+- [x] Stories 113–136 — Milestones 26–29 ✅ (ver `docs/stories/INDEX.md`)
+- [ ] Story 137 — Teste do Milhão (checklist pré-capital real)
+- [ ] Story 138 — Circuit Breaker Matrix (RateWindowBreaker, StalePriceDetector, SpreadBreaker)
+- [ ] Story 139 — Degradation Matrix + chaos tests
+- [ ] Story 140 — DEGRADED_MODE formal (state machine NORMAL↔DEGRADED)
+- [ ] Story 141 — MarketSnapshot snapshot_id (SHA-256 no MarketAnalysis)
+- [ ] Story 142 — LLM cost metrics via EventBus
 
 ## Configurações-Chave (.env)
 

@@ -4,7 +4,7 @@ type: dashboard
 tags: [dashboard, home, mekka-trading]
 project: mekka-trading
 created: 2026-05-07
-updated: 2026-05-13
+updated: 2026-05-15
 ---
 
 # 🧠 Mekka Trading — Segundo Cérebro
@@ -18,16 +18,16 @@ Este é o vault de conhecimento do projeto: arquitetura, decisões, agentes, run
 
 ---
 
-## 🚀 Estado Atual — 2026-05-13
+## 🚀 Estado Atual — 2026-05-15
 
 | Item | Status |
 |---|---|
-| **Última story entregue** | `046 — Equity Dinâmica, Wolverine Execution, Cyclops & Bybit` |
-| **Milestone atual** | `17 — Bug Fixes Críticos + Multi-Exchange` |
+| **Última story entregue** | `136 — MekkaEventBus: pub/sub in-process` |
+| **Milestone atual** | `21 — Memory Intelligence + Adaptive Routing + Observability` |
 | **Modo padrão** | `PAPER_TRADING=True` |
 | **Exchanges suportadas** | Hyperliquid (primary), Bybit, Binance (via CCXT) |
 | **Dashboard** | `http://localhost:8787` com WebSocket em tempo real |
-| **Agentes ativos** | 16 (inclui Cyclops — novo em Story 046) |
+| **Agentes ativos** | NickFury, Batman, Wolverine, IronMan, Vision (+ VisionCritic), Deadpool, ProfessorX, Superman, DoctorStrange, BlackPanther, Thor, Aquaman, Spider-Man, Flash, PortfolioManager |
 
 ---
 
@@ -99,6 +99,6 @@ LIMIT 10
 ## 🔗 Recursos do Projeto
 
 - Repositório: https://github.com/labsmekka/mekka-trading
-- Stories entregues: 001–046 (17 milestones)
+- Stories entregues: 001–136
 - Squads baseline: `alpha-risk-command`, `hyperliquid-mock-ops`, `market-intel-lab`
 - Projeto ativo: [[10 - Projects/Projeto - Mekka Trading|Projeto — Mekka Trading]]

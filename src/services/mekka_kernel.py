@@ -731,6 +731,120 @@ class ObservabilityPlugin:
 
 
 # ---------------------------------------------------------------------------
+# Story 174 — VisionPlugin: expõe Vision.generate_signal via kernel
+# ---------------------------------------------------------------------------
+
+class VisionPlugin:
+    """
+    Plugin que expõe Vision como função chamável via MekkaKernel (Story 174).
+
+    Permite que a chamada ao Vision passe pela FilterChain do kernel antes de
+    ser executada, disparando qualquer InvocationFilter registrado (logging,
+    benchmarking, rate limiting, etc.).
+
+    A função generate_signal é um pre-invocation hook: ela registra a intenção
+    de chamar o Vision, dispara filtros, e retorna status. A call real de Vision
+    permanece em NickFury para preservar o fluxo de Analysis → TradingSignal sem
+    serialização/deserialização de objetos complexos.
+
+    get_last_signal consulta o SignalChangeLog para retornar o último signal
+    registrado para o símbolo — útil para LLMs que querem saber o contexto atual.
+    """
+
+    @mekka_function(
+        description=(
+            "Pre-invocation hook: register that Vision is about to generate a signal "
+            "for the given symbol. Fires the kernel filter chain (logging, rate limits). "
+            "Returns routing status; actual Vision.run() executes in the NickFury pipeline."
+        ),
+        tags=["vision", "orchestration"],
+    )
+    async def generate_signal(self, symbol: str, cycle_id: str = "", model: str = "") -> dict:
+        """Pre-invocation hook for Vision.run() — fires filter chain, returns status."""
+        try:
+            from src.services.cycle_event_log import get_cycle_event_log
+            log = get_cycle_event_log()
+            recent = log.filter_by_symbol(symbol)
+            last_event = recent[-1] if recent else None
+            last_type = str(last_event.event_type) if last_event else "none"
+        except Exception:  # noqa: BLE001
+            last_type = "unavailable"
+
+        return {
+            "symbol": symbol,
+            "cycle_id": cycle_id,
+            "model": model,
+            "status": "pre_invocation_hook_fired",
+            "last_cycle_event": last_type,
+        }
+
+    @mekka_function(
+        description=(
+            "Get the last recorded trading signal for a symbol from the SignalChangeLog. "
+            "Returns action, confidence, entry_price and whether a recent action flip occurred."
+        ),
+        tags=["vision", "signals"],
+    )
+    async def get_last_signal(self, symbol: str) -> dict:
+        """Return the most recent recorded signal for a symbol."""
+        try:
+            from src.services.signal_changelog import get_signal_changelog
+            scl = get_signal_changelog()
+            recent = scl.get_recent(symbol=symbol, n=1)
+            if not recent:
+                return {"symbol": symbol, "found": False}
+            rec = recent[-1]
+            return {
+                "symbol": symbol,
+                "found": True,
+                "action": str(getattr(rec.curr_signal, "action", "UNKNOWN")),
+                "confidence": float(getattr(rec.curr_signal, "confidence", 0.0)),
+                "entry_price": float(getattr(rec.curr_signal, "entry_price", 0.0)),
+                "has_action_change": rec.has_action_change,
+                "commit_message": rec.commit_message() if hasattr(rec, "commit_message") else "",
+                "cycle_id": rec.curr_cycle_id if hasattr(rec, "curr_cycle_id") else "",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"symbol": symbol, "found": False, "error": str(exc)}
+
+    @mekka_function(
+        description=(
+            "Get Vision pipeline metrics: how many signals were generated, "
+            "average confidence, last N actions per symbol."
+        ),
+        tags=["vision", "metrics"],
+    )
+    async def get_vision_metrics(self, symbol: str = "", last_n: int = 5) -> dict:
+        """Aggregate Vision signal metrics from SignalChangeLog."""
+        try:
+            from src.services.signal_changelog import get_signal_changelog
+            scl = get_signal_changelog()
+            if symbol:
+                records = scl.get_recent(symbol=symbol, n=last_n)
+                flips = scl.get_action_flips(symbol=symbol)
+            else:
+                records = []
+                flips = []
+            confidences = [
+                float(getattr(r.curr_signal, "confidence", 0.0))
+                for r in records
+                if r.curr_signal is not None
+            ]
+            return {
+                "symbol": symbol,
+                "signals_sampled": len(records),
+                "avg_confidence": round(sum(confidences) / len(confidences), 4) if confidences else 0.0,
+                "action_flips": len(flips),
+                "last_actions": [
+                    str(getattr(r.curr_signal, "action", "?"))
+                    for r in records
+                ],
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"symbol": symbol, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
 # Singleton global
 # ---------------------------------------------------------------------------
 
@@ -749,6 +863,8 @@ def get_mekka_kernel() -> MekkaKernel:
         _kernel.add_plugin(SystemStatusPlugin(), name="system")
         # Story 171 — Observability plugin com dados reais do Milestone 24
         _kernel.add_plugin(ObservabilityPlugin(), name="obs")
+        # Story 174 — Vision plugin: pre-invocation hook + signal metrics via kernel
+        _kernel.add_plugin(VisionPlugin(), name="vision")
     return _kernel
 
 

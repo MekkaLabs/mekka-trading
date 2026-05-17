@@ -670,6 +670,57 @@ class NickFury(BaseAgent[list[CycleReport]]):
         # Emit CYCLE_START
         _cel_emit(_CET.CYCLE_START if _cel else None, equity_usd=equity_usd, timestamp=_ts_start)
 
+        # Story 195 — CycleAgentState: state machine formal por símbolo.
+        # OpenHands AgentState pattern: enum IDLE→SCANNING→ANALYZING→SIGNALING→...→FINISHED.
+        # Permite que o dashboard consulte o estado exato de cada símbolo em tempo real.
+        # Fails silently.
+        _state195 = None
+        try:
+            from src.services.cycle_agent_state import (  # noqa: WPS433
+                get_cycle_agent_state_machine as _get_state_machine,
+                CycleAgentStateEnum as _CAS,
+            )
+            _state195 = _get_state_machine()
+            _state195.transition(symbol, _CAS.SCANNING, cycle_id=str(_cycle_id))
+        except Exception as _s195_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:195] CycleAgentState init skipped: {_s195_exc}")
+
+        # Story 196 — CycleEventSource: tag de origem para eventos do CycleEventLog.
+        # OpenHands EventSource pattern: USER / AGENT / ENVIRONMENT.
+        # Aqui: NICKFURY, VISION, BATMAN, IRONMAN, SYSTEM para cada bloco.
+        # Fails silently.
+        _tagger196 = None
+        try:
+            from src.services.cycle_event_source import (  # noqa: WPS433
+                get_event_source_tagger as _get_tagger,
+                CycleEventSource as _CES,
+            )
+            _tagger196 = _get_tagger()
+            _tagger196.tag(
+                event_type="CYCLE_START",
+                symbol=symbol,
+                cycle_id=str(_cycle_id),
+                source=_CES.NICKFURY,
+                payload={"equity_usd": equity_usd},
+            )
+        except Exception as _t196_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:196] CycleEventSource init skipped: {_t196_exc}")
+
+        # Story 197 — CycleBatchedExporter: acumula eventos para export em lote.
+        # OpenHands BatchedWebHook pattern: buffer + flush periódico para webhook externo.
+        # Fails silently.
+        _exporter197 = None
+        try:
+            from src.services.cycle_batched_exporter import get_cycle_batched_exporter  # noqa: WPS433
+            _exporter197 = get_cycle_batched_exporter()
+            _exporter197.add({
+                "event_type": "CYCLE_START", "symbol": symbol,
+                "cycle_id": str(_cycle_id), "source": "NICKFURY",
+                "equity_usd": equity_usd,
+            })
+        except Exception as _e197_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:197] CycleBatchedExporter init skipped: {_e197_exc}")
+
         # Story 166 — AgentStepGuard: per-cycle stuck loop + MAX_ITERATIONS protection.
         # Creates a fresh guard for this cycle — checks after Vision and after Batman.
         # Fails silently — _guard remains None; all check() calls are guarded.
@@ -780,16 +831,162 @@ class NickFury(BaseAgent[list[CycleReport]]):
             volatility=getattr(analysis, "volatility", None),
         )
 
+        # Story 195 — transition: SCANNING → ANALYZING
+        try:
+            if _state195 is not None:
+                _state195.transition(symbol, _CAS.ANALYZING, cycle_id=str(_cycle_id))
+        except Exception as _s195a_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:195] state ANALYZING transition skipped: {_s195a_exc}")
+
+        # Story 196 — tag ANALYSIS_DONE with source=NICKFURY
+        try:
+            if _tagger196 is not None:
+                _tagger196.tag(
+                    event_type="ANALYSIS_DONE", symbol=symbol,
+                    cycle_id=str(_cycle_id), source=_CES.NICKFURY,
+                    payload={"price": round(_price_now, 4)},
+                )
+        except Exception as _t196a_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:196] source tag ANALYSIS_DONE skipped: {_t196a_exc}")
+
+        # Story 197 — add ANALYSIS_DONE to exporter batch
+        try:
+            if _exporter197 is not None:
+                _exporter197.add({
+                    "event_type": "ANALYSIS_DONE", "symbol": symbol,
+                    "cycle_id": str(_cycle_id), "source": "NICKFURY",
+                    "price": round(_price_now, 4),
+                })
+        except Exception as _e197a_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:197] batch ANALYSIS_DONE skipped: {_e197a_exc}")
+
+        # Story 188 — CycleTrajectory: start trajectory + record ANALYSIS_DONE step.
+        # SWE-agent Trajectory/StepOutput: each cycle step is recorded as (stage, input, output).
+        # Forms an immutable audit trail per cycle — used for debug, replay and latency metrics.
+        # Fails silently.
+        _traj188 = None
+        try:
+            from src.services.cycle_trajectory import get_trajectory_store as _get_traj  # noqa: WPS433
+            _traj188 = _get_traj().start_cycle(symbol, cycle_id=str(_cycle_id))
+            _get_traj().record_step(
+                str(_cycle_id), stage="ANALYSIS_DONE",
+                input_summary=f"symbol={symbol}",
+                output_summary=f"price={_price_now:.4f}",
+            )
+        except Exception as _t188_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:188] CycleTrajectory start skipped: {_t188_exc}")
+
+        # Story 192 — MarketEnvironmentSnapshot: capture market state after analysis.
+        # SWE-agent Environment State Capture: env state captured between steps for context.
+        # Used by Vision (block injection), IncrementalCycleSkip (precise diff), Trajectory.
+        # Fails silently.
+        try:
+            from src.services.market_environment_snapshot import get_env_snapshot_store  # noqa: WPS433
+            get_env_snapshot_store().capture(symbol, analysis=analysis, cycle_id=str(_cycle_id))
+        except Exception as _snap192_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:192] EnvSnapshot capture skipped: {_snap192_exc}")
+
+        # Story 189 — CycleBudgetGuard: check LLM cost budget before Vision.
+        # SWE-agent max_cost done_status: exit gracefully when budget exceeded.
+        # Here: force HOLD instead of blocking — pipeline continues, just no LLM call.
+        # Fails silently — executes Vision normally if guard unavailable.
+        _budget_skipped = False
+        try:
+            from src.services.cycle_budget_guard import get_cycle_budget_guard  # noqa: WPS433
+            _bskip, _breason = get_cycle_budget_guard().should_skip_vision(symbol)
+            if _bskip:
+                _budget_skipped = True
+                self._log.warning(f"[NickFury:189] CycleBudgetGuard → HOLD: {_breason}")
+        except Exception as _bg189_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:189] CycleBudgetGuard check skipped: {_bg189_exc}")
+
+        # Story 195 — transition: ANALYZING → SIGNALING (antes do Vision)
+        try:
+            if _state195 is not None:
+                _state195.transition(symbol, _CAS.SIGNALING, cycle_id=str(_cycle_id))
+        except Exception as _s195b_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:195] state SIGNALING transition skipped: {_s195b_exc}")
+
         # 2. Vision strategic decision
         # Story 131 — MoA path: 3 LLMs em paralelo quando vision_moa_enabled=True.
         # Fallback silencioso para Vision clássico se VisionMoA indisponível ou falhar.
         # Story 138+140 — try/except/finally garante que o breaker e o DEGRADED_MODE
         # são atualizados MESMO quando Vision lança exceção (o `finally` sempre roda).
         # Story 151 — Benchmark Vision stage start
+
+        # Story 174 — MekkaKernel pre-invocation hook (filter chain fires antes do Vision)
+        try:
+            from src.services.mekka_kernel import get_mekka_kernel as _get_kernel174
+            _k174 = _get_kernel174()
+            if _k174._filter_chain is not None:
+                await _k174.invoke(
+                    "vision", "generate_signal",
+                    symbol=symbol,
+                    cycle_id=str(_cycle_id),
+                    model=settings.openai_model,
+                )
+        except Exception as _k174_exc:
+            self._log.debug(f"[NickFury:174] kernel pre-vision hook skipped: {_k174_exc}")
+
+        # Story 184 — TypedCycleMessage: emit ANALYSIS_DONE message antes de Vision.
+        # MetaGPT Message pattern: cause_by=ANALYSIS_DONE, send_to=Vision.
+        # Torna o pipeline introspectável — qualquer observer vê o roteamento.
+        # Fails silently — pipeline não depende desta emissão.
+        try:
+            from src.models.cycle_message import CycleMessage as _CM184  # noqa: WPS433
+            _msg184 = _CM184.from_analysis(
+                symbol=symbol,
+                analysis=analysis,
+                cycle_id=str(_cycle_id),
+            )
+            self._log.debug(_msg184.to_log_line())
+        except Exception as _cm184_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:184] TypedCycleMessage ANALYSIS_DONE skipped: {_cm184_exc}")
+
+        # Story 187 — IncrementalCycleSkip: skip Vision LLM call se nada material mudou.
+        # MetaGPT Incremental Development: compara estado atual com checkpoint anterior;
+        # se preço/regime estáveis dentro dos thresholds → reusa último sinal.
+        # Económico: evita LLM call quando mercado está flat.
+        # Fails silently — executa Vision normalmente se guard indisponível.
+        _incremental_skipped = False
+        _incremental_last_signal = None
+        try:
+            from src.services.cycle_incremental_guard import get_cycle_incremental_guard  # noqa: WPS433
+            _ig187 = get_cycle_incremental_guard()
+            _price187 = float(analysis.price) if analysis and analysis.price else 0.0
+            _regime187_str = ""
+            try:
+                _meta187 = getattr(analysis, "signal_metadata", None) or {}
+                _regime187_str = _meta187.get("market_regime", "UNKNOWN")
+            except Exception:  # noqa: BLE001
+                _regime187_str = "UNKNOWN"
+            _skip187, _skip_reason = _ig187.should_skip(
+                symbol, current_price=_price187, current_regime=_regime187_str
+            )
+            if _skip187:
+                _incremental_last_signal = _ig187.get_last_signal(symbol)
+                if _incremental_last_signal is not None:
+                    _incremental_skipped = True
+                    _ig187.register_skip(symbol)
+                    self._log.debug(f"[NickFury:187] IncrementalCycleSkip → {_skip_reason}")
+        except Exception as _ig187_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:187] IncrementalCycleSkip check skipped: {_ig187_exc}")
+
         _vision_stage_start = __import__("time").monotonic()
         _vision_error = False
         try:
-            if self._vision_moa is not None:
+            if _budget_skipped:
+                # Story 189 — CycleBudgetGuard: força HOLD sem LLM call
+                from src.models.signal import TradingSignal, TradeAction  # noqa: WPS433
+                signal = TradingSignal(
+                    action=TradeAction.HOLD,
+                    confidence=0.0,
+                    reasoning="Budget limit exceeded — Vision skipped (Story 189)",
+                )
+            elif _incremental_skipped and _incremental_last_signal is not None:
+                # Story 187 — reutiliza sinal anterior (IncrementalCycleSkip)
+                signal = _incremental_last_signal
+            elif self._vision_moa is not None:
                 try:
                     signal = await self._vision_moa.run(analysis=analysis)
                 except Exception as _moa_run_exc:  # noqa: BLE001
@@ -861,6 +1058,97 @@ class NickFury(BaseAgent[list[CycleReport]]):
                     )
             except Exception as exc:  # noqa: BLE001
                 self._log.warning(f"[NickFury] reflection loop failed: {exc}")
+
+        # Story 188 — CycleTrajectory: record VISION_SIGNAL step.
+        # Fail-silent.
+        try:
+            from src.services.cycle_trajectory import get_trajectory_store as _get_traj188b  # noqa: WPS433
+            _sig_summary = ""
+            try:
+                _sig_summary = f"action={signal.action.value} conf={signal.confidence:.0%}"
+            except Exception:  # noqa: BLE001
+                pass
+            _skip_tag = "(incremental)" if _incremental_skipped else ("(budget_hold)" if _budget_skipped else "")
+            _get_traj188b().record_step(
+                str(_cycle_id), stage="VISION_SIGNAL",
+                input_summary=f"regime={_regime187_str if '_regime187_str' in dir() else '?'}",
+                output_summary=_sig_summary,
+                ok=not _budget_skipped,
+                observation=_skip_tag,
+            )
+            # Registra custo da chamada Vision (se não foi skipped)
+            if not _incremental_skipped and not _budget_skipped:
+                from src.services.cycle_budget_guard import get_cycle_budget_guard  # noqa: WPS433
+                get_cycle_budget_guard().record_cost(symbol, estimated_cost_usd=0.002, cycle_id=str(_cycle_id))
+        except Exception as _t188b_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:188] CycleTrajectory VISION_SIGNAL skipped: {_t188b_exc}")
+
+        # Story 187 — IncrementalCycleGuard: update checkpoint após Vision completar.
+        # Deve rodar SEMPRE que Vision executou normalmente (não skipped) para que
+        # o próximo ciclo tenha dados frescos para decidir se pode skipar.
+        # Fail-silent: erro no update não afeta o pipeline.
+        if not _incremental_skipped:
+            try:
+                from src.services.cycle_incremental_guard import get_cycle_incremental_guard  # noqa: WPS433
+                _price_up187 = float(analysis.price) if analysis and analysis.price else 0.0
+                _meta_up187 = getattr(analysis, "signal_metadata", None) or {}
+                _regime_up187 = _meta_up187.get("market_regime", "UNKNOWN")
+                get_cycle_incremental_guard().update(
+                    symbol=symbol,
+                    price=_price_up187,
+                    regime=_regime_up187,
+                    signal=signal,
+                )
+            except Exception as _up187_exc:  # noqa: BLE001
+                self._log.debug(f"[NickFury:187] IncrementalCycleGuard.update skipped: {_up187_exc}")
+
+        # Story 184 — TypedCycleMessage: emit SIGNAL_EMITTED após Vision completar.
+        # MetaGPT Message pattern: cause_by=SIGNAL_EMITTED, send_to=Batman.
+        # Fail-silent.
+        try:
+            from src.models.cycle_message import CycleMessage as _CM184b  # noqa: WPS433
+            _msg184b = _CM184b.from_signal(
+                symbol=symbol,
+                signal=signal,
+                cycle_id=str(_cycle_id),
+            )
+            self._log.debug(_msg184b.to_log_line())
+        except Exception as _cm184b_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:184] TypedCycleMessage SIGNAL_EMITTED skipped: {_cm184b_exc}")
+
+        # Story 179 — AutoSignalLinter: auto-fix geometria do sinal (Aider auto-lint pattern).
+        # Diferente do SignalValidator (Story 168) que *bloqueia*, o linter *corrige*:
+        # clamp confidence, swap SL/TP invertidos, fix entry_price <= 0, clamp leverage.
+        # Executado ANTES do StepGuard para que o hash de comparação use o sinal corrigido.
+        # Fail-silent: qualquer erro → sinal original preservado.
+        _lint_result_191 = None
+        try:
+            from src.services.auto_signal_linter import get_auto_signal_linter  # noqa: WPS433
+            _lint_price = float(analysis.price) if analysis and analysis.price else None
+            _linter = get_auto_signal_linter()
+            signal = _linter.lint_and_log(signal, last_price=_lint_price, symbol=symbol)
+            # Captura o LintResult para o ObservationFeedbackLoop (Story 191)
+            _lint_result_191 = getattr(_linter, "_last_result", None)
+        except Exception as _lint179_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:179] AutoSignalLinter skipped: {_lint179_exc}")
+
+        # Story 191 — ObservationFeedbackLoop: record lint corrections for next Vision cycle.
+        # SWE-agent ACI guardrails: linter output fed back as observation for next turn.
+        # Here: if signal had geometry fixes, record them so Vision sees them next cycle.
+        # Fail-silent.
+        try:
+            if _lint_result_191 is not None:
+                _was_fixed = getattr(_lint_result_191, "was_fixed", False)
+                if _was_fixed:
+                    from src.services.observation_feedback_loop import get_observation_feedback_loop  # noqa: WPS433
+                    _obs_count = get_observation_feedback_loop().record_from_lint_result(
+                        symbol=symbol,
+                        lint_result=_lint_result_191,
+                        cycle_id=str(_cycle_id),
+                    )
+                    self._log.debug(f"[NickFury:191] ObservationFeedbackLoop: {_obs_count} obs recorded for {symbol}")
+        except Exception as _obs191_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:191] ObservationFeedbackLoop record skipped: {_obs191_exc}")
 
         # Story 166 — StepGuard check after Vision
         if _guard_check("Vision.run", f"{signal.action.value}:{round(signal.confidence, 2)}"):
@@ -1062,6 +1350,21 @@ class NickFury(BaseAgent[list[CycleReport]]):
                     message=_sv_result.error_summary,
                     payload=_sv_result.to_dict(),
                 )
+                # Story 176 — Telegram alert quando sinal inválido
+                try:
+                    _sv_action = signal.action.value if signal and signal.action else "UNKNOWN"
+                    _sv_conf = f"{signal.confidence:.0%}" if signal and signal.confidence else "?"
+                    await self._telegram.alert(
+                        event="SIGNAL_INVALID",
+                        symbol=symbol,
+                        message=(
+                            f"⚠️ *SignalValidator bloqueou sinal* [{symbol}]\n"
+                            f"Action: `{_sv_action}` | Confiança: `{_sv_conf}`\n"
+                            f"Motivo: {_sv_result.error_summary}"
+                        ),
+                    )
+                except Exception as _sv176_exc:
+                    self._log.debug(f"[NickFury:176] Telegram SIGNAL_INVALID skipped: {_sv176_exc}")
                 return CycleReport(
                     symbol=symbol,
                     signal=signal,
@@ -1074,6 +1377,40 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 )
         except Exception as _sv_exc:  # noqa: BLE001
             self._log.debug(f"[NickFury:168] SignalValidator skipped: {_sv_exc}")
+
+        # Story 195 — transition: SIGNALING → LINTING → RISK_CHECK (antes do Batman)
+        try:
+            if _state195 is not None:
+                _state195.transition(symbol, _CAS.LINTING, cycle_id=str(_cycle_id))
+                _state195.transition(symbol, _CAS.RISK_CHECK, cycle_id=str(_cycle_id))
+        except Exception as _s195c_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:195] state RISK_CHECK transition skipped: {_s195c_exc}")
+
+        # Story 196 — tag SIGNAL_EMITTED with source=VISION
+        try:
+            if _tagger196 is not None:
+                _tagger196.tag(
+                    event_type="SIGNAL_EMITTED", symbol=symbol,
+                    cycle_id=str(_cycle_id), source=_CES.VISION,
+                    payload={
+                        "action": signal.action.value,
+                        "confidence": round(signal.confidence, 3),
+                    },
+                )
+        except Exception as _t196b_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:196] source tag SIGNAL_EMITTED skipped: {_t196b_exc}")
+
+        # Story 197 — add SIGNAL_EMITTED to exporter batch
+        try:
+            if _exporter197 is not None:
+                _exporter197.add({
+                    "event_type": "SIGNAL_EMITTED", "symbol": symbol,
+                    "cycle_id": str(_cycle_id), "source": "VISION",
+                    "action": signal.action.value,
+                    "confidence": round(signal.confidence, 3),
+                })
+        except Exception as _e197b_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:197] batch SIGNAL_EMITTED skipped: {_e197b_exc}")
 
         # 3. Batman risk gate
         # Story 151 — Benchmark Batman stage
@@ -1276,6 +1613,38 @@ class NickFury(BaseAgent[list[CycleReport]]):
             outcome=execution.status.value,
             timestamp=_ts_end,
         )
+
+        # Story 195 — transition: EXECUTING → FINISHED
+        try:
+            if _state195 is not None:
+                _state195.transition(symbol, _CAS.EXECUTING, cycle_id=str(_cycle_id))
+                _state195.transition(symbol, _CAS.FINISHED, cycle_id=str(_cycle_id))
+                _state195.transition(symbol, _CAS.IDLE, cycle_id=str(_cycle_id))  # ready for next cycle
+        except Exception as _s195d_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:195] state FINISHED transition skipped: {_s195d_exc}")
+
+        # Story 196 — tag CYCLE_END with source=NICKFURY
+        try:
+            if _tagger196 is not None:
+                _tagger196.tag(
+                    event_type="CYCLE_END", symbol=symbol,
+                    cycle_id=str(_cycle_id), source=_CES.NICKFURY,
+                    payload={"outcome": execution.status.value},
+                )
+        except Exception as _t196c_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:196] source tag CYCLE_END skipped: {_t196c_exc}")
+
+        # Story 197 — add CYCLE_END to batch + flush se batch cheio
+        try:
+            if _exporter197 is not None:
+                _exporter197.add({
+                    "event_type": "CYCLE_END", "symbol": symbol,
+                    "cycle_id": str(_cycle_id), "source": "NICKFURY",
+                    "outcome": execution.status.value,
+                })
+                _exporter197.maybe_flush()  # flush automático se batch_size atingido
+        except Exception as _e197c_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:197] batch/flush CYCLE_END skipped: {_e197c_exc}")
 
         # Story 151 — Close benchmark measurement for this full cycle
         try:

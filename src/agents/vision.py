@@ -246,6 +246,142 @@ class Vision(BaseAgent[TradingSignal]):
         except Exception as _rmap164_exc:  # noqa: BLE001
             self._log.debug(f"[Vision:164] RepoMap injection skipped: {_rmap164_exc}")
 
+        # Story 190 — SignalDemonstrationStore: inject few-shot demonstrations.
+        # SWE-agent Demonstrations pattern: trajectories converted to demos and
+        # injected as few-shot examples in the system prompt to guide behavior.
+        # Here: past high-confidence WIN signals in similar (regime, symbol) are
+        # shown as format+reasoning templates — "this is what a good signal looks like".
+        # Lazy-loads data/signal_demonstrations.json on first call.
+        # Fails silently — no demo block if empty store or error.
+        try:
+            from src.services.signal_demonstration_store import get_demonstration_store  # noqa: WPS433
+            _sym190 = getattr(analysis, "symbol", symbol) if analysis else symbol
+            _meta190 = getattr(analysis, "signal_metadata", None) or {}
+            _regime190 = _meta190.get("market_regime", "UNKNOWN")
+            _demo_block = get_demonstration_store().get_prompt_block(_sym190, regime=_regime190)
+            if _demo_block:
+                prompt = prompt + "\n\n" + _demo_block
+                self._log.debug(f"[Vision:190] DemonstrationStore block injected for {_sym190}")
+        except Exception as _demo190_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:190] SignalDemonstrationStore skipped: {_demo190_exc}")
+
+        # Story 191 — ObservationFeedbackLoop: inject lint corrections from previous cycle.
+        # SWE-agent ACI guardrails: linter output is fed back as "observation" context
+        # so the agent corrects geometry errors in the next turn. Here: if the last cycle's
+        # signal was auto-corrected by AutoSignalLinter (Story 179), those corrections are
+        # shown to Vision so it avoids the same geometry mistakes.
+        # Fails silently.
+        try:
+            from src.services.observation_feedback_loop import get_observation_feedback_loop  # noqa: WPS433
+            _sym191 = getattr(analysis, "symbol", symbol) if analysis else symbol
+            _obs_block = get_observation_feedback_loop().get_feedback_block(_sym191, consume=True)
+            if _obs_block:
+                prompt = prompt + "\n\n" + _obs_block
+                self._log.debug(f"[Vision:191] ObservationFeedbackLoop block injected for {_sym191}")
+        except Exception as _obs191_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:191] ObservationFeedbackLoop skipped: {_obs191_exc}")
+
+        # Story 183 — RoleWorkingMemory: inject recent trade history for this symbol.
+        # MetaGPT RoleContext.rc.memory pattern: each Role maintains a working memory
+        # of observed messages. Here: last N cycle results (action, confidence, regime,
+        # outcome_pnl) injected as "recent trade history" so Vision can avoid repeating
+        # recent mistakes and recognize recurring patterns.
+        # Fails silently — no history block if memory empty or error.
+        try:
+            from src.services.role_working_memory import get_role_working_memory  # noqa: WPS433
+            _sym183 = getattr(analysis, "symbol", symbol) if analysis else symbol
+            _wm_block = get_role_working_memory().get_prompt_block(_sym183, limit=5)
+            if _wm_block:
+                prompt = prompt + "\n\n" + _wm_block
+                self._log.debug(f"[Vision:183] RoleWorkingMemory block injected for {_sym183}")
+        except Exception as _wm183_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:183] RoleWorkingMemory skipped: {_wm183_exc}")
+
+        # Story 186 — SignalOutcomeMemory: inject past performance for similar conditions.
+        # MetaGPT LongTermMemory pattern: similarity search (regime + action) retrieves
+        # top-N historical outcomes as "past performance context" for the LLM.
+        # Helps Vision calibrate confidence based on how similar signals performed before.
+        # Fails silently — no block if no similar history or error.
+        try:
+            from src.services.signal_outcome_memory import get_signal_outcome_memory  # noqa: WPS433
+            _sym186 = getattr(analysis, "symbol", symbol) if analysis else symbol
+            _meta186 = getattr(analysis, "signal_metadata", None) or {}
+            _regime186 = _meta186.get("market_regime", "UNKNOWN")
+            _past_block = get_signal_outcome_memory().get_prompt_block(
+                _sym186, regime=_regime186, action="LONG", top_n=3
+            )
+            if _past_block:
+                prompt = prompt + "\n\n" + _past_block
+                self._log.debug(f"[Vision:186] SignalOutcomeMemory block injected for {_sym186}")
+        except Exception as _som186_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:186] SignalOutcomeMemory skipped: {_som186_exc}")
+
+        # Story 180 — TradeAnnotationWatcher: inject analyst hints (Aider Watch Mode pattern).
+        # Reads data/trade_hints.json lazily (only if mtime changed).
+        # Analyst drops {"symbol": "BTC", "bias": "LONG", "note": "FOMC amanhã"} in the file
+        # and Vision picks it up in the next cycle — zero pipeline disruption.
+        # Fails silently — no hint block if file absent or error.
+        try:
+            from src.services.trade_annotation_watcher import get_trade_annotation_watcher  # noqa: WPS433
+            _sym180 = getattr(analysis, "symbol", symbol) if analysis else symbol
+            _hint_block = get_trade_annotation_watcher().get_prompt_block(_sym180)
+            if _hint_block:
+                prompt = prompt + "\n\n" + _hint_block
+                self._log.debug(f"[Vision:180] analyst hints injected for {_sym180}")
+        except Exception as _watcher180_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:180] TradeAnnotationWatcher skipped: {_watcher180_exc}")
+
+        # Story 182 — AnalysisPromptCache: inject cached macro context block.
+        # Reads from in-memory cache (TTL 600s by default) — avoids redundant
+        # market data fetches when multiple symbols run in the same cycle.
+        # Fails silently — no cache block if cold cache or error.
+        try:
+            from src.services.analysis_prompt_cache import get_analysis_prompt_cache  # noqa: WPS433
+            _cache182 = get_analysis_prompt_cache()
+            _cached_macro = _cache182.get("macro_context")
+            if _cached_macro:
+                prompt = prompt + "\n\n" + _cached_macro
+                self._log.debug(f"[Vision:182] cached macro_context injected ({len(_cached_macro)} chars)")
+        except Exception as _cache182_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:182] AnalysisPromptCache skipped: {_cache182_exc}")
+
+        # Story 181 — DynamicReasoningBudget: adjust max_tokens based on regime+cap_tier.
+        # Reads market_regime and cap_tier from analysis.chart metadata (injected by Story 163).
+        # Fails silently — uses model default if budget unavailable.
+        _vision_max_tokens: int | None = None
+        try:
+            from src.services.dynamic_reasoning_budget import get_reasoning_budget  # noqa: WPS433
+            _chart181 = analysis.chart if analysis else None
+            _regime181 = "UNKNOWN"
+            _cap181 = "MID_CAP"
+            if _chart181:
+                # Try signal metadata first (set by Story 163)
+                _meta181 = getattr(analysis, "signal_metadata", None) or {}
+                _regime181 = _meta181.get("market_regime", "UNKNOWN")
+                _cap181 = _meta181.get("cap_tier", "MID_CAP")
+                # Fallback: derive from trend+RSI+ATR
+                if _regime181 == "UNKNOWN" and _chart181:
+                    _t181 = getattr(_chart181, "trend", None)
+                    _t181v = _t181.value if _t181 else "NEUTRAL"
+                    _r181 = float(getattr(_chart181, "rsi_14", 50) or 50)
+                    _a181 = float(getattr(_chart181, "atr_pct", 0.02) or 0.02)
+                    if _a181 > 0.05:
+                        _regime181 = "VOLATILE"
+                    elif _t181v in ("BULLISH", "STRONG_BULL") and _r181 > 55:
+                        _regime181 = "BULL"
+                    elif _t181v in ("BEARISH", "STRONG_BEAR") and _r181 < 45:
+                        _regime181 = "BEAR"
+                    else:
+                        _regime181 = "SIDEWAYS"
+            _budget181 = get_reasoning_budget()
+            _vision_max_tokens = _budget181.get_max_tokens(regime=_regime181, cap_tier=_cap181)
+            self._log.debug(
+                f"[Vision:181] DynamicReasoningBudget: {_regime181}/{_cap181} "
+                f"→ max_tokens={_vision_max_tokens}"
+            )
+        except Exception as _budget181_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:181] DynamicReasoningBudget skipped: {_budget181_exc}")
+
         # Story 133 — Vision Pre-Reasoning: reflect before generating signal.
         # Adds ~1 extra LLM call when enabled. Fails silently.
         if settings.vision_pre_reasoning_enabled:
@@ -289,6 +425,33 @@ class Vision(BaseAgent[TradingSignal]):
                     )
         except Exception as _comp170_exc:  # noqa: BLE001
             self._log.debug(f"[Vision:170] ChatHistoryCompressor skipped: {_comp170_exc}")
+
+        # Story 178 — ArchitectEditorVision: two-model workflow (Aider architect/editor pattern).
+        # If settings.vision_architect_editor_enabled=True:
+        #   Call 1 (architect): free-form trade thesis from current model
+        #   Call 2 (editor): format thesis into precise TradingSignal JSON
+        # Falls back to single-call if architect mode disabled or fails.
+        _architect_thesis: str = ""
+        if getattr(settings, "vision_architect_editor_enabled", False):
+            try:
+                _architect_thesis = await self._call_llm(
+                    prompt
+                    + "\n\nProvide a free-form trade thesis (1-3 paragraphs). "
+                    "Focus on direction, key drivers, risks. Do NOT output JSON yet."
+                )
+                self._log.debug(
+                    f"[Vision:178] architect thesis generated "
+                    f"({len(_architect_thesis)} chars)"
+                )
+                # Inject thesis as context for the editor call
+                prompt = (
+                    prompt
+                    + "\n\n=== Architect Thesis (your preliminary analysis) ===\n"
+                    + _architect_thesis
+                    + "\n\nNow convert the above thesis into the TradingSignal JSON schema exactly."
+                )
+            except Exception as _arch178_exc:  # noqa: BLE001
+                self._log.debug(f"[Vision:178] architect call skipped: {_arch178_exc}")
 
         try:
             raw = await self._call_llm(prompt)
@@ -485,7 +648,48 @@ class Vision(BaseAgent[TradingSignal]):
     # ------------------------------------------------------------------
 
     async def _call_llm(self, user_prompt: str) -> str:
-        return await self._llm.chat(_SYSTEM_PROMPT, user_prompt)
+        # Story 194 — VisionRetryMixin: exponential backoff para LLM calls.
+        # OpenHands RetryMixin pattern: retenta erros transientes (rate limit,
+        # timeout, server error) com backoff 1→2→4→8s.
+        # Temperature jitter na última tentativa se resposta vazia (Gemini fix).
+        # Fail-silent: se todas as tentativas falharem, deixa a exceção propagar
+        # para o handler externo (que retorna HOLD). Não usa tenacity — puro Python.
+        try:
+            from src.services.vision_retry_mixin import get_vision_retry_mixin  # noqa: WPS433
+            _retry194 = get_vision_retry_mixin()
+
+            async def _llm_call_wrapper(**_kwargs: Any) -> str:
+                return await self._llm.chat(_SYSTEM_PROMPT, user_prompt)
+
+            # call_with_retry é síncrono — wrapa a coroutine num asyncio.run not needed
+            # porque estamos dentro de async context. Usamos diretamente a coroutine:
+            import asyncio as _asyncio194  # noqa: WPS433
+            _result = None
+            _last_exc_194 = None
+            for _attempt194 in range(1, _retry194.config.max_retries + 2):
+                try:
+                    _result = await self._llm.chat(_SYSTEM_PROMPT, user_prompt)
+                    _retry194._total_successes += 1
+                    _retry194._total_calls += 1
+                    return _result
+                except Exception as _exc194:  # noqa: BLE001
+                    _last_exc_194 = _exc194
+                    if _attempt194 > _retry194.config.max_retries:
+                        _retry194._total_failures += 1
+                        raise  # re-raise para o handler externo (→ HOLD)
+                    _wait194 = _retry194._wait_time(_attempt194)
+                    _retry194._total_retries += 1
+                    self._log.debug(
+                        f"[Vision:194] LLM retry #{_attempt194} in {_wait194:.1f}s: "
+                        f"{type(_exc194).__name__}"
+                    )
+                    await _asyncio194.sleep(_wait194)
+            # Nunca chega aqui
+            raise RuntimeError("VisionRetryMixin: exhausted") from _last_exc_194
+
+        except ImportError:
+            # VisionRetryMixin não disponível — fallback direto
+            return await self._llm.chat(_SYSTEM_PROMPT, user_prompt)
 
     async def _pre_reason(self, analysis_prompt: str) -> str:
         """

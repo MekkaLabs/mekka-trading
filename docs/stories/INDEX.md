@@ -4,7 +4,7 @@
 arquitetural. Stories abaixo são lidas em ordem numérica dentro de cada
 bloco.
 
-Última story entregue: **172** (CycleEventLog SSE Dashboard Endpoint — streaming em tempo real do audit trail para o Live Trading Panel).
+Última story entregue: **197** (CycleBatchedExporter — exportação de eventos em lotes para webhook externo com flush automático e fail-silent; padrão OpenHands BatchedWebHook).
 Stories 047–124 entregues e registradas no CHANGELOG.md (versões 0.2.0–0.8.0).
 
 ---
@@ -259,6 +259,99 @@ Live Trading Panel.
 - [170 — ChatHistoryCompressor Vision Integration: compress antes do LLM call quando CWT reporta near-limit](story-170-chat-compressor-vision.md)
 - [171 — ObservabilityPlugin MekkaKernel Integration: 5 @mekka_function expondo CycleEventLog/SignalChangeLog/CWT/StepGuard/Validator](story-171-observability-plugin.md)
 - [172 — CycleEventLog SSE Dashboard Endpoint: GET /api/events/stream com Server-Sent Events para Live Trading Panel](story-172-sse-endpoint.md)
+
+## Milestone 26 — Observability Live & Kernel Orchestration
+
+Frontend conectado ao stream SSE, VisionPlugin integrado ao MekkaKernel com pre-invocation hook
+disparando o filter chain antes de cada chamada Vision, endpoint widget `/api/obs/{tool_name}`
+para dashboard sem acoplamento direto, alerta Telegram em sinais inválidos, e endpoint live
+de uso de context window com ranking de ciclos críticos.
+
+Última story entregue: **177** (ContextWindowTracker Dashboard Endpoint).
+
+- [173 — Live Trading Panel SSE Integration: subscribeCycleEvents() via EventSource API + mock fallback](story-173-sse-frontend.md)
+- [174 — MekkaKernel NickFury Orchestration: VisionPlugin com generate_signal/get_last_signal/get_vision_metrics + pre-invocation hook](story-174-vision-kernel.md)
+- [175 — ObservabilityPlugin Dashboard Widget: GET /api/obs/{tool_name} despachando para obs/vision plugins](story-175-obs-widget.md)
+- [176 — SignalValidator Telegram Alert: alerta Telegram quando sinal inválido com action/confidence/error_summary](story-176-validator-telegram.md)
+- [177 — ContextWindowTracker Dashboard Endpoint: GET /api/context-window/live com summaries, usage_pct e is_near_limit](story-177-cwt-live.md)
+
+## Milestone 28 — MetaGPT Patterns: Working Memory, Typed Messages, SOP, Long-Term Memory, Incremental Skip
+
+Cinco padrões do framework FoundationAgents/MetaGPT mapeados para o pipeline Mekka Trading:
+RoleWorkingMemory mantém janela deslizante de ciclos anteriores por símbolo e injeta no prompt
+Vision (MetaGPT RoleContext.rc.memory), TypedCycleMessage envolve outputs de cada estágio com
+metadados de roteamento explícitos (MetaGPT Message cause_by/send_to), CycleSOP declara o pipeline
+formalmente com agentes e condições de skip (MetaGPT SOP), SignalOutcomeMemory armazena outcomes com
+busca por similaridade regime+action (MetaGPT LongTermMemory), e IncrementalCycleSkip poupa a LLM call
+do Vision quando preço/regime não mudaram materialmente (MetaGPT Incremental Development).
+
+Última story entregue: **187** (IncrementalCycleSkip).
+
+- [183 — RoleWorkingMemory Vision Integration: sliding window de ciclos + prompt block "recent trade history" (MetaGPT rc.memory)](story-183-role-working-memory.md)
+- [184 — TypedCycleMessage NickFury: CycleMessage Pydantic com stage/sender/recipients/payload (MetaGPT Message routing)](story-184-typed-cycle-message.md)
+- [185 — CycleSOP Dashboard: especificação declarativa de 9 estágios + GET /api/cycle-sop (MetaGPT SOP)](story-185-cycle-sop.md)
+- [186 — SignalOutcomeMemory Vision Integration: similarity search regime+action + prompt block "past performance" (MetaGPT LongTermMemory)](story-186-signal-outcome-memory.md)
+- [187 — IncrementalCycleSkip NickFury: skip Vision LLM call quando preço/regime estáveis + GET /api/incremental-guard (MetaGPT Incremental)](story-187-incremental-cycle-skip.md)
+
+## Milestone 30 — OpenHands Patterns Wave 1: Sub-Agent Delegate, Retry Mixin, Agent State Machine, Event Source Tagger, Batched Exporter
+
+Cinco padrões novos do framework OpenHands/OpenHands (não cobertos pelas Stories 154–156) mapeados
+para o pipeline Mekka Trading: SubAgentDelegator permite que NickFury delegue tarefas isoladas para
+sub-agentes Vision com DelegateObservation retornando outputs estruturados (OpenHands AgentDelegate),
+VisionRetryMixin adiciona retry com backoff exponencial no _call_llm do Vision com tratamento especial
+para respostas vazias via temperature jitter (OpenHands RetryMixin), CycleAgentStateMachine rastreia
+o estado formal de cada símbolo (IDLE→SCANNING→ANALYZING→SIGNALING→RISK_CHECK→EXECUTING→FINISHED)
+com transições validadas (OpenHands AgentState), CycleEventSourceTagger adiciona o campo `source`
+a cada evento do pipeline para filtragem e auditoria por componente (OpenHands EventSource USER/AGENT/
+ENVIRONMENT), e CycleBatchedExporter acumula eventos do ciclo e os exporta em lotes para um webhook
+externo configurável com flush automático e fail-silent (OpenHands BatchedWebHook).
+
+Última story entregue: **197** (CycleBatchedExporter).
+
+- [193 — SubAgentDelegator NickFury: delegação isolada para sub-agentes Vision com DelegateObservation (OpenHands AgentDelegate)](story-193-sub-agent-delegator.md)
+- [194 — VisionRetryMixin Vision: retry com backoff exponencial + temperature jitter em respostas vazias (OpenHands RetryMixin)](story-194-vision-retry-mixin.md)
+- [195 — CycleAgentStateMachine NickFury: estado formal por símbolo com transições validadas (OpenHands AgentState)](story-195-cycle-agent-state.md)
+- [196 — CycleEventSourceTagger NickFury: tagging de origem USER/AGENT/ENVIRONMENT por evento (OpenHands EventSource)](story-196-cycle-event-source.md)
+- [197 — CycleBatchedExporter NickFury: export em lotes para webhook externo com flush automático (OpenHands BatchedWebHook)](story-197-cycle-batched-exporter.md)
+
+## Milestone 29 — SWE-agent Patterns Wave 2: Trajectory, Budget Guard, Demonstrations, Observation Feedback, Environment Snapshot
+
+Cinco padrões novos do framework SWE-agent (não cobertos pelas Stories 157–159) mapeados para
+o pipeline Mekka Trading: CycleTrajectory mantém log append-only de steps por ciclo serializável
+em JSONL para audit trail completo (SWE-agent Trajectory/StepOutput), CycleBudgetGuard rastreia
+custo estimado de LLM por sessão e força HOLD quando o budget é excedido com graceful exit
+(SWE-agent max_cost + done_status), SignalDemonstrationStore injeta exemplos WIN de ciclos
+anteriores no prompt do Vision como few-shot demonstrations (SWE-agent Demonstrations YAML),
+ObservationFeedbackLoop re-injeta as correções do AutoSignalLinter no próximo ciclo do Vision
+para que o modelo corrija geometria nos seus próprios outputs (SWE-agent ACI guardrails +
+linter observation), e MarketEnvironmentSnapshot captura o estado imutável do mercado entre
+steps com diff material para contexto do Vision (SWE-agent Environment State Capture).
+
+Última story entregue: **192** (MarketEnvironmentSnapshot).
+
+- [188 — CycleTrajectory NickFury: StepRecord append-only por ciclo + JSONL audit trail (SWE-agent Trajectory)](story-188-cycle-trajectory.md)
+- [189 — CycleBudgetGuard NickFury: custo LLM por sessão + HOLD quando budget excedido + graceful exit (SWE-agent max_cost)](story-189-cycle-budget-guard.md)
+- [190 — SignalDemonstrationStore Vision: few-shot WIN examples no prompt + lazy load JSON (SWE-agent Demonstrations)](story-190-signal-demonstration-store.md)
+- [191 — ObservationFeedbackLoop Vision + NickFury: lint corrections re-injetadas no próximo ciclo Vision (SWE-agent ACI guardrails)](story-191-observation-feedback-loop.md)
+- [192 — MarketEnvironmentSnapshot NickFury: snapshot imutável do estado de mercado + diff material (SWE-agent EnvState)](story-192-market-environment-snapshot.md)
+
+## Milestone 27 — Aider Patterns Wave 2: Architect/Editor, Auto-Linter, Watch Mode, Reasoning Budget, Prompt Caching
+
+Cinco padrões do framework Aider-AI/aider mapeados para o pipeline Mekka Trading:
+ArchitectEditorVision separa raciocínio livre de geração estruturada em dois LLM calls consecutivos,
+AutoSignalLinter corrige geometria do sinal (clamp, swap, fallback) ao invés de bloquear,
+TradeAnnotationWatcher monitora `data/trade_hints.json` com lazy reload por mtime para injetar
+hints de analistas no prompt Vision, DynamicReasoningBudget ajusta max_tokens do Vision pelo
+regime de mercado × cap tier, e AnalysisPromptCache armazena blocos de macro context com TTL
+e warm paralelo para reduzir latência de ciclos consecutivos.
+
+Última story entregue: **182** (AnalysisPromptCache).
+
+- [178 — ArchitectEditorVision: dois LLM calls — thesis livre → JSON estruturado (Aider architect/editor mode)](story-178-architect-editor-vision.md)
+- [179 — AutoSignalLinter NickFury Integration: lint pós-Vision com clamp/swap/fallback + LintFix SEARCH/REPLACE (Aider auto-lint)](story-179-auto-signal-linter.md)
+- [180 — TradeAnnotationWatcher Vision Integration: lazy reload de trade_hints.json por mtime + prompt block (Aider watch mode / AI! comments)](story-180-trade-annotation-watcher.md)
+- [181 — DynamicReasoningBudget Vision Integration: max_tokens por regime × cap_tier (Aider --thinking-tokens)](story-181-dynamic-reasoning-budget.md)
+- [182 — AnalysisPromptCache Vision Integration: cache TTL de macro_context + get_or_build async + warm paralelo (Aider prompt caching)](story-182-analysis-prompt-cache.md)
 
 ## Milestone 23 — Cost Intelligence + Regime-Aware Gates + Chaos Validation + AI Framework Patterns
 

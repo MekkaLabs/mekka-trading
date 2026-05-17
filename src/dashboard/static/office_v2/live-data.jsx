@@ -239,6 +239,100 @@ function subscribeAgentTasks(cb) {
   return () => { cancelled = true; };
 }
 
+// ---------- CYCLE EVENT STREAM (Story 173 — SSE) ----------
+// Connects to GET /api/events/stream (Server-Sent Events, Story 172).
+// cb receives parsed event objects: { event_type, symbol, cycle_id, ...kwargs }
+// Returns an unsubscribe function — call it to close the EventSource.
+//
+// Supports an optional `symbol` filter forwarded as ?symbol=BTC to the server.
+// Falls back to mock cycle events if the browser doesn't support EventSource
+// or the server is unreachable after FALLBACK_DELAY_MS.
+function subscribeCycleEvents(cb, { symbol = "", seed = 10 } = {}) {
+  if (typeof EventSource === "undefined") {
+    return _startCycleEventMock(cb);  // IE / restricted env
+  }
+
+  const FALLBACK_DELAY_MS = 8000;
+  let cancelled = false;
+  let es = null;
+  let mockTimer = null;
+  let receivedAny = false;
+
+  function startMock() {
+    if (cancelled || mockTimer) return;
+    const MOCK_EVENTS = [
+      { event_type: "CYCLE_START",   symbol: symbol || "BTCUSDT", cycle_id: "mock-001", equity_usd: 25000 },
+      { event_type: "ANALYSIS_DONE", symbol: symbol || "BTCUSDT", cycle_id: "mock-001", price: 94320, volatility: 0.032 },
+      { event_type: "SIGNAL_EMITTED",symbol: symbol || "BTCUSDT", cycle_id: "mock-001", action: "LONG", confidence: 0.82, entry_price: 94320 },
+      { event_type: "RISK_VERDICT",  symbol: symbol || "BTCUSDT", cycle_id: "mock-001", verdict: "APPROVED", approved: true },
+      { event_type: "EXECUTION_DONE",symbol: symbol || "BTCUSDT", cycle_id: "mock-001", status: "FILLED", is_paper: true },
+      { event_type: "CYCLE_END",     symbol: symbol || "BTCUSDT", cycle_id: "mock-001", outcome: "EXECUTED" },
+    ];
+    let idx = 0;
+    function tick() {
+      if (cancelled) return;
+      cb({ ...MOCK_EVENTS[idx % MOCK_EVENTS.length], ts: new Date().toISOString(), source: "mock" });
+      idx++;
+      mockTimer = setTimeout(tick, 3000 + Math.random() * 4000);
+    }
+    mockTimer = setTimeout(tick, 1200);
+  }
+
+  function startSSE() {
+    try {
+      const params = new URLSearchParams({ last: String(seed) });
+      if (symbol) params.set("symbol", symbol.toUpperCase());
+      es = new EventSource(`/api/events/stream?${params}`);
+
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          receivedAny = true;
+          cb({ ...data, source: "sse" });
+        } catch (_) { /* ignore malformed frame */ }
+      };
+
+      es.onerror = () => {
+        if (cancelled) return;
+        // SSE errors are transient (network blip, server restart).
+        // EventSource auto-reconnects; we only fall back to mock if
+        // we never received a real event.
+        if (!receivedAny) startMock();
+      };
+    } catch (_) {
+      startMock();
+    }
+  }
+
+  startSSE();
+  // Safety net: if no real events arrive within FALLBACK_DELAY_MS, kick mock
+  setTimeout(() => {
+    if (!cancelled && !receivedAny) startMock();
+  }, FALLBACK_DELAY_MS);
+
+  return () => {
+    cancelled = true;
+    if (es) try { es.close(); } catch (_) {}
+    if (mockTimer) clearTimeout(mockTimer);
+  };
+}
+
+// Internal helper — mock emitter when EventSource unavailable
+function _startCycleEventMock(cb) {
+  let cancelled = false;
+  const types = ["CYCLE_START","ANALYSIS_DONE","SIGNAL_EMITTED","RISK_VERDICT","EXECUTION_DONE","CYCLE_END"];
+  let i = 0;
+  function tick() {
+    if (cancelled) return;
+    cb({ event_type: types[i % types.length], symbol: "BTCUSDT", cycle_id: "mock-fallback", source: "mock" });
+    i++;
+    setTimeout(tick, 4000);
+  }
+  setTimeout(tick, 500);
+  return () => { cancelled = true; };
+}
+
 Object.assign(window, {
   fetchAgentTasks, fetchFeedEvents, subscribeTradeEvents, subscribeAgentTasks,
+  subscribeCycleEvents,  // Story 173
 });
