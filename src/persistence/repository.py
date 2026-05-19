@@ -367,6 +367,52 @@ class MekkaRepository:
             ).scalars().all()
             return list(rows)
 
+    @staticmethod
+    async def list_audit_events(
+        agent: str,
+        event: str,
+        symbol: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Story 249 — Decision Memory: retorna eventos de auditoria filtrados.
+
+        Filtra AuditRecord por agent + event (e opcionalmente symbol),
+        mais recentes primeiro. Retorna lista de dicts com chaves:
+        ``id``, ``agent``, ``event``, ``message``, ``symbol``, ``payload``, ``timestamp``.
+        """
+        async with get_session() as session:
+            stmt = (
+                select(AuditRecord)
+                .where(AuditRecord.agent == agent)
+                .where(AuditRecord.event == event)
+            )
+            if symbol is not None:
+                stmt = stmt.where(AuditRecord.symbol == symbol)
+            stmt = stmt.order_by(desc(AuditRecord.timestamp)).limit(limit)
+            rows = (await session.execute(stmt)).scalars().all()
+
+        result: list[dict] = []
+        for row in rows:
+            payload = row.payload
+            if isinstance(payload, str):
+                try:
+                    import json as _json  # noqa: WPS433
+                    payload = _json.loads(payload)
+                except Exception:  # noqa: BLE001
+                    payload = {}
+            result.append(
+                {
+                    "id": row.id,
+                    "agent": row.agent,
+                    "event": row.event,
+                    "message": row.message,
+                    "symbol": row.symbol,
+                    "payload": payload,
+                    "timestamp": row.timestamp,
+                }
+            )
+        return result
+
     # ------------------------------------------------------------------
     # Daily PnL reads (used by the Equity & PnL dashboard panel)
     # ------------------------------------------------------------------

@@ -394,44 +394,68 @@
 <script src="react-dom.js"></script>
 <script>
   // Loader strategy:
-  //   1) try the pre-built bundle (npm run build:office-v2). Cuts ~700KB
-  //      and runs faster — preferred in production.
-  //   2) on 404 or load error, fall back to Babel-standalone + raw .jsx
-  //      so live-edit dev workflows still work without a build step.
+  //   USE_BUNDLE=true  → pre-built office_v2.bundle.js (fast, production)
+  //   USE_BUNDLE=false → Babel-standalone + fetch+transform+eval each .jsx
+  //
+  // IMPORTANT: We must NOT use <script type="text/babel" src="..."> added dynamically
+  // because Babel standalone only scans text/babel tags at DOMContentLoaded — dynamic
+  // additions are silently ignored. Instead we fetch+Babel.transform+eval each file.
   (function loadOfficeV2() {
     const head = document.head;
-    function injectScript(src, opts = {}) {
+
+    function injectScript(src) {
       return new Promise((resolve, reject) => {
         const s = document.createElement('script');
         s.src = src;
-        if (opts.type) s.type = opts.type;
         s.onload = resolve;
         s.onerror = reject;
         head.appendChild(s);
       });
     }
-    // DEV MODE: bundle invalidated — load JSX directly via Babel-standalone.
-    // To restore production bundle: npm run build:office-v2 (run on Mac, not Docker).
-    const USE_BUNDLE = true;
-    const bundleP = USE_BUNDLE
-      ? injectScript('office_v2.bundle.js').then(() => console.info('[office-v2] using pre-built bundle'))
-      : Promise.reject(new Error('dev-mode'));
 
-    bundleP.catch(() => {
-        console.warn('[office-v2] loading Babel-standalone for dev mode');
-        // No integrity check — local dev tool, CDN hash changes with minor releases
-        injectScript('https://unpkg.com/@babel/standalone@7.29.0/babel.min.js')
-          .then(() => {
-            const v = Date.now(); // cache-buster
-            for (const f of ['tweaks-panel.jsx','sprites.jsx','props.jsx','scene.jsx','agent-motion.jsx','live-data.jsx','app.jsx']) {
-              const s = document.createElement('script');
-              s.type = 'text/babel';
-              s.src = f + '?v=' + v;
-              head.appendChild(s);
-            }
-          })
-          .catch(() => console.error('[office-v2] Babel CDN also failed — check network'));
-      });
+    // Fetch, Babel-transform, and eval one JSX file. Returns a Promise.
+    function loadJsxFile(path) {
+      return fetch(path)
+        .then(function(r) {
+          if (!r.ok) throw new Error('[office-v2] HTTP ' + r.status + ' — ' + path);
+          return r.text();
+        })
+        .then(function(src) {
+          var code = window.Babel.transform(src, {
+            presets: ['react'],
+            filename: path
+          }).code;
+          // Indirect eval → executes in global scope so window.* assignments work
+          (0, eval)(code);
+          console.info('[office-v2] ✓', path);
+        });
+    }
+
+    // Load files sequentially (each may depend on globals from previous files)
+    function loadBabelFiles(files, v) {
+      return files.reduce(function(chain, f) {
+        return chain.then(function() { return loadJsxFile(f + '?v=' + v); });
+      }, Promise.resolve());
+    }
+
+    const USE_BUNDLE = false;
+    // powers.jsx MUST come before scene.jsx (scene calls getPowerLift/drawPower)
+    const FILES = ['tweaks-panel.jsx','sprites.jsx','props.jsx','powers.jsx','scene.jsx','agent-motion.jsx','live-data.jsx','app.jsx'];
+
+    if (USE_BUNDLE) {
+      injectScript('office_v2.bundle.js')
+        .then(function() { console.info('[office-v2] using pre-built bundle'); })
+        .catch(function(e) { console.error('[office-v2] bundle load failed', e); });
+    } else {
+      console.warn('[office-v2] DEV mode — loading Babel-standalone + JSX files');
+      injectScript('https://unpkg.com/@babel/standalone@7.29.0/babel.min.js')
+        .then(function() {
+          return loadBabelFiles(FILES, Date.now());
+        })
+        .catch(function(e) {
+          console.error('[office-v2] failed to initialise office', e);
+        });
+    }
   })();
 </script>
 <script>
@@ -446,7 +470,7 @@
    the viewport minus the side panel width.
    ── */
 (function () {
-  var SCENE_NATURAL_W = 480 * 3; // 1440 — must match React SCENE_W × scale
+  var SCENE_NATURAL_W = 560 * 3; // 1680 — must match React SCENE_W × scale
 
   function getAvailableWidth() {
     // Office now takes full width — no side panel to subtract.

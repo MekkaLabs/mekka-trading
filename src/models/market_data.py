@@ -586,6 +586,11 @@ class MarketAnalysis(BaseModel):
         default=None,
         description="Intra-candle momentum signal from Flash (MomentumSignal)",
     )
+    # Story 243 — Multiagent Debate verdict (optional, injected by ProfessorX)
+    debate_verdict: Optional[Any] = Field(
+        default=None,
+        description="DebateVerdict from DebateModerator L1.5 (Story 243). None if debate disabled.",
+    )
     # Story 141 — SHA-256 fingerprint of key market fields.
     # Auto-computed by model_validator; used in audit logs for dedup and tracing.
     # Format: first 16 hex chars (64-bit prefix), e.g. "a3f2c8d914e60b7f".
@@ -700,6 +705,13 @@ class MarketAnalysis(BaseModel):
             sections.append("")
             sections.append(self.anomaly.to_prompt_section())
 
+        # [Story 245] Debate verdict — L1 multiagent consensus before final decision
+        if self.debate_verdict is not None:
+            _dv_section = self._debate_verdict_prompt_section()
+            if _dv_section:
+                sections.append("")
+                sections.append(_dv_section)
+
         sections.extend([
             "",
             "=== Decision Required ===",
@@ -721,7 +733,7 @@ class MarketAnalysis(BaseModel):
         return "\n".join(sections)
 
     def _momentum_prompt_section(self) -> str:
-        """[C5] Format Flash MomentumSignal as a prompt block."""
+        """[C5][Story 244] Format Flash MomentumSignal as a prompt block with behavioral guidance for Vision."""
         m = self.momentum
         if m is None:
             return ""
@@ -733,7 +745,7 @@ class MarketAnalysis(BaseModel):
         notes = getattr(m, "notes", "") or ""
         is_strong = getattr(m, "is_strong", False)
         lines = [
-            f"=== Momentum (Flash): {self.symbol} ===",
+            f"=== Momentum Intra-Candle (Flash): {self.symbol} ===",
             f"  Direction   : {direction_val}",
             f"  Strength    : {strength:.0%}{'  ← STRONG' if is_strong else ''}",
             f"  Price Δ     : {price_change_pct:+.3%}",
@@ -741,6 +753,77 @@ class MarketAnalysis(BaseModel):
         ]
         if notes:
             lines.append(f"  Notes       : {notes}")
+
+        # [Story 244] Behavioral guidance — instructs Vision how to act on Flash signal
+        lines.append("")
+        if is_strong and direction_val == "UP":
+            lines.append("  ⚡ Flash STRONG UP: if signaling LONG, entry timing is confirmed — no size adjustment needed.")
+            lines.append("     If signaling SHORT, reduce size_pct by 20% (momentum divergence risk).")
+        elif is_strong and direction_val == "DOWN":
+            lines.append("  ⚡ Flash STRONG DOWN: if signaling SHORT, entry timing is confirmed — no size adjustment needed.")
+            lines.append("     If signaling LONG, reduce size_pct by 20% (momentum divergence risk).")
+        elif direction_val == "SIDEWAYS":
+            lines.append("  ⚡ Flash SIDEWAYS: no clear intra-candle momentum — reduce confidence by 0.05 for any directional trade.")
+        else:
+            lines.append(f"  ⚡ Flash weak {direction_val}: treat as mild supporting signal only; no mandatory size adjustment.")
+
+        return "\n".join(lines)
+
+    def _debate_verdict_prompt_section(self) -> str:
+        """[Story 245] Format DebateVerdict as a prompt block with behavioral guidance for Vision."""
+        dv = self.debate_verdict
+        if dv is None:
+            return ""
+
+        consensus_action = getattr(dv, "consensus_action", "HOLD")
+        confidence = getattr(dv, "consensus_confidence", 0.0)
+        total_votes = getattr(dv, "total_votes", 0)
+        rounds_run = getattr(dv, "rounds_run", 0)
+        dissent_agents = getattr(dv, "dissent_agents", []) or []
+        notes = getattr(dv, "notes", []) or []
+
+        lines = [
+            f"=== L1 Multiagent Debate Verdict ===",
+            f"  Consensus Action     : {consensus_action}",
+            f"  Consensus Confidence : {confidence:.0%}",
+            f"  Total Votes          : {total_votes}",
+            f"  Rounds               : {rounds_run}",
+        ]
+        if dissent_agents:
+            lines.append(f"  Dissenting Agents    : {', '.join(dissent_agents)}")
+        if notes:
+            for note in notes[:3]:  # limit to 3 notes to avoid prompt bloat
+                lines.append(f"  Note                 : {note}")
+
+        # [Story 245] Behavioral guidance for Vision
+        lines.append("")
+        if confidence >= 0.80:
+            lines.append(
+                f"  🗳️ STRONG CONSENSUS ({confidence:.0%}) for {consensus_action}: "
+                "the L1 agent swarm reached near-unanimous agreement. "
+                "Weight this heavily — it should align with your action unless "
+                "critical new information (anomaly, extreme volatility) overrides it."
+            )
+        elif confidence >= 0.60:
+            lines.append(
+                f"  🗳️ MODERATE CONSENSUS ({confidence:.0%}) for {consensus_action}: "
+                "consider this a meaningful supporting signal. "
+                "If your analysis agrees, increase confidence slightly. "
+                "If you disagree, reduce your confidence by 0.05."
+            )
+        else:
+            lines.append(
+                f"  🗳️ WEAK/SPLIT CONSENSUS ({confidence:.0%}) for {consensus_action}: "
+                "the agents were divided. Do not rely on this verdict — "
+                "use your own analysis as primary. Reduce confidence by 0.05."
+            )
+
+        if dissent_agents:
+            lines.append(
+                f"  ⚠️ Agents {', '.join(dissent_agents)} dissented. "
+                "Investigate why they may have diverged before committing to a trade."
+            )
+
         return "\n".join(lines)
 
     def to_json_summary(self) -> str:

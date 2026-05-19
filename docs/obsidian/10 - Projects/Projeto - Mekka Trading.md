@@ -7,7 +7,7 @@ owner: Gustavo
 sprint_focus: "Stories 126-136 (LangGraph, memory intelligence, adaptive routing, event bus)"
 tags: [project, mekka-trading]
 created: 2026-05-07
-updated: 2026-05-15
+updated: 2026-05-16
 ---
 
 # Projeto — Mekka Trading
@@ -16,11 +16,12 @@ updated: 2026-05-15
 
 Construir um sistema autônomo de trading paper-first, modular, observável e com governança de risco rígida. Multi-exchange (Hyperliquid, Bybit, Binance).
 
-## Estado Atual — 2026-05-15
+## Estado Atual — 2026-05-16
 
 - **Última story entregue:** `Story 136 — MekkaEventBus (pub/sub in-process)`
 - **Total stories entregues:** **136 stories** ✅
 - **Milestone:** `21 — Memory Intelligence + Adaptive Routing + Observability (Stories 132–136)`
+- **Mudanças do dia:** sem novas stories (apenas refresh de dashboard snapshot)
 - **Modo padrão:** `PAPER_TRADING=True`
 - **Dashboard:** `http://localhost:8787` (WebSocket tempo real em todas as páginas)
 - **Gate absoluto:** Batman (gates 3a–3q) + Kill Switch

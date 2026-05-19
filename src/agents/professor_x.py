@@ -142,13 +142,62 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
             momentum=momentum,  # [C5]
         )
 
+        # ── Story 243 — Multiagent Debate (Milestone 39) ──────────────────────
+        # Optional: run DebateModerator between L1 agents before handing off to
+        # Vision. Gated by settings.debate_enabled (default False).
+        debate_verdict = await self._maybe_run_debate(analysis, symbol)
+        if debate_verdict is not None:
+            analysis = analysis.model_copy(update={"debate_verdict": debate_verdict})
+
         self._log.info(
             f"[ProfessorX] {symbol} analysis assembled — "
             f"safe_to_trade={analysis.is_safe_to_trade} "
             f"confirmation_tf={conf_tf if confirmation_chart else 'N/A'} "
             f"momentum={getattr(getattr(momentum, 'direction', None), 'value', 'N/A')}"
+            + (
+                f" | debate={debate_verdict.consensus_action}({debate_verdict.consensus_confidence:.0%})"
+                if debate_verdict else ""
+            )
         )
         return analysis
+
+    async def _maybe_run_debate(self, analysis: "MarketAnalysis", symbol: str):
+        """
+        Story 243 — Executa o DebateModerator se debate_enabled=True nas settings.
+
+        Returns DebateVerdict ou None se debate desabilitado / falhar.
+        """
+        try:
+            from src.config.settings import settings as _settings
+            if not _settings.debate_enabled:
+                return None
+
+            from src.services.debate_moderator import DebateModerator
+            from src.services.debate_verdict_logger import DebateVerdictLogger
+
+            moderator = DebateModerator(
+                max_rounds=_settings.debate_max_rounds,
+                consensus_threshold=_settings.debate_consensus_threshold,
+            )
+            # Contexto simplificado para o debate (evitar serialização pesada)
+            context = {
+                "trend":            getattr(analysis.chart, "trend", ""),
+                "macro_sentiment":  getattr(analysis.sentiment, "overall_sentiment", ""),
+                "fear_greed_index": getattr(analysis.sentiment, "fear_greed_index", 50),
+                "funding_rate":     getattr(analysis.onchain, "funding_rate", 0),
+                "atr_pct":          getattr(analysis.volatility, "atr_pct", 2.0),
+                "spread_pct":       getattr(analysis.liquidity, "estimated_slippage_pct", 0.05),
+            }
+            verdict = await moderator.run(context=context, symbol=symbol)
+
+            # Log assíncrono (fire-and-forget)
+            asyncio.create_task(
+                DebateVerdictLogger().log(verdict, symbol=symbol)
+            )
+            return verdict
+        except Exception as exc:
+            self._log.warning(f"[ProfessorX] debate skipped: {exc}")
+            return None
 
     # ------------------------------------------------------------------
     # Story 050 — Symbol validation (Altcoins toggle safety net)

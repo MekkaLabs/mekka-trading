@@ -3,11 +3,11 @@
 // targets, schedules new errands, and reports walking-vs-sitting state.
 
 const POIS = [
-  { id: "coffee",      x: 222, y: 162, label: "COFFEE",     icon: "☕", emoji: "coffee" },
+  { id: "coffee",      x: 56,  y: 198, label: "COFFEE",     icon: "☕", emoji: "coffee" },
   { id: "whiteboard",  x: 38,  y: 168, label: "WHITEBOARD", icon: "✎", emoji: "thinking" },
-  { id: "cooler",      x: 462, y: 168, label: "COOLER",     icon: "💧", emoji: "thinking" },
-  { id: "bigscreen",   x: 200, y: 132, label: "WALL TV",    icon: "📺", emoji: "thinking" },
-  { id: "printer",     x: 396, y: 162, label: "PRINTER",    icon: "🖨", emoji: "thinking" },
+  { id: "cooler",      x: 542, y: 220, label: "COOLER",     icon: "💧", emoji: "thinking" },
+  { id: "bigscreen",   x: 196, y: 154, label: "WALL TV",    icon: "📺", emoji: "thinking" },
+  { id: "printer",     x: 384, y: 198, label: "PRINTER",    icon: "🖨", emoji: "thinking" },
 ];
 
 // Compute the seat (sitting) position from a station id.

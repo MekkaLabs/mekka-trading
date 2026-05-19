@@ -153,6 +153,7 @@ class Batman(BaseAgent[RiskApproval]):
         running_notional_usd: float = 0.0,
         equity_usd: float = 0.0,
         current_positions: Optional[list[PositionSummary]] = None,
+        analysis: Optional[object] = None,  # [Story 247] MarketAnalysis for Flash gate 3r
     ) -> RiskApproval:
         symbol = signal.symbol
         reasons: list[str] = []
@@ -1043,6 +1044,56 @@ class Batman(BaseAgent[RiskApproval]):
                 self._log.debug("[Batman] Min ATR gate skipped: %s", _atr3q_exc)
 
         # ---------------------------------------------------------------
+        # 3r. Flash Momentum Divergence — Story 247
+        #
+        # When Flash signals STRONG momentum opposing the trade direction,
+        # reduce position size by flash_divergence_size_reduction (default 30%)
+        # rather than rejecting outright. This is a SOFT gate — it adjusts
+        # size but does NOT veto the trade. Fails open on any error.
+        # ---------------------------------------------------------------
+        if analysis is not None:
+            try:
+                _momentum = getattr(analysis, "momentum", None)
+                if _momentum is not None:
+                    from src.models.signal import MomentumDirection  # noqa: WPS433
+                    _mom_dir = getattr(_momentum, "direction", None)
+                    _mom_strong = getattr(_momentum, "is_strong", False)
+                    _flash_reduction = getattr(settings, "flash_divergence_size_reduction", 0.30)
+                    _signal_is_long = signal.action.upper() == "LONG"
+                    _diverges = (
+                        _mom_strong
+                        and _mom_dir is not None
+                        and (
+                            (_signal_is_long and _mom_dir == MomentumDirection.DOWN)
+                            or (not _signal_is_long and _mom_dir == MomentumDirection.UP)
+                        )
+                    )
+                    if _diverges:
+                        # Record advisory — not a hard breach, just metadata
+                        reasons.append(
+                            f"[3r] Flash divergence: signal={signal.action.upper()}, "
+                            f"momentum={_mom_dir.value} STRONG — "
+                            f"size reduced by {_flash_reduction:.0%}."
+                        )
+                        # Size reduction applied in section 5 via a dedicated flag
+                        # We store it in a local variable read by the size adjuster below
+                        _flash_size_reduction_pct = _flash_reduction
+                    else:
+                        _flash_size_reduction_pct = 0.0
+                        if _mom_strong and _mom_dir is not None:
+                            reasons.append(
+                                f"[3r] Flash confirms {signal.action.upper()}: "
+                                f"momentum={_mom_dir.value} STRONG — no size adjustment."
+                            )
+                else:
+                    _flash_size_reduction_pct = 0.0
+            except Exception as _flash_exc:  # noqa: BLE001
+                self._log.debug("[Batman] Flash divergence gate skipped: %s", _flash_exc)
+                _flash_size_reduction_pct = 0.0
+        else:
+            _flash_size_reduction_pct = 0.0
+
+        # ---------------------------------------------------------------
         # 4. Confidence and R:R quality gates
         # ---------------------------------------------------------------
         if signal.confidence < settings.min_confidence_threshold:
@@ -1088,6 +1139,16 @@ class Batman(BaseAgent[RiskApproval]):
                 )
                 breached.append("volatility_adjustment")
             adjusted_size = new_size
+
+        # [Story 247] Gate 3r — Flash divergence size reduction
+        if _flash_size_reduction_pct > 0.0:
+            _prev_sz = adjusted_size
+            adjusted_size = round(adjusted_size * (1.0 - _flash_size_reduction_pct), 6)
+            breached.append("flash_divergence_reduction")
+            self._log.info(
+                f"[Batman] Gate 3r applied: size {_prev_sz:.4f} → {adjusted_size:.4f} "
+                f"({_flash_size_reduction_pct:.0%} Flash divergence reduction)"
+            )
 
         # Story 070 — ATR-based position sizing
         # Scale size inversely with ATR%: high volatility → smaller position.

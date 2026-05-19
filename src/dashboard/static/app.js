@@ -2733,14 +2733,21 @@ function bootPnl() {
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
-    chartsAutoRefreshTimer = _clearTimer(chartsAutoRefreshTimer);
-    queueAutoRefreshTimer = _clearTimer(queueAutoRefreshTimer);
-    marketAutoRefreshTimer = _clearTimer(marketAutoRefreshTimer);
-    pnlAutoRefreshTimer = _clearTimer(pnlAutoRefreshTimer);
-    killswitchAutoRefreshTimer = _clearTimer(killswitchAutoRefreshTimer);
-    positionsAutoRefreshTimer = _clearTimer(positionsAutoRefreshTimer);
-    internalsAutoRefreshTimer = _clearTimer(internalsAutoRefreshTimer);
+    // H1 fix: limpar TODOS os timers conhecidos ao esconder aba
+    chartsAutoRefreshTimer         = _clearTimer(chartsAutoRefreshTimer);
+    queueAutoRefreshTimer          = _clearTimer(queueAutoRefreshTimer);
+    marketAutoRefreshTimer         = _clearTimer(marketAutoRefreshTimer);
+    pnlAutoRefreshTimer            = _clearTimer(pnlAutoRefreshTimer);
+    killswitchAutoRefreshTimer     = _clearTimer(killswitchAutoRefreshTimer);
+    positionsAutoRefreshTimer      = _clearTimer(positionsAutoRefreshTimer);
+    internalsAutoRefreshTimer      = _clearTimer(internalsAutoRefreshTimer);
     tradesTimelineAutoRefreshTimer = _clearTimer(tradesTimelineAutoRefreshTimer);
+    fundingAutoRefreshTimer        = _clearTimer(fundingAutoRefreshTimer);
+    _eqTimer                       = _clearTimer(_eqTimer);
+    _riskPanelTimer                = _clearTimer(_riskPanelTimer);
+    _lbTimer                       = _clearTimer(_lbTimer);
+    _memoryTimer                   = _clearTimer(_memoryTimer);
+    _tsSummaryTimer                = _clearTimer(_tsSummaryTimer);
   } else {
     bootCharts();
     bootQueue();
@@ -2751,6 +2758,11 @@ document.addEventListener('visibilitychange', () => {
     bootInternals();
     bootTradesTimeline();
     bootFunding();
+    bootEquityCurve();
+    bootRiskPanel();
+    bootLeaderboard();
+    bootMemory();
+    bootTodaySummary();
   }
 });
 
@@ -2809,7 +2821,7 @@ if (pnlWindowSelect) {
 
 // ── Page→section mapping ─────────────────────────────────────
 const _PAGE_SECTIONS = {
-  overview:    ['sec-office', 'sec-live-market', 'sec-metrics'],
+  overview:    ['sec-today-summary', 'sec-office', 'sec-live-market', 'sec-metrics'],
   wallet:      ['sec-killswitch', 'sec-pnl', 'sec-positions', 'sec-funding'],
   performance: ['sec-equity-curve', 'sec-trades-timeline', 'sec-replay-charts', 'sec-hero-sla'],
   agents:      ['sec-layers', 'sec-agents', 'sec-internals'],
@@ -2820,6 +2832,10 @@ const _PAGE_SECTIONS = {
   live:        ['sec-live-trading'],
   memory:      ['sec-memory'],
   leaderboard: ['sec-leaderboard'],
+  reports:     ['sec-report-daily', 'sec-report-symbol', 'sec-report-backtest'],
+  // Milestones 36-39 (Stories 224-243)
+  backtest:    ['sec-backtest-controls', 'sec-backtest-metrics', 'sec-backtest-equity'],
+  analytics:   ['sec-perf-rolling', 'sec-batman-timeline', 'sec-concentration', 'sec-debate'],
 };
 const _ALL_PAGE_SECTIONS = Object.values(_PAGE_SECTIONS).flat();
 
@@ -2855,6 +2871,11 @@ function _mkSetPage(pageKey) {
 
   // Boot live chart on first visit to "live" page
   if (pageKey === 'live') _ensureLiveChartBooted();
+
+  // Re-carregar dados ao navegar para páginas dinâmicas
+  if (pageKey === 'memory' && typeof loadMemory === 'function') loadMemory();
+  if (pageKey === 'overview' && typeof loadTodaySummary === 'function') loadTodaySummary();
+  if (pageKey === 'reports' && typeof bootReports === 'function') bootReports();
 }
 
 /** Boot page nav: wire buttons (single registration), restore last page. */
@@ -3318,6 +3339,9 @@ let _liveCurrentSymbol  = 'BTC';
 let _liveCurrentTf      = '15m';
 let _liveLastPrice      = null;
 let _liveChartBooted    = false;
+let _liveCandleRefreshTimer = null;  // periodic full candle reload (5 min)
+let _liveLoadingCandles     = false;
+let _liveLoadingRetryTimer  = null;
 
 // ── Technical Indicator state ────────────────────────────────
 const _liveIndActive  = { bb: false, rsi: false, macd: false };
@@ -3356,6 +3380,25 @@ function _liveRenderLegend(c) {
     `O <b>${_liveFmtMoney(c.open)}</b>  H <b>${_liveFmtMoney(c.high)}</b>  ` +
     `L <b>${_liveFmtMoney(c.low)}</b>  C <b>${_liveFmtMoney(c.close)}</b>  ` +
     `Vol ${_liveFmtMoney(c.volume)}`;
+}
+
+function _liveShowChartOverlay(msg, spinner = false) {
+  let el = document.getElementById('live-chart-overlay');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'live-chart-overlay';
+    el.className = 'live-chart-overlay';
+    const wrap = document.getElementById('live-chart')?.parentElement;
+    if (wrap) wrap.appendChild(el);
+  }
+  el.innerHTML = spinner
+    ? `<span class="lco-spinner"></span><span>${msg}</span>`
+    : `<span>${msg}</span>`;
+  el.classList.remove('hidden');
+}
+function _liveHideChartOverlay() {
+  const el = document.getElementById('live-chart-overlay');
+  if (el) el.classList.add('hidden');
 }
 
 // ── Chart initialization ─────────────────────────────────────
@@ -3458,6 +3501,8 @@ function _liveParseCandlesServer(data) {
 
 function _liveRenderCandleData(candles, symbol, tf, lastPrice) {
   if (!candles || !candles.length) return false;
+  _liveHideChartOverlay();
+  if (_liveLoadingRetryTimer) { clearTimeout(_liveLoadingRetryTimer); _liveLoadingRetryTimer = null; }
   _liveLastCandles = candles;
   _liveCandleSeries.setData(candles);
   _liveVolumeSeries.setData(candles.map(c => ({
@@ -3769,26 +3814,91 @@ async function _liveLoadCandles(symbol, tf) {
     }
   } catch (_) { /* fallback below */ }
 
-  // ── Both failed ──
-  _liveSetStatus('Sem dados de candles — aguardando WS…', false);
+  // ── Attempt 3: Binance public API (browser direct, CORS-friendly) ──
+  try {
+    // Map Hyperliquid symbol → Binance symbol (e.g. "BTC" → "BTCUSDT", "ETH-PERP" → "ETHUSDT")
+    const binanceSym = symbol.replace(/-PERP$/, '').replace(/-USD$/, '') + 'USDT';
+    // Map HL tf → Binance interval (most match: "15m","1h","4h","1d")
+    const binanceInterval = tf;
+    const binRes = await fetch(
+      `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(binanceSym)}&interval=${encodeURIComponent(binanceInterval)}&limit=${limit}`
+    );
+    if (binRes.ok) {
+      const binRaw = await binRes.json();
+      // Binance klines: [openTime, open, high, low, close, volume, ...]
+      const candles = (binRaw || []).map(k => ({
+        time:   Math.floor(Number(k[0]) / 1000),
+        open:   parseFloat(k[1]),
+        high:   parseFloat(k[2]),
+        low:    parseFloat(k[3]),
+        close:  parseFloat(k[4]),
+        volume: parseFloat(k[5]),
+      })).filter(c => !isNaN(c.open) && c.time > 0);
+      if (candles.length) {
+        const lastC = candles[candles.length - 1];
+        _liveRenderCandleData(candles, binanceSym, tf, lastC.close);
+        _liveSetStatus('Binance · ' + binanceSym + ' ' + tf + ' (fallback)');
+        return candles;
+      }
+    }
+  } catch (_) { /* fallthrough */ }
+
+  // ── All sources failed ──
+  if (!_liveLoadingRetryTimer) {
+    _liveLoadingRetryTimer = setTimeout(() => {
+      _liveLoadingRetryTimer = null;
+      if (_liveChartBooted && _liveLastCandles.length === 0) {
+        _liveLoadCandles(_liveCurrentSymbol, _liveCurrentTf).catch(() => {});
+      }
+    }, 8000);
+  }
+  _liveSetStatus('Sem dados de candles — tentando novamente em 8s…', false);
+  _liveShowChartOverlay('📡 Aguardando dados de mercado…', true);
   return [];
 }
 
 // ── Update last candle with live tick price ──────────────────
 function _liveUpdateLastCandle(price) {
   if (!_liveCandleSeries || !_liveLastCandles.length) return;
+
+  // ── Candle rollover: detect se o período atual virou ──────────
+  // Se o timestamp "canônico" do período atual é maior que o time
+  // da última candle, abrimos uma nova candle em vez de atualizar.
+  const tfMs  = _LIVE_TF_MS[_liveCurrentTf] || 900_000;
+  const tfSec = tfMs / 1000;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const periodTime = Math.floor(nowSec / tfSec) * tfSec; // início do período atual (UTC-alinhado)
   const last = _liveLastCandles[_liveLastCandles.length - 1];
-  const updated = {
-    time:  last.time,
-    open:  last.open,
-    high:  Math.max(last.high, price),
-    low:   Math.min(last.low, price),
-    close: price,
-    volume: last.volume,
-  };
-  _liveLastCandles[_liveLastCandles.length - 1] = updated;
-  _liveCandleSeries.update(updated);
-  _liveRenderLegend(updated);
+
+  if (periodTime > last.time) {
+    // Nova candle — o período girou (ex: nova candle de 15m abriu)
+    const newCandle = {
+      time:   periodTime,
+      open:   price,
+      high:   price,
+      low:    price,
+      close:  price,
+      volume: 0,
+    };
+    _liveLastCandles.push(newCandle);
+    // Mantém janela máxima de 500 candles em memória
+    if (_liveLastCandles.length > 500) _liveLastCandles.shift();
+    try { _liveCandleSeries.update(newCandle); } catch (_) {}
+    _liveRenderLegend(newCandle);
+  } else {
+    // Mesma candle — atualiza OHLCV
+    const updated = {
+      time:   last.time,
+      open:   last.open,
+      high:   Math.max(last.high, price),
+      low:    Math.min(last.low, price),
+      close:  price,
+      volume: last.volume,
+    };
+    _liveLastCandles[_liveLastCandles.length - 1] = updated;
+    try { _liveCandleSeries.update(updated); } catch (_) {}
+    _liveRenderLegend(updated);
+  }
 }
 
 // ── Ticker price update ──────────────────────────────────────
@@ -4039,6 +4149,16 @@ async function _bootLiveChart() {
   // Connect WebSocket
   _liveConnectWs();
 
+  // ── Refresh periódico de candles (5 min) ──────────────────────
+  // Recarrega todo o histórico do servidor para manter o gráfico
+  // sincronizado com o exchange mesmo sem o WS de preços.
+  if (_liveCandleRefreshTimer) clearInterval(_liveCandleRefreshTimer);
+  _liveCandleRefreshTimer = setInterval(() => {
+    if (_liveChartBooted && document.visibilityState !== 'hidden') {
+      _liveLoadCandles(_liveCurrentSymbol, _liveCurrentTf).catch(() => {});
+    }
+  }, 5 * 60 * 1000); // 5 minutos
+
   // Symbol change
   if (_liveSymbolSel) {
     _liveSymbolSel.addEventListener('change', async () => {
@@ -4049,6 +4169,13 @@ async function _bootLiveChart() {
       });
       _livePositionLines = {};
       _liveLastPrice = null;
+      // Reinicia timer para o novo símbolo
+      if (_liveCandleRefreshTimer) clearInterval(_liveCandleRefreshTimer);
+      _liveCandleRefreshTimer = setInterval(() => {
+        if (_liveChartBooted && document.visibilityState !== 'hidden') {
+          _liveLoadCandles(_liveCurrentSymbol, _liveCurrentTf).catch(() => {});
+        }
+      }, 5 * 60 * 1000);
       await _liveLoadCandles(_liveCurrentSymbol, _liveCurrentTf);
     });
   }
@@ -4057,6 +4184,13 @@ async function _bootLiveChart() {
   if (_liveTfSel) {
     _liveTfSel.addEventListener('change', async () => {
       _liveCurrentTf = _liveTfSel.value;
+      // Reinicia timer para o novo timeframe
+      if (_liveCandleRefreshTimer) clearInterval(_liveCandleRefreshTimer);
+      _liveCandleRefreshTimer = setInterval(() => {
+        if (_liveChartBooted && document.visibilityState !== 'hidden') {
+          _liveLoadCandles(_liveCurrentSymbol, _liveCurrentTf).catch(() => {});
+        }
+      }, 5 * 60 * 1000);
       await _liveLoadCandles(_liveCurrentSymbol, _liveCurrentTf);
     });
   }
@@ -4241,10 +4375,29 @@ function _bootGlobalWs() {
       // Feed live chart page price/candle/lines only when chart is ready
       if (_liveChartBooted) {
         _livePrices = prices;
-        const price = prices[_liveCurrentSymbol];
+        // ── Fallback de preço: se HL WS não retornou o símbolo atual,
+        // tenta derivar o preço a partir das posições abertas (mark_price)
+        // ou do último close conhecido no _liveLastCandles.
+        let price = prices[_liveCurrentSymbol];
+        if (!price) {
+          // Tenta mark_price de qualquer posição do símbolo atual
+          const posMatch = positions.find(p =>
+            (p.symbol || '').toUpperCase() === _liveCurrentSymbol.toUpperCase()
+          );
+          if (posMatch && posMatch.mark_price) {
+            price = Number(posMatch.mark_price);
+          } else if (_liveLastCandles.length) {
+            // Usa último close como proxy (sem criar nova candle)
+            price = _liveLastCandles[_liveLastCandles.length - 1].close;
+          }
+        }
         if (price) {
           _liveUpdateTickerPrice(price);
           _liveUpdateLastCandle(price);
+        }
+        // Auto-retry candles when WS delivers price but chart is empty
+        if (price && _liveLastCandles.length === 0 && !_liveLoadingRetryTimer) {
+          _liveLoadCandles(_liveCurrentSymbol, _liveCurrentTf).catch(() => {});
         }
         _liveDrawPositionLines(positions);
       }
@@ -4608,13 +4761,18 @@ function bootRiskPanel() {
   }
 }
 
+let _memoryTimer = null;  // C1 fix: salvar referência para poder cancelar
+
 function bootMemory() {
   loadMemory();
-  // Refresh every 60 s when memory page is visible
-  setInterval(() => {
-    const sec = document.getElementById('sec-memory');
-    if (sec && !sec.classList.contains('hidden')) loadMemory();
-  }, 60_000);
+  _memoryTimer = _clearTimer(_memoryTimer);
+  if (!document.hidden) {
+    // C1 fix: salvar retorno de setInterval para limpar no visibilitychange
+    _memoryTimer = setInterval(() => {
+      const sec = document.getElementById('sec-memory');
+      if (sec && !sec.classList.contains('page-section-hidden')) loadMemory();
+    }, 60_000);
+  }
 }
 
 // ============================================================
@@ -4777,9 +4935,179 @@ function bootLeaderboard() {
   if (!document.hidden) {
     _lbTimer = setInterval(() => {
       const sec = document.getElementById('sec-leaderboard');
-      if (sec && !sec.classList.contains('hidden')) loadLeaderboard();
+      if (sec && !sec.classList.contains('page-section-hidden')) loadLeaderboard();
     }, 120_000);  // auto-refresh 2 min
   }
+}
+
+// ============================================================
+// COMMAND CENTER — Manual Trade Entry
+// ============================================================
+let _cmdCurrentSide = 'LONG';
+let _cmdCurrentMode = 'auto';
+
+function _cmdToggle() {
+  const el = document.getElementById('cmd-center');
+  const btn = document.getElementById('live-cmd-toggle');
+  if (!el) return;
+  el.classList.toggle('hidden');
+  const open = !el.classList.contains('hidden');
+  if (btn) btn.classList.toggle('active', open);
+  // Sync symbol with live chart
+  const sym = document.getElementById('cmd-symbol');
+  const liveSym = document.getElementById('live-symbol-select');
+  if (sym && liveSym && open) sym.value = liveSym.value;
+  // Auto-fill entry price from last price
+  _cmdFillMarketPrice();
+}
+
+function _cmdFillMarketPrice() {
+  const entryEl = document.getElementById('cmd-entry');
+  if (!entryEl) return;
+  const sym = (document.getElementById('cmd-symbol')?.value || 'BTC').toUpperCase();
+  const price = _livePrices[sym] || (_liveLastCandles.length ? _liveLastCandles[_liveLastCandles.length-1].close : null);
+  if (price && !entryEl.value) entryEl.placeholder = price.toFixed(2) + ' (Market)';
+}
+
+function _cmdSetMode(mode) {
+  _cmdCurrentMode = mode;
+  document.getElementById('cmd-mode-auto')?.classList.toggle('active', mode === 'auto');
+  document.getElementById('cmd-mode-manual')?.classList.toggle('active', mode === 'manual');
+}
+
+function _cmdSetSide(side) {
+  _cmdCurrentSide = side;
+  document.getElementById('cmd-side-long')?.classList.toggle('active', side === 'LONG');
+  document.getElementById('cmd-side-short')?.classList.toggle('active', side === 'SHORT');
+}
+
+function _cmdSetStatus(msg, type = 'info') {
+  const el = document.getElementById('cmd-status');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = `cmd-status ${type}`;
+}
+
+async function _cmdExecute() {
+  const btn = document.getElementById('cmd-execute-btn');
+  const symbol = document.getElementById('cmd-symbol')?.value || 'BTC';
+  const size_pct = parseFloat(document.getElementById('cmd-size')?.value || 2);
+  const leverage = parseInt(document.getElementById('cmd-leverage')?.value || 5);
+  const sl_pct = parseFloat(document.getElementById('cmd-sl')?.value || 2);
+  const tp_pct = parseFloat(document.getElementById('cmd-tp')?.value || 4);
+  const entryVal = document.getElementById('cmd-entry')?.value;
+  const entry_price = entryVal ? parseFloat(entryVal) : null;
+
+  if (!symbol || isNaN(size_pct) || isNaN(leverage)) {
+    _cmdSetStatus('Preencha todos os campos obrigatórios.', 'error');
+    return;
+  }
+
+  if (btn) btn.disabled = true;
+  _cmdSetStatus('Enviando ordem…', 'info');
+
+  try {
+    const res = await fetch('/api/trade/manual', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbol,
+        side: _cmdCurrentSide,
+        size_pct,
+        leverage,
+        sl_pct,
+        tp_pct,
+        entry_price,
+      }),
+    });
+    const data = await res.json();
+    if (data.status === 'submitted' || data.status === 'paper') {
+      _cmdSetStatus(`✅ ${data.is_paper ? '[PAPER] ' : ''}Ordem enviada! ${data.order_id ? 'ID: ' + data.order_id : ''}`, 'ok');
+      _mkPlayTradeSound('win');
+      setTimeout(_mkLoadTopBar, 2000);
+    } else {
+      _cmdSetStatus(`🚫 ${data.reason || data.status || 'Bloqueado'}`, 'error');
+    }
+  } catch (err) {
+    _cmdSetStatus(`❌ Erro: ${err.message}`, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ============================================================
+// SOUND SYSTEM — Web Audio API
+// ============================================================
+let _soundEnabled = false;
+let _audioCtx = null;
+
+function _mkGetAudioCtx() {
+  if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return _audioCtx;
+}
+
+function _mkPlayTradeSound(type) {
+  if (!_soundEnabled) return;
+  try {
+    const ctx = _mkGetAudioCtx();
+    if (type === 'win') _mkPlayAvengersTheme(ctx);
+    else if (type === 'loss') _mkPlayAlarm(ctx);
+  } catch (_) {}
+}
+
+function _mkPlayAvengersTheme(ctx) {
+  // Avengers theme fanfare — simplified 4-note motif
+  const notes = [
+    { freq: 440.0, dur: 0.12, start: 0.0 },  // A4
+    { freq: 523.3, dur: 0.12, start: 0.13 }, // C5
+    { freq: 659.3, dur: 0.12, start: 0.26 }, // E5
+    { freq: 880.0, dur: 0.35, start: 0.39 }, // A5 (hold)
+    { freq: 698.5, dur: 0.12, start: 0.76 }, // F5
+    { freq: 880.0, dur: 0.45, start: 0.89 }, // A5 (hold)
+  ];
+  const now = ctx.currentTime;
+  notes.forEach(({ freq, dur, start }) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(freq, now + start);
+    gain.gain.setValueAtTime(0, now + start);
+    gain.gain.linearRampToValueAtTime(0.18, now + start + 0.02);
+    gain.gain.linearRampToValueAtTime(0, now + start + dur);
+    osc.start(now + start);
+    osc.stop(now + start + dur + 0.01);
+  });
+}
+
+function _mkPlayAlarm(ctx) {
+  const now = ctx.currentTime;
+  for (let i = 0; i < 3; i++) {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(880, now + i * 0.25);
+    osc.frequency.setValueAtTime(440, now + i * 0.25 + 0.12);
+    gain.gain.setValueAtTime(0.15, now + i * 0.25);
+    gain.gain.linearRampToValueAtTime(0, now + i * 0.25 + 0.24);
+    osc.start(now + i * 0.25);
+    osc.stop(now + i * 0.25 + 0.25);
+  }
+}
+
+function _mkToggleSound() {
+  _soundEnabled = !_soundEnabled;
+  const btn = document.getElementById('sound-toggle-btn');
+  if (btn) {
+    btn.textContent = _soundEnabled ? '🔊' : '🔇';
+    btn.classList.toggle('active', _soundEnabled);
+    btn.title = _soundEnabled ? 'Sons ativados' : 'Sons desativados';
+  }
+  // Test sound on enable
+  if (_soundEnabled) setTimeout(() => _mkPlayTradeSound('win'), 100);
 }
 
 // Chart.js is loaded with `defer`, so wait for DOMContentLoaded once.
@@ -4798,6 +5126,7 @@ function _mkRunAllBoots() {
   safeBoot(bootTradesTimeline,  'bootTradesTimeline');
   safeBoot(bootFunding,         'bootFunding');
   safeBoot(bootMemory,          'bootMemory');
+  safeBoot(bootTodaySummary,    'bootTodaySummary');
   safeBoot(bootRiskPanel,       'bootRiskPanel');
   safeBoot(bootEquityCurve,    'bootEquityCurve');
   safeBoot(bootLeaderboard,    'bootLeaderboard');
@@ -4810,3 +5139,866 @@ if (document.readyState === 'loading') {
 } else {
   _mkRunAllBoots();
 }
+
+// ═════════════════════════════════════════════════════════════════════════
+// Página de Relatórios
+// ═════════════════════════════════════════════════════════════════════════
+
+function _rptFmtPnl(v) {
+  const n = parseFloat(v);
+  if (isNaN(n)) return '—';
+  const sign = n >= 0 ? '+' : '';
+  return `<span class="${n >= 0 ? 'ts-green' : 'ts-red'}">${sign}$${Math.abs(n).toFixed(2)}</span>`;
+}
+function _rptFmtPct(v) {
+  const n = parseFloat(v);
+  if (isNaN(n)) return '—';
+  return `<span class="${n >= 0 ? 'ts-green' : 'ts-red'}">${n >= 0 ? '+' : ''}${n.toFixed(2)}%</span>`;
+}
+
+async function loadReports() {
+  const days = parseInt(document.getElementById('rpt-days')?.value || '30', 10);
+  await Promise.all([
+    _rptLoadDaily(days),
+    _rptLoadBySymbol(),
+    _rptLoadBacktestHistory(),
+  ]);
+}
+
+async function _rptLoadDaily(days) {
+  const tbody = document.getElementById('rpt-daily-body');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="6" class="rpt-loading">Carregando...</td></tr>';
+  try {
+    const res = await fetch('/api/pnl/series?days=' + days);
+    const d = await res.json();
+    const rows = (d.series || d.data || []);
+
+    // Calcular KPIs
+    let total = 0, wins = 0, losses = 0, best = -Infinity, worst = Infinity;
+    rows.forEach(r => {
+      const pnl = parseFloat(r.pnl_usd || r.pnl || 0);
+      total += pnl;
+      if (pnl > 0) wins++;
+      else if (pnl < 0) losses++;
+      if (pnl > best) best = pnl;
+      if (pnl < worst) worst = pnl;
+    });
+
+    const el = id => document.getElementById(id);
+    if (el('rpt-kpi-total')) el('rpt-kpi-total').innerHTML = _rptFmtPnl(total);
+    if (el('rpt-kpi-wins'))  el('rpt-kpi-wins').textContent = wins + ' dias';
+    if (el('rpt-kpi-losses')) el('rpt-kpi-losses').textContent = losses + ' dias';
+    if (el('rpt-kpi-best') && isFinite(best))   el('rpt-kpi-best').innerHTML  = _rptFmtPnl(best);
+    if (el('rpt-kpi-worst') && isFinite(worst)) el('rpt-kpi-worst').innerHTML = _rptFmtPnl(worst);
+
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="rpt-loading">Nenhum dado ainda — execute trades para popular o histórico.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = rows.slice().reverse().map(r => {
+      const pnl  = parseFloat(r.pnl_usd || r.pnl || 0);
+      const pct  = parseFloat(r.pnl_pct || 0);
+      const dd   = parseFloat(r.drawdown_pct || 0);
+      const date = (r.date_utc || r.date || '').slice(0, 10);
+      return `<tr>
+        <td>${date}</td>
+        <td>${_rptFmtPnl(pnl)}</td>
+        <td>${_rptFmtPct(pct)}</td>
+        <td>${r.trades_count || 0}</td>
+        <td>${r.wins || 0}</td>
+        <td class="${dd < 5 ? '' : dd < 15 ? 'ts-red' : 'ts-red'}" style="font-weight:600">${dd.toFixed(2)}%</td>
+      </tr>`;
+    }).join('');
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="6" class="rpt-loading">Erro: ${err.message}</td></tr>`;
+  }
+}
+
+async function _rptLoadBySymbol() {
+  const tbody = document.getElementById('rpt-symbol-body');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="7" class="rpt-loading">Carregando...</td></tr>';
+  try {
+    const res = await fetch('/api/leaderboard?days=90');
+    const d = await res.json();
+    const rows = (d.rows || d.symbols || d.data || []);
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="rpt-loading">Nenhum dado — execute trades para popular.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(r => {
+      const wr  = parseFloat(r.win_rate || 0);
+      const pnl = parseFloat(r.total_pnl_usd || r.pnl_usd || 0);
+      const best  = parseFloat(r.best_trade_usd || r.best || 0);
+      const worst = parseFloat(r.worst_trade_usd || r.worst || 0);
+      const avg   = parseFloat(r.avg_pnl_usd || r.avg || 0);
+      return `<tr>
+        <td style="font-weight:700">${r.symbol || '—'}</td>
+        <td>${r.trade_count || r.count || 0}</td>
+        <td class="${wr >= 50 ? 'ts-green' : 'ts-red'}">${wr.toFixed(1)}%</td>
+        <td>${_rptFmtPnl(pnl)}</td>
+        <td>${_rptFmtPnl(best)}</td>
+        <td>${_rptFmtPnl(worst)}</td>
+        <td>${_rptFmtPnl(avg)}</td>
+      </tr>`;
+    }).join('');
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="7" class="rpt-loading">Erro: ${err.message}</td></tr>`;
+  }
+}
+
+async function _rptLoadBacktestHistory() {
+  const grid = document.getElementById('rpt-bt-grid');
+  if (!grid) return;
+  grid.innerHTML = '<div class="rpt-loading">Carregando...</div>';
+  try {
+    // Tentar BTC e ETH em paralelo
+    const [btcRes, ethRes] = await Promise.all([
+      fetch('/api/backtest/history?symbol=BTC').then(r => r.json()).catch(() => ({ ok: false, history: [] })),
+      fetch('/api/backtest/history?symbol=ETH').then(r => r.json()).catch(() => ({ ok: false, history: [] })),
+    ]);
+    const allResults = [
+      ...(btcRes.history || []).map(h => ({...h, _sym: 'BTC'})),
+      ...(ethRes.history || []).map(h => ({...h, _sym: 'ETH'})),
+    ];
+    if (!allResults.length) {
+      grid.innerHTML = '<div class="rpt-loading">Nenhum backtest executado ainda. Use a página 📊 Backtest para rodar.</div>';
+      return;
+    }
+    grid.innerHTML = allResults.map(h => {
+      const ret  = parseFloat(h.total_return_pct || 0);
+      const wr   = parseFloat(h.win_rate || h.metrics?.win_rate || 0);
+      const sh   = parseFloat(h.sharpe_ratio || h.metrics?.sharpe_ratio || 0);
+      const dd   = parseFloat(h.max_drawdown_pct || h.metrics?.max_drawdown_pct || 0);
+      const sym  = h.symbol || h._sym || '—';
+      const date = (h.generated_at || h.end_date || '').slice(0, 16).replace('T', ' ');
+      return `<div class="rpt-bt-card">
+        <div class="rpt-bt-sym">${sym}</div>
+        <div class="rpt-bt-date">${date}</div>
+        <div class="rpt-bt-row"><span>Retorno</span><span class="${ret >= 0 ? 'ts-green' : 'ts-red'}">${ret >= 0 ? '+' : ''}${ret.toFixed(2)}%</span></div>
+        <div class="rpt-bt-row"><span>Win Rate</span><span class="${wr >= 50 ? 'ts-green' : 'ts-red'}">${wr.toFixed(1)}%</span></div>
+        <div class="rpt-bt-row"><span>Sharpe</span><span>${sh.toFixed(2)}</span></div>
+        <div class="rpt-bt-row"><span>Max DD</span><span class="ts-red">${dd.toFixed(2)}%</span></div>
+      </div>`;
+    }).join('');
+  } catch (err) {
+    grid.innerHTML = `<div class="rpt-loading">Erro: ${err.message}</div>`;
+  }
+}
+
+// Export CSV do P&L diário
+function _rptExportCsv() {
+  const rows = document.querySelectorAll('#rpt-daily-body tr');
+  if (!rows.length) return;
+  const lines = ['Data,PnL USD,PnL %,Trades,Wins,Drawdown'];
+  rows.forEach(tr => {
+    const cells = Array.from(tr.querySelectorAll('td')).map(td => td.textContent.trim().replace(/[+]/g, ''));
+    if (cells.length === 6) lines.push(cells.join(','));
+  });
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = 'mekka_pnl_' + new Date().toISOString().slice(0, 10) + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// Boot da página de relatórios
+let _reportsBooted = false;
+function bootReports() {
+  if (_reportsBooted) return;
+  _reportsBooted = true;
+  const daysEl = document.getElementById('rpt-days');
+  const refEl  = document.getElementById('rpt-refresh');
+  const csvEl  = document.getElementById('rpt-export-csv');
+  if (daysEl) daysEl.addEventListener('change', () => loadReports());
+  if (refEl)  refEl.addEventListener('click', () => loadReports());
+  if (csvEl)  csvEl.addEventListener('click', _rptExportCsv);
+  loadReports();
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Today Summary Widget — Overview simplificado para leigos
+// ═════════════════════════════════════════════════════════════════════════
+
+let _tsSummaryTimer = null;
+
+function _tsFmt(val) {
+  const n = parseFloat(val);
+  if (isNaN(n)) return '—';
+  const sign = n >= 0 ? '+' : '';
+  return sign + n.toFixed(2) + ' USD';
+}
+
+function _tsColorClass(val) {
+  const n = parseFloat(val);
+  if (isNaN(n) || n === 0) return '';
+  return n > 0 ? 'ts-green' : 'ts-red';
+}
+
+async function loadTodaySummary() {
+  try {
+    const res = await fetch('/api/today-summary');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.error || 'API error');
+
+    const hasPrices   = !!d.has_prices;
+    const openPnlNull = d.open_pnl_usd === null || d.open_pnl_usd === undefined;
+
+    // ── Paper badge ──────────────────────────────────────────────────────
+    const badge = document.getElementById('today-summary-paper-badge');
+    if (badge) badge.style.display = d.is_paper ? '' : 'none';
+
+    // ── Aviso sem cotação ────────────────────────────────────────────────
+    let noQuoteWarn = document.getElementById('ts-no-quote-warn');
+    if (!noQuoteWarn) {
+      noQuoteWarn = document.createElement('div');
+      noQuoteWarn.id = 'ts-no-quote-warn';
+      noQuoteWarn.className = 'ts-warn-banner';
+      noQuoteWarn.innerHTML = '⚠️ Sem cotação de mercado — credenciais da Hyperliquid não configuradas. P&L das posições indisponível.';
+      const sec = document.getElementById('sec-today-summary');
+      if (sec) sec.insertBefore(noQuoteWarn, sec.firstChild);
+    }
+    noQuoteWarn.style.display = hasPrices ? 'none' : '';
+
+    // ── Big cards ────────────────────────────────────────────────────────
+    // Resultado Líquido: se não há preços, mostrar só realizado
+    const netEl = document.getElementById('ts-net-val');
+    if (netEl) {
+      if (openPnlNull) {
+        netEl.textContent = _tsFmt(d.daily_pnl_usd);
+        netEl.className = 'ts-big-val ' + _tsColorClass(d.daily_pnl_usd);
+      } else {
+        netEl.textContent = _tsFmt(d.net_pnl_usd);
+        netEl.className = 'ts-big-val ' + _tsColorClass(d.net_pnl_usd);
+      }
+    }
+    const subNet = document.getElementById('ts-net-sub');
+    if (subNet) subNet.textContent = openPnlNull
+      ? (d.day_emoji || '') + ' apenas realizado'
+      : (d.day_emoji || '') + ' realizado + aberto';
+
+    const realEl = document.getElementById('ts-realized-val');
+    if (realEl) {
+      realEl.textContent = _tsFmt(d.daily_pnl_usd);
+      realEl.className = 'ts-big-val ' + _tsColorClass(d.daily_pnl_usd);
+    }
+    const subReal = document.getElementById('ts-realized-sub');
+    if (subReal) subReal.textContent = (d.trades_count_today || 0) + ' trade(s) fechado(s) hoje';
+
+    const openEl = document.getElementById('ts-open-val');
+    if (openEl) {
+      if (openPnlNull) {
+        openEl.textContent = '—';
+        openEl.className = 'ts-big-val ts-muted';
+      } else {
+        openEl.textContent = _tsFmt(d.open_pnl_usd);
+        openEl.className = 'ts-big-val ' + _tsColorClass(d.open_pnl_usd);
+      }
+    }
+    const subOpen = document.getElementById('ts-open-sub');
+    if (subOpen) subOpen.textContent = (d.open_count || 0) + ' posição(ões) ativa(s)'
+      + (openPnlNull ? ' · sem cotação' : '');
+
+    // ── Posições abertas ─────────────────────────────────────────────────
+    const pgrid  = document.getElementById('ts-positions-grid');
+    const pempty = document.getElementById('ts-positions-empty');
+    if (pgrid) {
+      pgrid.innerHTML = '';
+      const items = d.open_positions || [];
+      if (pempty) pempty.style.display = items.length ? 'none' : '';
+      items.forEach(p => {
+        const pnlKnown = p.has_upnl && p.pnl_usd !== null && p.pnl_usd !== undefined;
+        const pnlClass = !pnlKnown ? '' : (parseFloat(p.pnl_usd) >= 0 ? 'ts-pos-win' : 'ts-pos-loss');
+        const sideLabel = p.side === 'LONG' ? '📈 LONG' : '📉 SHORT';
+        const pnlDisplay = pnlKnown
+          ? `<span class="ts-pos-pnl ${parseFloat(p.pnl_usd)>=0?'ts-green':'ts-red'}">${_tsFmt(p.pnl_usd)}</span>`
+          : `<span class="ts-pos-pnl ts-muted">Aguardando cotação</span>`;
+        const markDisplay = p.mark_price
+          ? `$${parseFloat(p.mark_price).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}`
+          : '<span class="ts-muted">—</span>';
+        pgrid.innerHTML += `
+          <div class="ts-pos-card ${pnlClass}">
+            <div class="ts-pos-symbol">${p.emoji || '⏳'} ${p.symbol}</div>
+            <div class="ts-pos-side">${sideLabel}</div>
+            <div class="ts-pos-row"><span class="ts-pos-lbl">Entrada</span><span class="ts-pos-val">$${parseFloat(p.entry_price||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}</span></div>
+            <div class="ts-pos-row"><span class="ts-pos-lbl">Preço atual</span><span class="ts-pos-val">${markDisplay}</span></div>
+            <div class="ts-pos-row ts-pos-pnl-row"><span class="ts-pos-lbl">Lucro/Prejuízo</span>${pnlDisplay}</div>
+          </div>`;
+      });
+    }
+
+    // ── Trades ───────────────────────────────────────────────────────────
+    // Se não há trades de hoje, mostrar recentes com data
+    const todayTrades  = d.today_trades  || [];
+    const recentTrades = d.recent_trades || [];
+    const showRecent   = todayTrades.length === 0 && recentTrades.length > 0;
+    const tradesSource = showRecent ? recentTrades : todayTrades;
+
+    const tlist  = document.getElementById('ts-trades-list');
+    const tempty = document.getElementById('ts-trades-empty');
+    const theader = document.getElementById('ts-trades-header');
+    if (theader) theader.textContent = showRecent ? 'Últimos trades (sem trades hoje)' : 'Trades de hoje';
+
+    if (tlist) {
+      tlist.innerHTML = '';
+      const trades = tradesSource.slice(0, 20);
+      if (tempty) tempty.style.display = trades.length ? 'none' : '';
+      trades.forEach(t => {
+        const pnlKnown = t.pnl_usd !== null && t.pnl_usd !== undefined;
+        const pnlClass = pnlKnown ? (t.pnl_usd > 0 ? 'ts-green' : (t.pnl_usd < 0 ? 'ts-red' : '')) : 'ts-muted';
+        const pnlText  = pnlKnown ? _tsFmt(t.pnl_usd) : '—';
+        let timeStr;
+        if (showRecent && t.date) {
+          // mostrar data quando não são de hoje
+          const d2 = t.date.slice(5);  // MM-DD
+          timeStr = d2 + ' ' + (t.timestamp ? t.timestamp.slice(11,16) : '');
+        } else {
+          timeStr = t.timestamp ? t.timestamp.slice(11,16) : '—';
+        }
+        tlist.innerHTML += `
+          <div class="ts-trade-row">
+            <span class="ts-trade-emoji">${t.emoji || '➖'}</span>
+            <span class="ts-trade-time">${timeStr}</span>
+            <span class="ts-trade-symbol">${t.symbol}</span>
+            <span class="ts-trade-side ${t.side === 'BUY' || t.side === 'LONG' ? 'ts-green' : 'ts-red'}">${t.side}</span>
+            <span class="ts-trade-status">${t.status}</span>
+            <span class="ts-trade-pnl ${pnlClass}">${pnlText}</span>
+          </div>`;
+      });
+    }
+
+    // ── Footer timestamp ─────────────────────────────────────────────────
+    const upd = document.getElementById('ts-last-update');
+    if (upd) upd.textContent = new Date().toLocaleTimeString('pt-BR');
+
+  } catch (err) {
+    console.error('[TodaySummary] erro:', err);
+    const upd = document.getElementById('ts-last-update');
+    if (upd) upd.textContent = '⚠️ Erro ao carregar';
+  }
+}
+
+function bootTodaySummary() {
+  loadTodaySummary();
+  _tsSummaryTimer = _clearTimer(_tsSummaryTimer);
+  if (!document.hidden) {
+    _tsSummaryTimer = setInterval(loadTodaySummary, 30_000);
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Milestones 36-39 — Backtest Dashboard + Analytics (Stories 224-243)
+// ═════════════════════════════════════════════════════════════════════════
+
+// ── Shared helpers ────────────────────────────────────────────────────────
+function _btColorVal(val, positiveIsGood = true) {
+  if (val === null || val === undefined || val === '—') return '';
+  const n = parseFloat(val);
+  if (isNaN(n)) return '';
+  if (positiveIsGood) return n > 0 ? 'color:#4caf50' : n < 0 ? 'color:#f44336' : '';
+  return n < 0 ? 'color:#4caf50' : n > 0 ? 'color:#f44336' : '';
+}
+
+function _btFmt(n, decimals = 2, prefix = '') {
+  if (n === null || n === undefined) return '—';
+  const f = parseFloat(n);
+  if (isNaN(f)) return '—';
+  const sign = f > 0 ? '+' : '';
+  return `${prefix}${sign}${f.toFixed(decimals)}`;
+}
+
+// ── Story 225 — Backtest Panel ────────────────────────────────────────────
+let _btEquityChart = null;
+let _btDrawdownChart = null;
+
+function _btSetStatus(msg, isError = false) {
+  const el = document.getElementById('bt-status');
+  if (el) { el.textContent = msg; el.style.color = isError ? '#f44336' : ''; }
+}
+
+function _btRenderMetrics(data) {
+  const m = data.metrics || {};
+  const set = (id, val, style) => {
+    const el = document.getElementById(id);
+    if (el) { el.textContent = val; if (style) el.style = style; }
+  };
+
+  const retPct = parseFloat(data.total_return_pct || 0);
+  set('bt-val-return', `${retPct >= 0 ? '+' : ''}${retPct.toFixed(2)}%`,
+      `font-weight:700;${_btColorVal(retPct)}`);
+  set('bt-val-wr',      `${(m.win_rate||0).toFixed(1)}%`);
+  set('bt-val-pf',      (m.profit_factor||0).toFixed(3));
+  set('bt-val-sharpe',  (m.sharpe_ratio||0).toFixed(3),
+      `font-weight:600;${_btColorVal(m.sharpe_ratio)}`);
+  set('bt-val-sortino', (m.sortino_ratio||0).toFixed(3));
+  set('bt-val-dd',      `-${(m.max_drawdown_pct||0).toFixed(2)}%`,
+      'color:#f44336;font-weight:600');
+  set('bt-val-trades',  `${m.wins||0}W / ${m.losses||0}L / ${m.total_trades||0}T`);
+  set('bt-val-exp',     `$${(m.expectancy_usd||0).toFixed(2)}`);
+
+  // Benchmark
+  const bm = data.benchmark;
+  const bmRow = document.getElementById('bt-benchmark-row');
+  if (bm && bmRow) {
+    bmRow.classList.remove('hidden');
+    const bmPct = parseFloat(bm.total_return_pct || 0);
+    const elBm  = document.getElementById('bt-benchmark-val');
+    const elAlpha = document.getElementById('bt-alpha-val');
+    if (elBm) { elBm.textContent = `${bmPct >= 0 ? '+' : ''}${bmPct.toFixed(2)}%`; }
+    const alpha = retPct - bmPct;
+    if (elAlpha) {
+      elAlpha.textContent = `(alfa: ${alpha >= 0 ? '+' : ''}${alpha.toFixed(2)}pp)`;
+      elAlpha.style.color = alpha >= 0 ? '#4caf50' : '#f44336';
+    }
+  }
+}
+
+function _btRenderEquityCurve(equityCurve) {
+  const canvas  = document.getElementById('bt-equity-canvas');
+  const canvas2 = document.getElementById('bt-drawdown-canvas');
+  if (!canvas || !equityCurve || !equityCurve.length) return;
+
+  const labels   = equityCurve.map(p => p.timestamp ? p.timestamp.slice(0, 10) : '');
+  const equities = equityCurve.map(p => p.equity_usd);
+  const drawdowns= equityCurve.map(p => -(p.drawdown_pct || 0));
+
+  if (_btEquityChart) { _btEquityChart.destroy(); _btEquityChart = null; }
+  if (_btDrawdownChart) { _btDrawdownChart.destroy(); _btDrawdownChart = null; }
+
+  if (typeof Chart === 'undefined') return;
+
+  _btEquityChart = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Equity USD',
+        data: equities,
+        borderColor: '#4caf50',
+        backgroundColor: 'rgba(76,175,80,0.1)',
+        borderWidth: 2,
+        pointRadius: 0,
+        fill: true,
+        tension: 0.3,
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { maxTicksLimit: 8, color: '#aaa' }, grid: { color: '#333' } },
+        y: { ticks: { color: '#aaa', callback: v => `$${v.toLocaleString()}` }, grid: { color: '#333' } },
+      },
+    },
+  });
+
+  _btDrawdownChart = new Chart(canvas2.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Drawdown %',
+        data: drawdowns,
+        backgroundColor: 'rgba(244,67,54,0.5)',
+        borderColor: '#f44336',
+        borderWidth: 1,
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { maxTicksLimit: 8, color: '#aaa' }, grid: { color: '#333' } },
+        y: { ticks: { color: '#aaa', callback: v => `${v.toFixed(1)}%` }, grid: { color: '#333' } },
+      },
+    },
+  });
+}
+
+async function _btRunBacktest() {
+  const symbol  = (document.getElementById('bt-symbol')?.value || 'BTC');
+  const days    = parseInt(document.getElementById('bt-days')?.value || '30', 10);
+  const equity  = parseFloat(document.getElementById('bt-equity')?.value || '10000');
+  const btn     = document.getElementById('bt-run-btn');
+
+  if (btn) btn.disabled = true;
+  _btSetStatus(`Executando backtest ${symbol} ${days}d...`);
+
+  try {
+    const resp = await fetch('/api/backtest/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol, days, initial_equity: equity, seed: 42 }),
+    });
+    const data = await resp.json();
+    if (!data.ok) throw new Error(data.error || 'Erro desconhecido');
+
+    _btRenderMetrics(data);
+    _btRenderEquityCurve(data.equity_curve || []);
+
+    const m = data.metrics || {};
+    _btSetStatus(
+      `✅ ${symbol} ${days}d — ${m.total_trades||0} trades | WR: ${(m.win_rate||0).toFixed(1)}% | Sharpe: ${(m.sharpe_ratio||0).toFixed(2)}`
+    );
+  } catch (err) {
+    _btSetStatus(`❌ ${err.message}`, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function _btBootPage() {
+  const btn = document.getElementById('bt-run-btn');
+  if (btn && !btn._btWired) {
+    btn.addEventListener('click', _btRunBacktest);
+    btn._btWired = true;
+  }
+  // C2 fix: usar símbolo selecionado no select em vez de BTC hardcoded
+  const _btSymCached = document.getElementById('bt-symbol')?.value || 'BTC';
+  fetch('/api/backtest/result?symbol=' + encodeURIComponent(_btSymCached))
+    .then(r => r.json())
+    .then(d => { if (d.ok) { _btRenderMetrics(d); _btRenderEquityCurve(d.equity_curve||[]); } })
+    .catch(() => {});
+}
+
+// ── Story 232 — Rolling Performance Panel ────────────────────────────────
+async function _rollingRefresh() {
+  const symbol = document.getElementById('rolling-symbol')?.value || 'BTC';
+  const days   = document.getElementById('rolling-days')?.value || '30';
+  const status = document.getElementById('rolling-status');
+  const grid   = document.getElementById('rolling-metrics-grid');
+  const divBox = document.getElementById('rolling-divergence-box');
+
+  if (status) status.textContent = 'Carregando...';
+  try {
+    const [rollingResp, divResp] = await Promise.all([
+      fetch(`/api/performance/rolling?symbol=${symbol}&days=${days}`).then(r => r.json()),
+      fetch(`/api/performance/divergence?symbol=${symbol}`).then(r => r.json()),
+    ]);
+
+    if (grid && rollingResp.ok) {
+      const r = rollingResp;
+      const cards = [
+        ['Trades', r.total_trades, '', false],
+        ['Win Rate', `${(r.win_rate_pct||0).toFixed(1)}%`, '', true],
+        ['Total PnL', `$${(r.total_pnl_usd||0).toFixed(2)}`, _btColorVal(r.total_pnl_usd), true],
+        ['Sharpe', (r.sharpe_ratio||0).toFixed(3), _btColorVal(r.sharpe_ratio), true],
+        ['Max DD', `-${(r.max_drawdown_pct||0).toFixed(2)}%`, 'color:#f44336', false],
+        ['Expectância', `$${(r.expectancy_usd||0).toFixed(2)}`, _btColorVal(r.expectancy_usd), true],
+      ];
+      // Adicionar comparação com backtest se disponível
+      if (r.backtest_sharpe !== undefined) {
+        const delta = (r.sharpe_ratio||0) - r.backtest_sharpe;
+        cards.push(['Δ Sharpe vs BT', `${delta >= 0 ? '+' : ''}${delta.toFixed(3)}`, _btColorVal(delta), true]);
+        cards.push(['BT Win Rate', `${(r.backtest_win_rate||0).toFixed(1)}%`, '', false]);
+      }
+      grid.innerHTML = cards.map(([label, val, style, _]) =>
+        `<div class="bt-metric-card"><span class="bt-metric-label">${label}</span><span class="bt-metric-val" style="${style||''}">${val}</span></div>`
+      ).join('');
+    }
+
+    if (divBox && divResp.ok) {
+      const statusColor = { ok: '#4caf50', warn: '#ff9800', diverging: '#f44336' }[divResp.status] || '#aaa';
+      const alertsHtml = (divResp.alerts || []).map(a =>
+        `<div class="div-alert div-alert-${(a.severity||'').toLowerCase()}">
+          <strong>${a.severity}</strong>: ${a.message}
+          <div class="div-rec">${a.recommendation}</div>
+        </div>`
+      ).join('') || '<div class="muted-line">Sem divergências detectadas ✅</div>';
+      divBox.innerHTML = `<div style="color:${statusColor};font-weight:700;margin-bottom:8px">Status: ${(divResp.status||'').toUpperCase()}</div>${alertsHtml}`;
+      divBox.classList.remove('hidden');
+    }
+
+    if (status) status.textContent = `Atualizado em ${new Date().toLocaleTimeString()}`;
+  } catch (err) {
+    if (status) { status.textContent = `Erro: ${err.message}`; status.style.color = '#f44336'; }
+  }
+}
+
+function _rollingBootPage() {
+  const btn = document.getElementById('rolling-refresh-btn');
+  if (btn && !btn._rollingWired) {
+    btn.addEventListener('click', _rollingRefresh);
+    btn._rollingWired = true;
+  }
+  _rollingRefresh();
+}
+
+// ── Story 235 — Batman Verdicts Timeline ─────────────────────────────────
+let _batmanTlChart = null;
+
+async function _batmanTimelineRefresh() {
+  const status = document.getElementById('batman-tl-status');
+  const wrap   = document.getElementById('batman-tl-table-wrap');
+  if (status) status.textContent = 'Carregando...';
+  try {
+    const data = await fetch('/api/risk/batman-timeline?limit=100').then(r => r.json());
+    if (!data.ok) throw new Error(data.error);
+
+    const tl = data.timeline || [];
+
+    // Chart: APPROVED/REDUCED/REJECTED por dia
+    const canvas = document.getElementById('chart-batman-timeline');
+    if (canvas && typeof Chart !== 'undefined' && tl.length) {
+      const dayMap = {};
+      tl.forEach(item => {
+        const day = (item.timestamp || '').slice(0, 10) || '—';
+        if (!dayMap[day]) dayMap[day] = { APPROVED: 0, REDUCED: 0, REJECTED: 0 };
+        const v = (item.verdict || '').toUpperCase();
+        if (v.includes('APPROV')) dayMap[day].APPROVED++;
+        else if (v.includes('REDUC')) dayMap[day].REDUCED++;
+        else if (v.includes('REJECT')) dayMap[day].REJECTED++;
+      });
+      const days   = Object.keys(dayMap).sort();
+      if (_batmanTlChart) { _batmanTlChart.destroy(); _batmanTlChart = null; }
+      _batmanTlChart = new Chart(canvas.getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels: days,
+          datasets: [
+            { label: 'Approved', data: days.map(d => dayMap[d].APPROVED), backgroundColor: 'rgba(76,175,80,0.7)' },
+            { label: 'Reduced',  data: days.map(d => dayMap[d].REDUCED),  backgroundColor: 'rgba(255,152,0,0.7)' },
+            { label: 'Rejected', data: days.map(d => dayMap[d].REJECTED), backgroundColor: 'rgba(244,67,54,0.7)' },
+          ],
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { labels: { color: '#ccc' } } },
+          scales: {
+            x: { stacked: true, ticks: { color: '#aaa', maxTicksLimit: 10 }, grid: { color: '#333' } },
+            y: { stacked: true, ticks: { color: '#aaa' }, grid: { color: '#333' } },
+          },
+        },
+      });
+    }
+
+    // Tabela últimos 20
+    if (wrap) {
+      const rows = tl.slice(-20).reverse().map(item => {
+        const v = (item.verdict || '').toUpperCase();
+        const color = v.includes('APPROV') ? '#4caf50' : v.includes('REDUC') ? '#ff9800' : '#f44336';
+        return `<tr>
+          <td>${(item.timestamp||'').slice(0,16).replace('T',' ')}</td>
+          <td>${item.symbol||'—'}</td>
+          <td style="color:${color};font-weight:700">${item.verdict||'—'}</td>
+          <td>${item.reason||'—'}</td>
+        </tr>`;
+      }).join('');
+      wrap.innerHTML = `<table class="compare-table"><thead><tr><th>Timestamp</th><th>Símbolo</th><th>Verdict</th><th>Razão</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }
+
+    if (status) status.textContent = `${tl.length} registros`;
+  } catch (err) {
+    if (status) { status.textContent = `Erro: ${err.message}`; status.style.color = '#f44336'; }
+  }
+}
+
+function _batmanTimelineBootPage() {
+  const btn = document.getElementById('batman-tl-refresh');
+  if (btn && !btn._btlWired) {
+    btn.addEventListener('click', _batmanTimelineRefresh);
+    btn._btlWired = true;
+  }
+  _batmanTimelineRefresh();
+}
+
+// ── Story 238 — Concentration Heatmap ────────────────────────────────────
+let _concChart = null;
+
+async function _concentrationRefresh() {
+  const status = document.getElementById('conc-status');
+  if (status) status.textContent = 'Carregando...';
+  try {
+    const data = await fetch('/api/risk/concentration').then(r => r.json());
+    if (!data.ok) throw new Error(data.error);
+
+    const conc   = data.concentration || [];
+    const canvas = document.getElementById('chart-concentration');
+    if (canvas && conc.length && typeof Chart !== 'undefined') {
+      const labels = conc.map(c => c.symbol);
+      const pcts   = conc.map(c => c.concentration_pct);
+      const colors = conc.map(c =>
+        c.concentration_pct > 50 ? 'rgba(244,67,54,0.8)'
+        : c.concentration_pct > 30 ? 'rgba(255,152,0,0.8)'
+        : 'rgba(76,175,80,0.8)'
+      );
+
+      if (_concChart) { _concChart.destroy(); _concChart = null; }
+      _concChart = new Chart(canvas.getContext('2d'), {
+        type: 'doughnut',
+        data: {
+          labels,
+          datasets: [{ data: pcts, backgroundColor: colors, borderColor: '#1e1e2e', borderWidth: 2 }],
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { position: 'right', labels: { color: '#ccc' } },
+            tooltip: { callbacks: { label: ctx => `${ctx.label}: ${ctx.parsed.toFixed(1)}%` } },
+          },
+        },
+      });
+    }
+
+    const totalUsd = (data.total_notional_usd || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+    if (status) status.textContent = `Total: ${totalUsd} | ${data.symbol_count||0} símbolos`;
+  } catch (err) {
+    if (status) { status.textContent = `Erro: ${err.message}`; status.style.color = '#f44336'; }
+  }
+}
+
+function _concentrationBootPage() {
+  const btn = document.getElementById('conc-refresh-btn');
+  if (btn && !btn._concWired) {
+    btn.addEventListener('click', _concentrationRefresh);
+    btn._concWired = true;
+  }
+  _concentrationRefresh();
+}
+
+// ── Story 239-242 — Multiagent Debate Panel ───────────────────────────────
+async function _debateRun() {
+  const symbol = document.getElementById('debate-symbol')?.value || 'BTC';
+  const rounds = parseInt(document.getElementById('debate-rounds')?.value || '2', 10);
+  const btn    = document.getElementById('debate-run-btn');
+  const status = document.getElementById('debate-status');
+  const vbox   = document.getElementById('debate-verdict-box');
+  const tWrap  = document.getElementById('debate-votes-table-wrap');
+
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = `Executando debate ${symbol} (${rounds} rodadas)...`;
+  if (vbox) vbox.classList.add('hidden');
+
+  try {
+    const data = await fetch('/api/debate/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol, rounds }),
+    }).then(r => r.json());
+
+    if (!data.ok) throw new Error(data.error);
+
+    // Exibir verdict
+    if (vbox) {
+      const actionEl = document.getElementById('debate-consensus-action');
+      const confEl   = document.getElementById('debate-consensus-conf');
+      const notesEl  = document.getElementById('debate-notes');
+      const actionColor = data.consensus_action === 'LONG' ? '#4caf50'
+        : data.consensus_action === 'SHORT' ? '#f44336' : '#aaa';
+      if (actionEl) { actionEl.textContent = data.consensus_action || '—'; actionEl.style.background = actionColor; }
+      if (confEl)   { confEl.textContent   = `${((data.consensus_confidence||0)*100).toFixed(0)}% confiança`; }
+      if (notesEl)  { notesEl.innerHTML = (data.notes||[]).map(n => `<div class="debate-note">⚠️ ${n}</div>`).join('') || ''; }
+      vbox.classList.remove('hidden');
+    }
+
+    // Tabela de votos
+    if (tWrap && data.vote_table) {
+      const rows = data.vote_table.map(v => {
+        const color = v.action === 'LONG' ? '#4caf50' : v.action === 'SHORT' ? '#f44336' : '#aaa';
+        return `<tr>
+          <td>${v.agent}</td>
+          <td style="color:${color};font-weight:700">${v.action}</td>
+          <td>${((v.confidence||0)*100).toFixed(0)}%</td>
+          <td>R${v.round}</td>
+          <td>${v.reasoning||'—'}</td>
+        </tr>`;
+      }).join('');
+      tWrap.innerHTML = `<table class="compare-table"><thead><tr><th>Agente</th><th>Voto</th><th>Conf.</th><th>Rodada</th><th>Raciocínio</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }
+
+    const dissenters = (data.dissent_agents||[]).join(', ') || 'Nenhum';
+    if (status) status.textContent = `✅ Consenso: ${data.consensus_action} | Dissidentes: ${dissenters} | ${data.total_votes} votos`;
+
+    // Recarregar histórico
+    _debateLoadHistory(symbol);
+  } catch (err) {
+    if (status) { status.textContent = `❌ ${err.message}`; status.style.color = '#f44336'; }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function _debateLoadHistory(symbol) {
+  const wrap = document.getElementById('debate-history-list');
+  if (!wrap) return;
+  try {
+    const data = await fetch(`/api/debate/history?symbol=${symbol}&limit=10`).then(r => r.json());
+    if (!data.ok || !data.history.length) {
+      wrap.innerHTML = '<div class="muted-line">Sem histórico ainda.</div>';
+      return;
+    }
+    wrap.innerHTML = data.history.map(item => {
+      const color = item.consensus_action === 'LONG' ? '#4caf50'
+        : item.consensus_action === 'SHORT' ? '#f44336' : '#aaa';
+      return `<div class="debate-history-item">
+        <span class="muted-line">${(item.timestamp||'').slice(0,16).replace('T',' ')}</span>
+        <span style="color:${color};font-weight:700;margin-left:8px">${item.consensus_action||'—'}</span>
+        <span class="muted-line" style="margin-left:4px">${((item.consensus_confidence||0)*100).toFixed(0)}%</span>
+        <span class="muted-line" style="margin-left:8px">${item.total_votes||0} votos</span>
+      </div>`;
+    }).join('');
+  } catch (_) {}
+}
+
+function _debateBootPage() {
+  const btn = document.getElementById('debate-run-btn');
+  if (btn && !btn._debateWired) {
+    btn.addEventListener('click', _debateRun);
+    btn._debateWired = true;
+  }
+  const sym = document.getElementById('debate-symbol')?.value || 'BTC';
+  _debateLoadHistory(sym);
+}
+
+// ── Boot analytics & backtest pages on first visit ───────────────────────
+// H2 fix: flags para evitar duplo boot ao clicar múltiplas vezes na nav
+let _btPageBooted = false;
+let _analyticsPageBooted = false;
+
+(function _bootNewPages() {
+  // Hook into page navigation to lazy-boot new pages
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.page-nav-btn');
+    if (!btn) return;
+    const page = btn.dataset.page;
+    if (page === 'reports') setTimeout(bootReports, 50);
+    if (page === 'backtest' && !_btPageBooted) {
+      _btPageBooted = true;
+      setTimeout(_btBootPage, 50);
+    }
+    if (page === 'analytics' && !_analyticsPageBooted) {
+      _analyticsPageBooted = true;
+      setTimeout(_rollingBootPage, 50);
+      setTimeout(_batmanTimelineBootPage, 100);
+      setTimeout(_concentrationBootPage, 150);
+      setTimeout(_debateBootPage, 200);
+    }
+    // Clicar de novo na mesma página atualiza os dados sem re-registrar listeners
+    if (page === 'backtest' && _btPageBooted) setTimeout(() => { try { _btRenderPage && _btRenderPage(); } catch(_){} }, 50);
+    if (page === 'analytics' && _analyticsPageBooted) {
+      setTimeout(_rollingRefresh, 50);
+      setTimeout(_batmanTimelineRefresh, 100);
+      setTimeout(_concentrationRefresh, 150);
+      setTimeout(_debateLoadHistory, 200);
+    }
+  });
+
+  // Also boot if already on these pages on load
+  const current = (() => { try { return localStorage.getItem('mekka_current_page'); } catch (_) { return null; } })();
+  if (current === 'backtest' && !_btPageBooted) {
+    _btPageBooted = true;
+    setTimeout(_btBootPage, 300);
+  }
+  if (current === 'analytics' && !_analyticsPageBooted) {
+    _analyticsPageBooted = true;
+    setTimeout(_rollingBootPage, 300);
+    setTimeout(_batmanTimelineBootPage, 350);
+    setTimeout(_concentrationBootPage, 400);
+    setTimeout(_debateBootPage, 450);
+  }
+})();

@@ -1,1 +1,0 @@
-# Mekka Trading — config package

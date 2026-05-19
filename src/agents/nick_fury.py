@@ -120,6 +120,18 @@ class NickFury(BaseAgent[list[CycleReport]]):
         # Story 035 — Telegram alerter (push only). Toggle via env.
         from src.services.telegram_alerter import TelegramAlerter
         self._telegram = TelegramAlerter()
+        # Story 218 — Monitoring & Alerting (Milestone 34) — wiring dos 4 monitores.
+        # Compartilham a instância de TelegramAlerter para não criar múltiplas sessões HTTP.
+        from src.services.alert_throttle_manager import AlertThrottleManager
+        from src.services.drawdown_monitor import DrawdownMonitor
+        from src.services.position_concentration_alerter import PositionConcentrationAlerter
+        from src.services.intraday_pnl_tracker import IntradayPnLTracker
+        from src.services.funding_rate_monitor import FundingRateMonitor
+        self._throttle = AlertThrottleManager()
+        self._drawdown_monitor = DrawdownMonitor(alerter=self._telegram)
+        self._concentration_alerter = PositionConcentrationAlerter(alerter=self._telegram)
+        self._pnl_tracker = IntradayPnLTracker(alerter=self._telegram)
+        self._funding_monitor = FundingRateMonitor(alerter=self._telegram)
         # Story 049 — DailyPerformanceWriter: once-per-day Deadpool snapshot
         from src.services.daily_performance_writer import DailyPerformanceWriter
         self._perf_writer = DailyPerformanceWriter()
@@ -380,6 +392,10 @@ class NickFury(BaseAgent[list[CycleReport]]):
         running_notional_usd = sum(
             p.size * p.entry_price for p in (snapshot.positions or [])
         )
+
+        # Story 218 — run pre-cycle monitors (drawdown, concentration, intraday PnL).
+        # Best-effort: falhas nunca interrompem o ciclo principal.
+        await self._run_pre_cycle_monitors(snapshot=snapshot, effective_equity=effective_equity)
 
         # Runtime mode — hot-reload trading assets without restart
         from src.config.runtime_mode import get_params as _get_mode_params
@@ -721,6 +737,114 @@ class NickFury(BaseAgent[list[CycleReport]]):
         except Exception as _e197_exc:  # noqa: BLE001
             logger.debug(f"[NickFury:197] CycleBatchedExporter init skipped: {_e197_exc}")
 
+        # Stories 198-202 — OpenHands Wave 2: ConversationMemory, ArtifactStore,
+        # ActionRiskAnalyzer, StateResetter. Fails silently.
+        _conv_mem198 = None
+        try:
+            from src.services.cycle_conversation_memory import get_cycle_conversation_memory  # noqa: WPS433
+            _conv_mem198 = get_cycle_conversation_memory()
+        except Exception as _e198_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:198] CycleConversationMemory init skipped: {_e198_exc}")
+
+        _artifact_store200 = None
+        try:
+            from src.services.cycle_artifact_store import (  # noqa: WPS433
+                get_cycle_artifact_store as _get_artifact_store,
+                ArtifactType as _AT,
+            )
+            _artifact_store200 = _get_artifact_store()
+        except Exception as _e200_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:200] CycleArtifactStore init skipped: {_e200_exc}")
+
+        _risk_analyzer201 = None
+        try:
+            from src.services.cycle_action_risk_analyzer import (  # noqa: WPS433
+                get_cycle_action_risk_analyzer as _get_risk_analyzer,
+            )
+            _risk_analyzer201 = _get_risk_analyzer()
+        except Exception as _e201_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:201] CycleActionRiskAnalyzer init skipped: {_e201_exc}")
+
+        _resetter202 = None
+        try:
+            from src.services.cycle_state_resetter import (  # noqa: WPS433
+                get_cycle_state_resetter as _get_resetter,
+                ResetScope as _RS,
+            )
+            _resetter202 = _get_resetter()
+            _resetter202.reset(_RS.CYCLE_START, symbol=symbol, cycle_id=str(_cycle_id))
+        except Exception as _e202_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:202] CycleStateResetter CYCLE_START skipped: {_e202_exc}")
+
+        # Stories 208-212 — LangGraph Patterns: StateGraph, ConditionalRouter,
+        # Checkpointer, ParallelBranch, GraphInterrupt. Fails silently.
+        _state_graph208 = None
+        try:
+            from src.services.cycle_state_graph import build_default_mekka_graph  # noqa: WPS433
+            _state_graph208 = build_default_mekka_graph()
+            logger.debug(f"[NickFury:208] CycleStateGraph compiled for {symbol}")
+        except Exception as _e208_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:208] CycleStateGraph init skipped: {_e208_exc}")
+
+        _router209 = None
+        try:
+            from src.services.cycle_conditional_router import build_vision_router  # noqa: WPS433
+            _router209 = build_vision_router(fallback="batman")
+            logger.debug(f"[NickFury:209] CycleConditionalRouter ready ({_router209.summary()['rules_count']} rules)")
+        except Exception as _e209_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:209] CycleConditionalRouter init skipped: {_e209_exc}")
+
+        _checkpointer210 = None
+        try:
+            from src.services.cycle_graph_checkpointer import get_cycle_graph_checkpointer  # noqa: WPS433
+            _checkpointer210 = get_cycle_graph_checkpointer()
+        except Exception as _e210_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:210] CycleGraphCheckpointer init skipped: {_e210_exc}")
+
+        _parallel211 = None
+        try:
+            from src.services.cycle_parallel_branch import get_cycle_parallel_branch  # noqa: WPS433
+            _parallel211 = get_cycle_parallel_branch()
+        except Exception as _e211_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:211] CycleParallelBranch init skipped: {_e211_exc}")
+
+        _interrupt212 = None
+        try:
+            from src.services.cycle_graph_interrupt import get_cycle_graph_interrupt  # noqa: WPS433
+            _interrupt212 = get_cycle_graph_interrupt()
+            # Expira interrupts pendentes de ciclos anteriores
+            _expired = _interrupt212.auto_expire_pending()
+            if _expired:
+                logger.debug(f"[NickFury:212] auto-expired {_expired} pending interrupts")
+        except Exception as _e212_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:212] CycleGraphInterrupt init skipped: {_e212_exc}")
+
+        # Stories 203, 206, 207 — AutoGen / CrewAI Wave 1 integrations.
+        # GroupChatManager (203), PipelineOrchestrator (206), AgentBackstory (207).
+        # Fails silently.
+        _group_chat203 = None
+        try:
+            from src.services.cycle_group_chat import get_cycle_group_chat_manager  # noqa: WPS433
+            _group_chat203 = get_cycle_group_chat_manager()
+        except Exception as _e203_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:203] GroupChatManager init skipped: {_e203_exc}")
+
+        _pipeline206 = None
+        try:
+            from src.services.cycle_pipeline_orchestrator import get_cycle_pipeline_orchestrator  # noqa: WPS433
+            _pipeline206 = get_cycle_pipeline_orchestrator()
+        except Exception as _e206_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:206] PipelineOrchestrator init skipped: {_e206_exc}")
+
+        try:
+            from src.services.mekka_agent_backstory import get_mekka_agent_backstory  # noqa: WPS433
+            _backstory207 = get_mekka_agent_backstory()
+            _bs_extra = f"symbol={symbol}, equity_usd={equity_usd}"
+            _ = _backstory207.build_system_prompt("NICKFURY", _bs_extra)
+            logger.debug(f"[NickFury:207] AgentBackstory NICKFURY prompt ready")
+        except Exception as _e207_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:207] AgentBackstory init skipped: {_e207_exc}")
+
         # Story 166 — AgentStepGuard: per-cycle stuck loop + MAX_ITERATIONS protection.
         # Creates a fresh guard for this cycle — checks after Vision and after Batman.
         # Fails silently — _guard remains None; all check() calls are guarded.
@@ -789,21 +913,60 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 error=f"DEGRADED_MODE: {self._degraded_mode.reason}",
             )
 
+        # Story 251 — Cycle Checkpoint: init store para save/restore de etapas do ciclo.
+        # Fail-silent: _cp251 permanece None se o serviço não estiver disponível.
+        _cp251 = None
+        try:
+            from src.services.cycle_checkpoint import get_cycle_checkpoint_store  # noqa: WPS433
+            _cp251 = get_cycle_checkpoint_store()
+        except Exception as _cp251_init_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:251] CycleCheckpointStore init skipped: {_cp251_init_exc}")
+
         # 1. Analysis fan-out
         # Story 129 — usa Layer 1 LangGraph subgraph quando disponível (modo --langgraph).
         # Fallback para ProfessorX.run() com asyncio.gather quando não disponível.
-        try:
-            if layer1_graph is not None and lg_thread_id is not None:
-                from src.langgraph.layer1_graph import run_layer1_subgraph  # noqa: WPS433
-                analysis = await run_layer1_subgraph(
-                    graph=layer1_graph,
-                    symbol=symbol,
-                    cycle_id=lg_thread_id,
-                )
-            else:
-                analysis = await self._professor.run(symbol=symbol)
-        except AgentError as exc:
-            return CycleReport(symbol=symbol, error=f"Analysis failed: {exc}")
+        # Story 251 — tenta restaurar análise do checkpoint antes de chamar ProfessorX.
+        _analysis251_restored = False
+        if _cp251 is not None:
+            try:
+                _cp251_analysis_data = await _cp251.load(str(_cycle_id), symbol, "ANALYSIS")
+                if _cp251_analysis_data:
+                    from src.models.market_analysis import MarketAnalysis  # noqa: WPS433
+                    analysis = MarketAnalysis(**_cp251_analysis_data)
+                    _analysis251_restored = True
+                    logger.debug(
+                        f"[NickFury:251] {symbol} ANALYSIS restored from checkpoint "
+                        f"(cycle={_cycle_id})"
+                    )
+            except Exception as _cp251_load_exc:  # noqa: BLE001
+                logger.debug(f"[NickFury:251] ANALYSIS checkpoint load skipped: {_cp251_load_exc}")
+
+        if not _analysis251_restored:
+            try:
+                if layer1_graph is not None and lg_thread_id is not None:
+                    from src.langgraph.layer1_graph import run_layer1_subgraph  # noqa: WPS433
+                    analysis = await run_layer1_subgraph(
+                        graph=layer1_graph,
+                        symbol=symbol,
+                        cycle_id=lg_thread_id,
+                    )
+                else:
+                    analysis = await self._professor.run(symbol=symbol)
+            except AgentError as exc:
+                return CycleReport(symbol=symbol, error=f"Analysis failed: {exc}")
+
+            # Story 251 — salva checkpoint ANALYSIS após ProfessorX concluir.
+            if _cp251 is not None:
+                try:
+                    _analysis_payload = {}
+                    if hasattr(analysis, "model_dump"):
+                        _analysis_payload = analysis.model_dump()
+                    elif hasattr(analysis, "dict"):
+                        _analysis_payload = analysis.dict()
+                    if _analysis_payload:
+                        await _cp251.save(str(_cycle_id), symbol, "ANALYSIS", _analysis_payload)
+                except Exception as _cp251_save_exc:  # noqa: BLE001
+                    logger.debug(f"[NickFury:251] ANALYSIS checkpoint save skipped: {_cp251_save_exc}")
 
         # Story 138 — Stale price check: lazy init detector per symbol
         if symbol not in self._stale_price_detectors:
@@ -885,6 +1048,25 @@ class NickFury(BaseAgent[list[CycleReport]]):
             get_env_snapshot_store().capture(symbol, analysis=analysis, cycle_id=str(_cycle_id))
         except Exception as _snap192_exc:  # noqa: BLE001
             self._log.debug(f"[NickFury:192] EnvSnapshot capture skipped: {_snap192_exc}")
+
+        # Story 218 — FundingRateMonitor: alerta proativo de funding extremo.
+        # Chamado após analysis (BlackPanther fornece funding_rate no MarketAnalysis).
+        # Throttle: WARN=2h, BLOCK=1h por símbolo. Absorve falhas silenciosamente.
+        try:
+            _fr = getattr(analysis, "funding_rate", None)
+            if _fr is not None:
+                _fr_pct = float(_fr) * 100  # MarketAnalysis armazena como decimal
+                _fr_key = f"FUNDING_{symbol}"
+                _cooldown_fr = 3600.0  # 1h para qualquer nível de funding
+                if self._throttle.is_allowed(_fr_key, cooldown_seconds=_cooldown_fr):
+                    _fr_alert = await self._funding_monitor.check(
+                        symbol=symbol,
+                        funding_rate_pct=_fr_pct,
+                    )
+                    if _fr_alert is not None:
+                        self._throttle.record_sent(_fr_key)
+        except Exception as _fr218_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:218] FundingRateMonitor skipped: {_fr218_exc}")
 
         # Story 189 — CycleBudgetGuard: check LLM cost budget before Vision.
         # SWE-agent max_cost done_status: exit gracefully when budget exceeded.
@@ -972,10 +1154,30 @@ class NickFury(BaseAgent[list[CycleReport]]):
         except Exception as _ig187_exc:  # noqa: BLE001
             self._log.debug(f"[NickFury:187] IncrementalCycleSkip check skipped: {_ig187_exc}")
 
+        # Story 251 — tenta restaurar sinal do checkpoint antes de chamar Vision.
+        _signal251_restored = False
+        _signal251_cached: Any = None
+        if _cp251 is not None:
+            try:
+                _cp251_signal_data = await _cp251.load(str(_cycle_id), symbol, "SIGNAL")
+                if _cp251_signal_data:
+                    from src.models.signal import TradingSignal as _TS251  # noqa: WPS433
+                    _signal251_cached = _TS251(**_cp251_signal_data)
+                    _signal251_restored = True
+                    logger.debug(
+                        f"[NickFury:251] {symbol} SIGNAL restored from checkpoint "
+                        f"(cycle={_cycle_id})"
+                    )
+            except Exception as _cp251_sig_load_exc:  # noqa: BLE001
+                logger.debug(f"[NickFury:251] SIGNAL checkpoint load skipped: {_cp251_sig_load_exc}")
+
         _vision_stage_start = __import__("time").monotonic()
         _vision_error = False
         try:
-            if _budget_skipped:
+            if _signal251_restored and _signal251_cached is not None:
+                # Story 251 — reutiliza sinal restaurado do checkpoint (Vision já rodou)
+                signal = _signal251_cached
+            elif _budget_skipped:
                 # Story 189 — CycleBudgetGuard: força HOLD sem LLM call
                 from src.models.signal import TradingSignal, TradeAction  # noqa: WPS433
                 signal = TradingSignal(
@@ -1039,6 +1241,26 @@ class NickFury(BaseAgent[list[CycleReport]]):
             # Story 151 — Record Vision stage elapsed
             if _bench_token is not None:
                 _bench_token.stages["vision"] = __import__("time").monotonic() - _vision_stage_start
+
+        # Story 251 — salva checkpoint SIGNAL após Vision concluir (apenas se rodou normalmente).
+        # Não salva quando: sinal foi restaurado, budget skipped, incremental skipped, ou erro.
+        if (
+            _cp251 is not None
+            and not _signal251_restored
+            and not _budget_skipped
+            and not (_incremental_skipped and _incremental_last_signal is not None)
+            and not _vision_error
+        ):
+            try:
+                _signal_payload: dict = {}
+                if hasattr(signal, "model_dump"):
+                    _signal_payload = signal.model_dump()
+                elif hasattr(signal, "dict"):
+                    _signal_payload = signal.dict()  # type: ignore[attr-defined]
+                if _signal_payload:
+                    await _cp251.save(str(_cycle_id), symbol, "SIGNAL", _signal_payload)
+            except Exception as _cp251_sig_save_exc:  # noqa: BLE001
+                logger.debug(f"[NickFury:251] SIGNAL checkpoint save skipped: {_cp251_sig_save_exc}")
 
         # 2b. Vision Reflection Loop — Story 130 (supersedes Story 031 one-shot).
         # Iterative Vision↔VisionCritic loop (AutoGen Reflection pattern).
@@ -1155,6 +1377,22 @@ class NickFury(BaseAgent[list[CycleReport]]):
             return CycleReport(symbol=symbol, error="AgentStepGuard: Vision stuck/max-iterations")
 
         signal_id = await MekkaRepository.save_signal(signal)
+
+        # Story 198 — CycleConversationMemory: registra par user/assistant deste ciclo.
+        # OpenHands ConversationMemory: centraliza histórico de janela de contexto por símbolo.
+        # Fails silently.
+        try:
+            if _conv_mem198 is not None:
+                _user_prompt_198 = str(getattr(analysis, "summary", "") or symbol)
+                _asst_reply_198 = f"{signal.action.value}:{round(signal.confidence, 3)}"
+                _conv_mem198.add_turn(
+                    symbol=symbol,
+                    cycle_id=str(_cycle_id),
+                    user_prompt=_user_prompt_198,
+                    assistant_reply=_asst_reply_198,
+                )
+        except Exception as _e198b_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:198] ConversationMemory add_turn skipped: {_e198b_exc}")
 
         # Story 136 — Publish vision.signal event
         await _emit("vision.signal", {
@@ -1412,6 +1650,82 @@ class NickFury(BaseAgent[list[CycleReport]]):
         except Exception as _e197b_exc:  # noqa: BLE001
             logger.debug(f"[NickFury:197] batch SIGNAL_EMITTED skipped: {_e197b_exc}")
 
+        # Story 200 — CycleArtifactStore: persiste REASONING do Vision para audit.
+        # OpenHands InMemoryFileStore: put(path, content).
+        # Fails silently.
+        try:
+            if _artifact_store200 is not None:
+                _artifact_store200.put(
+                    symbol=symbol,
+                    cycle_id=str(_cycle_id),
+                    artifact_type=_AT.REASONING,
+                    content={
+                        "action": signal.action.value,
+                        "confidence": round(signal.confidence, 3),
+                        "reasoning": getattr(signal, "reasoning", ""),
+                    },
+                )
+        except Exception as _e200b_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:200] ArtifactStore REASONING skipped: {_e200b_exc}")
+
+        # Stories 208/209/210 — LangGraph: checkpointer pós-sinal + router condicional.
+        # Salva estado do ciclo após Vision; roda router para logar próximo destino.
+        # Fails silently.
+        try:
+            if _checkpointer210 is not None:
+                _cp_state = {
+                    "symbol": symbol,
+                    "cycle_id": str(_cycle_id),
+                    "signal": {
+                        "action": signal.action.value,
+                        "confidence": round(signal.confidence, 3),
+                    },
+                }
+                _cp_id = _checkpointer210.save(str(_cycle_id), "vision", _cp_state)
+                logger.debug(f"[NickFury:210] checkpoint saved: vision/{_cp_id}")
+        except Exception as _e210b_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:210] Checkpointer post-vision skipped: {_e210b_exc}")
+
+        try:
+            if _router209 is not None:
+                _router_state = {
+                    "signal": {
+                        "action": signal.action.value,
+                        "confidence": signal.confidence,
+                    }
+                }
+                _next209 = _router209.route(_router_state)
+                logger.debug(f"[NickFury:209] ConditionalRouter → {_next209} (action={signal.action.value})")
+        except Exception as _e209b_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:209] ConditionalRouter skipped: {_e209b_exc}")
+
+        # Story 201 — CycleActionRiskAnalyzer: avalia risco antes do Batman gate.
+        # OpenHands SecurityAnalyzer: classifica ação em LOW/MEDIUM/HIGH.
+        # HIGH → loga aviso (bloquear via Batman é responsabilidade do risk gate).
+        # Fails silently.
+        try:
+            if _risk_analyzer201 is not None:
+                _regime_str = getattr(analysis, "regime", "UNKNOWN")
+                if hasattr(_regime_str, "value"):
+                    _regime_str = _regime_str.value
+                _notional = float(getattr(signal, "position_size_usd", 0.0) or 0.0)
+                _leverage = float(getattr(signal, "leverage", 1.0) or 1.0)
+                _risk_assessment = _risk_analyzer201.analyze(
+                    action_type=signal.action.value,
+                    symbol=symbol,
+                    notional=_notional,
+                    leverage=_leverage,
+                    regime=str(_regime_str),
+                    confidence=signal.confidence,
+                )
+                if _risk_assessment.blocked:
+                    logger.warning(
+                        f"[NickFury:201] RiskAnalyzer HIGH block: {symbol} "
+                        f"{signal.action.value} — {_risk_assessment.reason}"
+                    )
+        except Exception as _e201b_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:201] RiskAnalyzer skipped: {_e201b_exc}")
+
         # 3. Batman risk gate
         # Story 151 — Benchmark Batman stage
         _batman_stage_start = __import__("time").monotonic()
@@ -1425,6 +1739,7 @@ class NickFury(BaseAgent[list[CycleReport]]):
             running_notional_usd=running_notional_usd,
             equity_usd=equity_usd,
             current_positions=current_positions or [],  # [Story 057] correlation gate
+            analysis=analysis,  # [Story 247] Flash divergence gate 3r
         )
 
         # Story 151 — Record Batman stage elapsed
@@ -1646,6 +1961,34 @@ class NickFury(BaseAgent[list[CycleReport]]):
         except Exception as _e197c_exc:  # noqa: BLE001
             logger.debug(f"[NickFury:197] batch/flush CYCLE_END skipped: {_e197c_exc}")
 
+        # Story 200 — CycleArtifactStore: persiste artefatos do ciclo para audit trail.
+        # OpenHands InMemoryFileStore: put(path, content) com path canônico.
+        # Fails silently.
+        try:
+            if _artifact_store200 is not None:
+                _artifact_store200.put(
+                    symbol=symbol,
+                    cycle_id=str(_cycle_id),
+                    artifact_type=_AT.SIGNAL,
+                    content={
+                        "action": signal.action.value if signal else "HOLD",
+                        "confidence": getattr(signal, "confidence", 0.0),
+                        "outcome": execution.status.value,
+                    },
+                    metadata={"source": "NICKFURY", "milestone": "31"},
+                )
+        except Exception as _e200c_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:200] ArtifactStore CYCLE_END skipped: {_e200c_exc}")
+
+        # Story 202 — CycleStateResetter: CYCLE_END flush + cleanup.
+        # OpenHands AgentController.reset(): flush batch + prepare for next cycle.
+        # Fails silently.
+        try:
+            if _resetter202 is not None:
+                _resetter202.reset(_RS.CYCLE_END, symbol=symbol, cycle_id=str(_cycle_id))
+        except Exception as _e202c_exc:  # noqa: BLE001
+            logger.debug(f"[NickFury:202] CycleStateResetter CYCLE_END skipped: {_e202c_exc}")
+
         # Story 151 — Close benchmark measurement for this full cycle
         try:
             if _bench is not None and _bench_token is not None:
@@ -1756,6 +2099,88 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 break  # fail-silent: use last known good signal
 
         return signal, round_num
+
+    # ------------------------------------------------------------------
+    # Monitoring & Alerting (Story 218 — Milestone 34)
+    # ------------------------------------------------------------------
+
+    async def _run_pre_cycle_monitors(
+        self,
+        snapshot: EquitySnapshot,
+        effective_equity: float,
+    ) -> None:
+        """
+        Executa os 3 monitores de portfólio antes do loop de símbolos.
+
+        Monitores:
+          - DrawdownMonitor    (Story 213) — alerta em 50%/80%/100% do limite
+          - PositionConcentrationAlerter (Story 214) — alerta por símbolo acima do limite
+          - IntradayPnLTracker (Story 215) — snapshot horário + alertas em marcos
+
+        FundingRateMonitor (Story 216) é chamado dentro de _cycle_for_symbol()
+        pois precisa do MarketAnalysis (BlackPanther) por símbolo.
+
+        AlertThrottleManager (Story 217) usado como gate antes de cada monitor.
+        Cada chamada absorve exceções — nunca interrompe o ciclo principal.
+        """
+        # ── DrawdownMonitor ────────────────────────────────────────────
+        try:
+            _peak = getattr(self._daily_pnl, "_peak_equity", 0.0) or effective_equity
+            _dd_key = "DRAWDOWN_CHECK"
+            # Throttle: verificar a cada 5 minutos no máximo (300s)
+            if self._throttle.is_allowed(_dd_key, cooldown_seconds=300.0):
+                _dd_alert = await self._drawdown_monitor.check(
+                    current_equity=effective_equity,
+                    peak_equity=_peak,
+                )
+                self._throttle.record_sent(_dd_key)
+                if _dd_alert is not None:
+                    self._log.info(
+                        f"[NickFury:213] DrawdownMonitor: {_dd_alert.level} "
+                        f"{_dd_alert.drawdown_pct:.2f}%"
+                    )
+        except Exception as _dd218_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:218] DrawdownMonitor skipped: {_dd218_exc}")
+
+        # ── PositionConcentrationAlerter ───────────────────────────────
+        try:
+            _positions = snapshot.positions or []
+            if _positions and effective_equity > 0:
+                _pos_dicts = [
+                    {
+                        "symbol": p.symbol,
+                        "notional_usd": p.size * p.entry_price,
+                        "side": getattr(p, "side", "UNKNOWN"),
+                    }
+                    for p in _positions
+                ]
+                _conc_alerts = await self._concentration_alerter.check(
+                    positions=_pos_dicts,
+                    equity_usd=effective_equity,
+                )
+                for _ca in _conc_alerts:
+                    self._log.warning(
+                        f"[NickFury:214] Concentração: {_ca.symbol} "
+                        f"{_ca.concentration_pct:.1f}% > {_ca.limit_pct:.1f}%"
+                    )
+        except Exception as _conc218_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:218] ConcentrationAlerter skipped: {_conc218_exc}")
+
+        # ── IntradayPnLTracker ─────────────────────────────────────────
+        try:
+            # PnL realizado vem do daily_pnl_writer; não-realizado do snapshot
+            _realized = getattr(self._daily_pnl, "_realized_pnl_today", 0.0) or 0.0
+            _unrealized = sum(
+                getattr(p, "unrealized_pnl_usd", 0.0)
+                for p in (snapshot.positions or [])
+            )
+            await self._pnl_tracker.record(
+                realized_pnl=_realized,
+                unrealized_pnl=_unrealized,
+                equity_usd=effective_equity,
+            )
+        except Exception as _pnl218_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury:218] IntradayPnLTracker skipped: {_pnl218_exc}")
 
     # ------------------------------------------------------------------
     # Safety net (Story 029a)

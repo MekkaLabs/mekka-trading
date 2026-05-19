@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 from loguru import logger
 
@@ -295,6 +295,146 @@ class LLMClient:
         tokens_in = usage.input_tokens if usage else 0
         tokens_out = usage.output_tokens if usage else 0
         return content.strip() or "{}", tokens_in, tokens_out
+
+
+    # ── Structured Output (Story 250) ─────────────────────────────────────────
+
+    async def chat_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_model: type,
+        agent_id: str = "",
+    ) -> Any:
+        """Structured output — returns a validated Pydantic model or None.
+
+        OpenAI: uses client.beta.chat.completions.parse() for guaranteed schema.
+        Anthropic: falls back to JSON mode + model_validate().
+
+        Returns None on any error; caller should fall back to raw JSON path.
+        Story 250 — Vision Structured Output.
+        """
+        if not self._has_openai and not self._has_anthropic:
+            return None
+
+        _t0 = time.monotonic()
+        _provider = "none"
+        _model = "none"
+        _tokens_in = 0
+        _tokens_out = 0
+
+        try:
+            if self._has_openai:
+                try:
+                    parsed, _tokens_in, _tokens_out = await self._call_openai_structured(
+                        system_prompt, user_prompt, response_model
+                    )
+                    _provider = "openai"
+                    _model = self._openai_model
+                except (OpenAIAPIError, OpenAITimeoutError, OpenAIRateLimitError) as exc:
+                    logger.warning(
+                        f"[LLMClient] OpenAI structured failed ({type(exc).__name__}: {exc})"
+                        " — falling back to Claude"
+                    )
+                    if not self._has_anthropic:
+                        return None
+                    parsed, _tokens_in, _tokens_out = await self._call_anthropic_structured(
+                        system_prompt, user_prompt, response_model
+                    )
+                    _provider = "anthropic"
+                    _model = self._anthropic_model
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        f"[LLMClient] OpenAI structured unexpected: {exc} — trying Claude"
+                    )
+                    if not self._has_anthropic:
+                        return None
+                    parsed, _tokens_in, _tokens_out = await self._call_anthropic_structured(
+                        system_prompt, user_prompt, response_model
+                    )
+                    _provider = "anthropic"
+                    _model = self._anthropic_model
+            else:
+                parsed, _tokens_in, _tokens_out = await self._call_anthropic_structured(
+                    system_prompt, user_prompt, response_model
+                )
+                _provider = "anthropic"
+                _model = self._anthropic_model
+
+            return parsed
+
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[LLMClient] chat_structured failed entirely: {exc}")
+            return None
+
+        finally:
+            _elapsed_ms = round((time.monotonic() - _t0) * 1000, 1)
+            _cost = _estimate_cost_usd(_model, _tokens_in, _tokens_out)
+            try:
+                from src.services.event_bus import get_event_bus  # noqa: WPS433
+                _eb = get_event_bus()
+                _eb.publish_sync("llm.call.completed", {
+                    "provider": _provider,
+                    "model": _model,
+                    "agent_id": agent_id,
+                    "tokens_in": _tokens_in,
+                    "tokens_out": _tokens_out,
+                    "cost_usd": round(_cost, 8),
+                    "elapsed_ms": _elapsed_ms,
+                    "structured": True,
+                })
+                logger.debug(
+                    f"[LLMClient] structured {_provider}/{_model} agent={agent_id or '?'} "
+                    f"in={_tokens_in} out={_tokens_out} "
+                    f"cost=${_cost:.6f} {_elapsed_ms}ms"
+                )
+            except Exception as _ev_exc:  # noqa: BLE001
+                logger.debug(f"[LLMClient] structured cost event publish skipped: {_ev_exc}")
+
+    async def _call_openai_structured(
+        self, system_prompt: str, user_prompt: str, response_model: type
+    ) -> Tuple[Any, int, int]:
+        """OpenAI Structured Output via beta.chat.completions.parse().
+
+        Returns (parsed_model_instance, tokens_in, tokens_out).
+        """
+        client = self._get_openai()
+        response = await client.beta.chat.completions.parse(
+            model=self._openai_model,
+            temperature=self._temperature,
+            max_tokens=self._max_tokens,
+            response_format=response_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        parsed = response.choices[0].message.parsed
+        usage = response.usage
+        tokens_in = usage.prompt_tokens if usage else 0
+        tokens_out = usage.completion_tokens if usage else 0
+        return parsed, tokens_in, tokens_out
+
+    async def _call_anthropic_structured(
+        self, system_prompt: str, user_prompt: str, response_model: type
+    ) -> Tuple[Any, int, int]:
+        """Anthropic structured output — JSON mode + model_validate().
+
+        Anthropic não tem structured output nativo; usa JSON mode e
+        valida via Pydantic model_validate().
+        Returns (parsed_model_instance, tokens_in, tokens_out).
+        """
+        import json as _json  # noqa: WPS433
+        content, tokens_in, tokens_out = await self._call_anthropic(system_prompt, user_prompt)
+        cleaned = content.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned.rsplit("```", 1)[0]
+            cleaned = cleaned.strip()
+        payload = _json.loads(cleaned)
+        parsed = response_model.model_validate(payload)
+        return parsed, tokens_in, tokens_out
 
 
 def make_llm_client() -> LLMClient:

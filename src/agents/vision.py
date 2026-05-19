@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
 from src.agents.llm_client import LLMClient, make_llm_client
+from src.models.vision_output import TradingSignalOutput  # Story 250
 
 from src.agents.base import BaseAgent
 from src.config.settings import settings
@@ -44,13 +45,14 @@ _SYSTEM_PROMPT = """You are Vision, the strategic decision-making AI of the
 Mekka Trading System — a multi-agent autonomous trading platform operating on
 Hyperliquid perpetual futures.
 
-You receive consolidated market analysis from six specialized agents:
-  • Superman      — multi-timeframe technical analysis
-  • Doctor Strange — macro sentiment & Fear/Greed
-  • Black Panther  — onchain whale flow, funding, OI
-  • Thor           — volatility regime
-  • Aquaman        — order book liquidity
-  • Spider-Man     — anomaly detection
+You receive consolidated market analysis from seven specialized agents:
+  • Superman        — multi-timeframe technical analysis
+  • Doctor Strange  — macro sentiment & Fear/Greed
+  • Black Panther   — onchain whale flow, funding, OI
+  • Thor            — volatility regime
+  • Aquaman         — order book liquidity
+  • Spider-Man      — anomaly detection
+  • Flash           — intra-candle momentum scalper (speed-of-light signals)
 
 Your output MUST be a single JSON object matching the TradingSignal schema —
 no markdown, no commentary, no code fences. Output JSON only.
@@ -66,6 +68,13 @@ Decision principles
 7. Geometric constraint:
      LONG:  stop_loss < entry < take_profit
      SHORT: take_profit < entry < stop_loss
+8. [Story 244] Flash momentum guidance:
+     • Flash STRONG UP   + LONG  signal  → entry timing confirmed, no forced adjustment.
+     • Flash STRONG UP   + SHORT signal  → reduce size_pct by 20% (momentum divergence).
+     • Flash STRONG DOWN + SHORT signal  → entry timing confirmed, no forced adjustment.
+     • Flash STRONG DOWN + LONG  signal  → reduce size_pct by 20% (momentum divergence).
+     • Flash SIDEWAYS                    → reduce confidence by 0.05 for any directional trade.
+     • Flash weak signal                 → treat as mild supporting signal only.
 
 Schema (all fields required, valid JSON)
 ----------------------------------------
@@ -316,6 +325,43 @@ class Vision(BaseAgent[TradingSignal]):
         except Exception as _som186_exc:  # noqa: BLE001
             self._log.debug(f"[Vision:186] SignalOutcomeMemory skipped: {_som186_exc}")
 
+        # Story 249 — Decision Memory: inject reflection block from past decisions.
+        # TradingAgents (TauricResearch) pattern: decision log with outcome feedback.
+        # Recupera últimas N decisões com resultados reais e injeta bloco de reflexão
+        # para que a Vision calibre confiança baseada em performance histórica.
+        # Falha silenciosamente — sem bloco se sem histórico ou erro.
+        try:
+            from src.services.decision_memory import get_decision_memory  # noqa: WPS433
+            _sym249 = getattr(analysis, "symbol", symbol) if analysis else symbol
+            _dm249 = get_decision_memory()
+            # Tenta busca async com outcomes (DB); fallback via closed trades síncronos
+            import asyncio as _asyncio249  # noqa: WPS433
+            try:
+                _decisions249 = await _dm249.get_recent_with_outcomes(_sym249, limit=5)
+            except Exception:  # noqa: BLE001
+                _decisions249 = []
+            if not _decisions249:
+                # Fallback: usa closed trades para construir reflexão sem await
+                try:
+                    from src.persistence.repository import MekkaRepository as _MR249  # noqa: WPS433
+                    _trades249 = await _MR249.list_recent_closed_trades(limit=5)
+                    _trades249_sym = [t for t in _trades249 if getattr(t, "symbol", "") == _sym249]
+                    if _trades249_sym:
+                        _refl_block249 = _dm249.build_reflection_block_from_closed_trades(
+                            _trades249_sym, _sym249
+                        )
+                    else:
+                        _refl_block249 = ""
+                except Exception:  # noqa: BLE001
+                    _refl_block249 = ""
+            else:
+                _refl_block249 = _dm249.build_reflection_block(_decisions249, _sym249)
+            if _refl_block249:
+                prompt = prompt + "\n\n" + _refl_block249
+                self._log.debug(f"[Vision:249] DecisionMemory block injected for {_sym249}")
+        except Exception as _dm249_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:249] DecisionMemory skipped: {_dm249_exc}")
+
         # Story 180 — TradeAnnotationWatcher: inject analyst hints (Aider Watch Mode pattern).
         # Reads data/trade_hints.json lazily (only if mtime changed).
         # Analyst drops {"symbol": "BTC", "bias": "LONG", "note": "FOMC amanhã"} in the file
@@ -426,6 +472,28 @@ class Vision(BaseAgent[TradingSignal]):
         except Exception as _comp170_exc:  # noqa: BLE001
             self._log.debug(f"[Vision:170] ChatHistoryCompressor skipped: {_comp170_exc}")
 
+        # Story 199 — CycleCondensationEngine: condensa histórico se context window cheia.
+        # OpenHands Condenser/CondensationAction: emite CondensationRecord e descarta metade antiga.
+        # Integra com CycleConversationMemory (Story 198) e ContextWindowTracker (Story 159).
+        # Fails silently.
+        try:
+            from src.services.cycle_condensation_engine import get_cycle_condensation_engine  # noqa: WPS433
+            from src.services.cycle_conversation_memory import get_cycle_conversation_memory  # noqa: WPS433
+            _cond199 = get_cycle_condensation_engine()
+            _mem199 = get_cycle_conversation_memory()
+            _sym199 = getattr(analysis, "symbol", symbol) if analysis else symbol
+            _prompt_tokens_199 = len(prompt) // 4
+            _max_tokens_199 = _mem199.max_tokens_budget
+            _cond199.maybe_condense(
+                memory=_mem199,
+                symbol=_sym199,
+                current_tokens=_prompt_tokens_199,
+                max_tokens=_max_tokens_199,
+                cycle_id=f"vision:{_sym199}",
+            )
+        except Exception as _cond199_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:199] CondensationEngine skipped: {_cond199_exc}")
+
         # Story 178 — ArchitectEditorVision: two-model workflow (Aider architect/editor pattern).
         # If settings.vision_architect_editor_enabled=True:
         #   Call 1 (architect): free-form trade thesis from current model
@@ -453,6 +521,29 @@ class Vision(BaseAgent[TradingSignal]):
             except Exception as _arch178_exc:  # noqa: BLE001
                 self._log.debug(f"[Vision:178] architect call skipped: {_arch178_exc}")
 
+        # Story 250 — Structured Output path (primary); fallback to raw JSON.
+        # Tenta primeiro via chat_structured() (OpenAI schema garantido).
+        # Se falhar por qualquer razão, cai no path clássico _call_llm() + _extract_json().
+        _structured250: "TradingSignalOutput | None" = None
+        try:
+            _structured250 = await self._call_llm_structured(prompt)
+        except Exception as _s250_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:250] structured path error: {_s250_exc}")
+
+        if _structured250 is not None:
+            # Caminho feliz — constrói TradingSignal a partir do modelo Pydantic
+            try:
+                payload250 = _structured250.model_dump()
+                signal = self._build_signal(payload250, symbol=symbol, fallback_price=price)
+                self._log.info(f"[Vision:250] structured ✓ {signal.summary()}")
+                return signal
+            except Exception as _b250_exc:  # noqa: BLE001
+                self._log.debug(
+                    f"[Vision:250] build_signal from structured failed: {_b250_exc} — "
+                    "falling back to raw JSON path"
+                )
+
+        # Fallback — path clássico (raw JSON)
         try:
             raw = await self._call_llm(prompt)
         except Exception as exc:  # noqa: BLE001
@@ -666,9 +757,23 @@ class Vision(BaseAgent[TradingSignal]):
             import asyncio as _asyncio194  # noqa: WPS433
             _result = None
             _last_exc_194 = None
+            # Story 207 — MekkaAgentBackstory: enriquece _SYSTEM_PROMPT com backstory+performance.
+            # CrewAI Agent.backstory: persona + goal + performance notes → injetado no LLM.
+            # Fails silently: se indisponível, usa _SYSTEM_PROMPT original.
+            _effective_system_prompt = _SYSTEM_PROMPT
+            try:
+                from src.services.mekka_agent_backstory import get_mekka_agent_backstory  # noqa: WPS433
+                _backstory207 = get_mekka_agent_backstory()
+                _extra_ctx207 = f"User prompt context: {user_prompt[:200]}"
+                _enriched207 = _backstory207.build_system_prompt("VISION", _extra_ctx207)
+                if len(_enriched207) > 100:  # sanity check
+                    _effective_system_prompt = _enriched207 + "\n\n---\n\n" + _SYSTEM_PROMPT
+            except Exception as _bs207_exc:  # noqa: BLE001
+                self._log.debug(f"[Vision:207] AgentBackstory skipped: {_bs207_exc}")
+
             for _attempt194 in range(1, _retry194.config.max_retries + 2):
                 try:
-                    _result = await self._llm.chat(_SYSTEM_PROMPT, user_prompt)
+                    _result = await self._llm.chat(_effective_system_prompt, user_prompt)
                     _retry194._total_successes += 1
                     _retry194._total_calls += 1
                     return _result
@@ -690,6 +795,42 @@ class Vision(BaseAgent[TradingSignal]):
         except ImportError:
             # VisionRetryMixin não disponível — fallback direto
             return await self._llm.chat(_SYSTEM_PROMPT, user_prompt)
+        # (fim do try ImportError — nunca atingido diretamente)
+
+    async def _call_llm_structured(
+        self, user_prompt: str
+    ) -> "TradingSignalOutput | None":
+        """Story 250 — Structured Output path.
+
+        Chama chat_structured() com TradingSignalOutput como response_model.
+        OpenAI: client.beta.chat.completions.parse() — schema garantido.
+        Anthropic: JSON mode + model_validate() como fallback.
+
+        Reutiliza a mesma lógica de AgentBackstory (207) do _call_llm().
+        Retorna None em qualquer erro — caller cai no path raw JSON.
+        """
+        _effective_system_prompt = _SYSTEM_PROMPT
+        try:
+            from src.services.mekka_agent_backstory import get_mekka_agent_backstory  # noqa: WPS433
+            _backstory207 = get_mekka_agent_backstory()
+            _extra_ctx207 = f"User prompt context: {user_prompt[:200]}"
+            _enriched207 = _backstory207.build_system_prompt("VISION", _extra_ctx207)
+            if len(_enriched207) > 100:
+                _effective_system_prompt = _enriched207 + "\n\n---\n\n" + _SYSTEM_PROMPT
+        except Exception as _bs_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:250] AgentBackstory skipped: {_bs_exc}")
+
+        try:
+            result = await self._llm.chat_structured(
+                _effective_system_prompt,
+                user_prompt,
+                TradingSignalOutput,
+                agent_id="VISION",
+            )
+            return result  # TradingSignalOutput instance or None
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:250] chat_structured error: {exc}")
+            return None
 
     async def _pre_reason(self, analysis_prompt: str) -> str:
         """

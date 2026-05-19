@@ -4,7 +4,7 @@
 arquitetural. Stories abaixo são lidas em ordem numérica dentro de cada
 bloco.
 
-Última story entregue: **197** (CycleBatchedExporter — exportação de eventos em lotes para webhook externo com flush automático e fail-silent; padrão OpenHands BatchedWebHook).
+Última story entregue: **223** (BacktestRunner + CLI — orquestra o pipeline completo SignalLoader→Simulator→EquityCurve→MetricsEngine + relatório Markdown + `python -m src.backtest run`).
 Stories 047–124 entregues e registradas no CHANGELOG.md (versões 0.2.0–0.8.0).
 
 ---
@@ -292,6 +292,160 @@ do Vision quando preço/regime não mudaram materialmente (MetaGPT Incremental D
 - [185 — CycleSOP Dashboard: especificação declarativa de 9 estágios + GET /api/cycle-sop (MetaGPT SOP)](story-185-cycle-sop.md)
 - [186 — SignalOutcomeMemory Vision Integration: similarity search regime+action + prompt block "past performance" (MetaGPT LongTermMemory)](story-186-signal-outcome-memory.md)
 - [187 — IncrementalCycleSkip NickFury: skip Vision LLM call quando preço/regime estáveis + GET /api/incremental-guard (MetaGPT Incremental)](story-187-incremental-cycle-skip.md)
+
+## Milestone 35 — Backtesting Engine: SignalLoader, OutcomeSimulator, EquityCurve, MetricsEngine, BacktestRunner + CLI
+
+Pipeline completo de backtesting sobre sinais históricos do banco: BacktestSignalLoader lê sinais e trades
+reais do SQLite via MekkaRepository e constrói BacktestTrade com outcome=WIN/LOSS já preenchido para trades
+reais, BacktestOutcomeSimulator usa modelo probabilístico (`p_win = clip(0.45 × min(rr/2, 1.5) × (0.70 + conf×0.60), 0.10, 0.90)`)
+para simular outcomes de sinais sem trade correspondente, BacktestEquityCurve constrói a curva de equity
+cronológica com drawdown ponto a ponto, BacktestMetricsEngine computa o conjunto completo de métricas
+(win_rate, profit_factor, expectancy, Sharpe/Sortino anualizado, max_drawdown, avg_rr, days_covered),
+e BacktestRunner orquestra o pipeline inteiro retornando BacktestSummary com relatório Markdown via CLI.
+
+Última story entregue: **243** (DebateModerator → integração Vision pipeline).
+
+- [219 — BacktestTrade model + BacktestSignalLoader: Pydantic models (BacktestTrade, EquityPoint, BacktestMetrics, BacktestSummary) + loader assíncrono do DB](story-219-backtest-signal-loader.md)
+- [220 — BacktestOutcomeSimulator: simula WIN/LOSS por geometria SL/TP + modelo probabilístico R:R × confiança, seed reproduzível](story-220-backtest-outcome-simulator.md)
+- [221 — BacktestEquityCurve: curva de equity cronológica + drawdown_pct ponto a ponto, ponto inicial START, floor em 0](story-221-backtest-equity-curve.md)
+- [222 — BacktestMetricsEngine: Sharpe/Sortino anualizado, profit_factor, win_rate, max_drawdown USD/%, expectancy, avg_rr, days_covered](story-222-backtest-metrics-engine.md)
+- [223 — BacktestRunner + CLI: orquestra pipeline completo → BacktestSummary + relatório Markdown + `python -m src.backtest run --symbol BTC --days 30`](story-223-backtest-runner-cli.md)
+
+## Milestone 36 — Backtesting Dashboard (Stories 224-228)
+
+POST /api/backtest/run + GET /api/backtest/result + GET /api/backtest/history. BacktestBenchmark compara
+estratégia vs BTC buy-hold. BacktestTelegramReport envia relatório Markdown após cada run. BacktestScheduler
+executa daily às 00h UTC e mantém histórico de 30 runs em memória. Dashboard: página "Backtest" com 8 cards
+de métricas, equity curve interativa (Chart.js), drawdown chart e benchmark comparison row.
+
+- [224 — BacktestAPI: POST /api/backtest/run + GET /api/backtest/result + helper _backtest_summary_to_dict](story-224-backtest-api.md)
+- [225 — BacktestPanel: página "backtest" no dashboard — 8 metric cards + equity curve + drawdown chart + benchmark row (Chart.js)](story-225-backtest-panel.md)
+- [226 — BacktestBenchmark: buy-and-hold do símbolo no mesmo período; compara retorno vs estratégia e calcula alfa](story-226-backtest-benchmark.md)
+- [227 — BacktestTelegramReport: relatório Markdown compacto (capital, WR, Sharpe, MaxDD, alfa vs benchmark) via TelegramAlerter](story-227-backtest-telegram-report.md)
+- [228 — BacktestScheduler: background task diário às 00h UTC; histórico de 30 runs; GET /api/backtest/history](story-228-backtest-scheduler.md)
+
+## Milestone 37 — Live Performance Tracking (Stories 229-233)
+
+RollingMetricsService computa Sharpe/win_rate/expectancy/maxDD rolling. PerformanceTracker compara real vs
+backtest. DivergenceAlerter categoriza divergências em LOW/MEDIUM/HIGH com recomendações acionáveis.
+Dashboard: página "Analytics" com painel de métricas rolling + caixa de alertas de divergência.
+
+- [229 — PerformanceTracker: snapshot comparativo real vs backtest (PerformanceSnapshot Pydantic)](story-229-performance-tracker.md)
+- [230 — RollingMetricsService: Sharpe anualizado, win_rate, expectancy, maxDD rolling de trades do DB](story-230-rolling-metrics-service.md)
+- [231 — DivergenceAlerter: LOW/MEDIUM/HIGH com recomendação por categoria (drawdown/win_rate/sharpe)](story-231-divergence-alerter.md)
+- [232 — GET /api/performance/rolling: métricas rolling + Δ vs backtest em cache](story-232-perf-rolling-endpoint.md)
+- [233 — GET /api/performance/divergence: relatório JSON de divergências real vs simulado](story-233-perf-divergence-endpoint.md)
+
+## Milestone 38 — Risk Dashboard Avançado (Stories 234-238)
+
+Três novos endpoints de risco: Batman verdicts timeline (APPROVED/REDUCED/REJECTED por dia, Chart.js stacked bar),
+regime heatmap (ciclos por regime × hora UTC), concentration heatmap (% capital por símbolo, doughnut chart).
+Dashboard: seções batman-timeline e concentration na página "Analytics".
+
+- [234 — (reservada — equity curve interativa enhancements futuros)](story-234-equity-curve-interactive.md)
+- [235 — GET /api/risk/batman-timeline: timeline de verdicts Batman — chart stacked + tabela últimos 20](story-235-batman-timeline.md)
+- [236 — GET /api/risk/regime-heatmap: contagem ciclos por regime × hora UTC em janela configurável](story-236-regime-heatmap.md)
+- [237 — (reservada — Deadpool analytics panel)](story-237-deadpool-analytics.md)
+- [238 — GET /api/risk/concentration: % capital por símbolo + doughnut chart + trade count + PnL por símbolo](story-238-concentration-heatmap.md)
+
+## Milestone 39 — Multiagent Debate (Stories 239-243)
+
+DebateModerator (L1.5): coordena N rodadas de debate entre agentes L1 antes do Vision. ConsensusWeighter:
+agrega votos ponderados por confiança × rodada (round_multiplier 1.0→1.2×). DebateVerdictLogger: persiste
+no audit_log com vote_table. Integração no ProfessorX: settings.debate_enabled (default False),
+MarketAnalysis.debate_verdict, fire-and-forget log. Dashboard: painel Debate com run on-demand + histórico.
+POST /api/debate/run + GET /api/debate/history.
+
+- [239 — DebateModerator: coordena debate L1.5 — max_rounds, consensus_threshold, heurísticas por especialidade de agente](story-239-debate-moderator.md)
+- [240 — AgentDebateRound: protocolo de coleta de votos em paralelo com timeout por agente](story-240-agent-debate-round.md)
+- [241 — ConsensusWeighter: agrega votos ponderados confiança × round_multiplier, detecta dissidentes](story-241-consensus-weighter.md)
+- [242 — DebateVerdictLogger: persiste DebateVerdict no audit_log + fetch_recent para histórico](story-242-debate-verdict-logger.md)
+- [243 — Integração ProfessorX: settings.debate_enabled + MarketAnalysis.debate_verdict + POST /api/debate/run + GET /api/debate/history](story-243-debate-integration.md)
+
+## Milestone 34 — Monitoring & Alerting: DrawdownMonitor, PositionConcentrationAlerter, IntradayPnLTracker, FundingRateMonitor, AlertThrottleManager
+
+Cinco serviços de monitoramento e alertas Telegram ricos para o operador:
+DrawdownMonitor dispara alertas escalonados em 3 níveis (WARNING/CRITICAL/KILL) conforme drawdown intraday
+progride em relação ao limite diário configurado, PositionConcentrationAlerter monitora quando uma posição
+individual excede o percentual máximo da equity após abertura, IntradayPnLTracker mantém snapshots horários
+de P&L realizado e não-realizado e dispara alertas em marcos configuráveis (+3%/+5% ganho, -2%/-5% perda),
+FundingRateMonitor monitora proativamente taxas de funding extremas independente de trades ativos e alerta
+em níveis WARN e BLOCK reutilizando os thresholds do Batman, e AlertThrottleManager centraliza o dedup/throttle
+de todos os alertas com cooldowns configuráveis por tipo de evento para prevenir fadiga do operador.
+
+Última story entregue: **217** (AlertThrottleManager).
+
+- [213 — DrawdownMonitor: alertas escalonados WARNING/CRITICAL/KILL em 50%/80%/100% do limite diário, dedup por nível](story-213-drawdown-monitor.md)
+- [214 — PositionConcentrationAlerter: alerta quando posição individual excede max_concentration_pct da equity, dedup por símbolo](story-214-position-concentration-alerter.md)
+- [215 — IntradayPnLTracker: snapshots horários de P&L realizado+não-realizado, alertas em marcos +3%/+5%/+10% e -2%/-5%](story-215-intraday-pnl-tracker.md)
+- [216 — FundingRateMonitor: alertas proativos de funding extremo (WARN/BLOCK) reutilizando thresholds do Batman](story-216-funding-rate-monitor.md)
+- [217 — AlertThrottleManager: gateway centralizado de dedup e throttle, cooldowns por evento, métricas de supressão](story-217-alert-throttle-manager.md)
+- [218 — Monitor Wiring: integração dos 4 monitores + AlertThrottleManager ao NickFury.__init__ e run_main_cycle()](story-218-monitor-wiring-nick-fury.md)
+
+## Milestone 33 — LangGraph Patterns: StateGraph, ConditionalRouter, Checkpointer, ParallelBranch, GraphInterrupt
+
+Cinco padrões do framework LangGraph (LangChain AI) mapeados para o pipeline Mekka Trading:
+CycleStateGraph + CycleCompiledGraph replicam o StateGraph/CompiledGraph do LangGraph com nós tipados,
+arestas fixas e condicionais, e guard de max_steps (LangGraph StateGraph.compile()), CycleConditionalRouter
+implementa roteamento por regras priorizadas com operadores EQ/NEQ/GT/LT/IN/CONTAINS/TRUTHY/FALSY e
+avaliação de dotted-path no estado do ciclo (LangGraph conditional_edges), CycleGraphCheckpointer persiste
+snapshots do estado após cada nó com FIFO eviction por thread e suporte a time-travel replay (LangGraph
+MemorySaver/checkpointer), CycleParallelBranch executa análises multi-símbolo em paralelo via
+ThreadPoolExecutor + asyncio.gather com fan-in por MAX_CONFIDENCE/MAJORITY_VOTE/ALL (LangGraph Send() API),
+e CycleGraphInterrupt implementa pause/resume Human-in-the-Loop com estados PENDING/APPROVED/REJECTED/
+TIMEOUT/SKIPPED e on_timeout configurável (LangGraph interrupt()/Command(resume=...)).
+
+Última story entregue: **212** (CycleGraphInterrupt).
+
+- [208 — CycleStateGraph + CycleCompiledGraph NickFury: typed state dict fluindo por nós com arestas fixas e condicionais, guard max_steps (LangGraph StateGraph)](story-208-cycle-state-graph.md)
+- [209 — CycleConditionalRouter NickFury: roteamento por regras priorizadas com RouterCondition + RouterRule, dotted-path evaluation (LangGraph conditional_edges)](story-209-cycle-conditional-router.md)
+- [210 — CycleGraphCheckpointer NickFury: snapshots de estado após cada nó, FIFO eviction, time-travel replay (LangGraph MemorySaver)](story-210-cycle-graph-checkpointer.md)
+- [211 — CycleParallelBranch NickFury: fan-out/fan-in multi-símbolo com ThreadPoolExecutor + asyncio.gather, estratégias MAX_CONFIDENCE/MAJORITY_VOTE/ALL (LangGraph Send())](story-211-cycle-parallel-branch.md)
+- [212 — CycleGraphInterrupt NickFury: pause/resume Human-in-the-Loop com timeout e on_timeout configurável, estados PENDING/APPROVED/REJECTED/TIMEOUT/SKIPPED (LangGraph interrupt)](story-212-cycle-graph-interrupt.md)
+
+## Milestone 32 — AutoGen / CrewAI Patterns: GroupChat, ConversationSession, TaskDefinition, PipelineOrchestrator, AgentBackstory
+
+Cinco padrões dos frameworks AutoGen (Microsoft) e CrewAI mapeados para o pipeline Mekka Trading:
+CycleGroupChat + CycleGroupChatManager replicam o AutoGen GroupChat com seleção de speaker ROUND_ROBIN/
+RANDOM/CUSTOM e consenso por maioria de votos LONG/SHORT/HOLD entre agentes participantes (AutoGen
+GroupChat+GroupChatManager), MekkaConversationSession implementa o padrão AutoGen
+ConversableAgent.initiate_chat() com max_turns, is_termination_msg callback, summary_method e carryover
+para sessões estruturadas entre pares de agentes (AutoGen ConversableAgent.initiate_chat()),
+CycleTaskDefinition define tarefas declarativas com expected_output, validator_fn e context chaining
+entre stages (CrewAI Task+expected_output), CyclePipelineOrchestrator executa pipelines SEQUENTIAL e
+HIERARCHICAL com skip automático do estágio IRONMAN quando action=HOLD no modo hierárquico (CrewAI
+Process+Crew.kickoff()), e MekkaAgentBackstory registra role + goal + backstory + performance notes de
+cada agente (NICKFURY/VISION/BATMAN/IRONMAN) e injeta um system prompt enriquecido no LLM call do Vision
+com notas adaptativas de performance (CrewAI Agent.backstory).
+
+Última story entregue: **207** (MekkaAgentBackstory).
+
+- [203 — CycleGroupChat + CycleGroupChatManager NickFury: roundtable multi-agente com consenso LONG/SHORT/HOLD (AutoGen GroupChat)](story-203-cycle-group-chat.md)
+- [204 — MekkaConversationSession NickFury: sessões estruturadas entre pares de agentes com termination callback e carryover (AutoGen initiate_chat)](story-204-mekka-conversation-session.md)
+- [205 — CycleTaskDefinition NickFury: tarefas declarativas com expected_output, validator_fn e context chaining (CrewAI Task)](story-205-cycle-task-definition.md)
+- [206 — CyclePipelineOrchestrator NickFury: pipeline SEQUENTIAL/HIERARCHICAL com skip IRONMAN em HOLD (CrewAI Process+Crew.kickoff)](story-206-cycle-pipeline-orchestrator.md)
+- [207 — MekkaAgentBackstory Vision + NickFury: backstory adaptativo injetado no system prompt com performance notes (CrewAI Agent.backstory)](story-207-mekka-agent-backstory.md)
+
+## Milestone 31 — OpenHands Patterns Wave 2: Conversation Memory, Condensation Engine, Artifact Store, Action Risk Analyzer, State Resetter
+
+Cinco padrões novos do framework OpenHands/OpenHands (não cobertos pelo Milestone 30) mapeados
+para o pipeline Mekka Trading: CycleConversationMemory centraliza o histórico de janela de
+contexto por símbolo com build_messages() respeitando token budget (OpenHands ConversationMemory),
+CycleCondensationEngine emite CondensationRecord quando o uso da context window excede o threshold
+e aplica estratégia HALVE ou SUMMARIZE (OpenHands Condenser/CondensationAction), CycleArtifactStore
+guarda artefatos de ciclo em memória com interface put/get/list/delete e path canônico symbol/cycle/type
+(OpenHands InMemoryFileStore), CycleActionRiskAnalyzer classifica cada ação do pipeline em LOW/MEDIUM/HIGH
+com escalada por notional, alavancagem e regime VOLATILE (OpenHands SecurityAnalyzer LLM risk), e
+CycleStateResetter executa reset coordenado fail-silent de todos os singletons de estado efêmero
+entre ciclos, preservando logs de auditoria (OpenHands AgentController.reset()).
+
+Última story entregue: **202** (CycleStateResetter).
+
+- [198 — CycleConversationMemory Vision + NickFury: histórico de janela de contexto por símbolo com token budget (OpenHands ConversationMemory)](story-198-cycle-conversation-memory.md)
+- [199 — CycleCondensationEngine Vision: condensação de histórico por threshold + CondensationRecord (OpenHands Condenser)](story-199-cycle-condensation-engine.md)
+- [200 — CycleArtifactStore NickFury: InMemoryFileStore para artefatos de ciclo com put/get/list (OpenHands FileStore)](story-200-cycle-artifact-store.md)
+- [201 — CycleActionRiskAnalyzer NickFury: classificação LOW/MEDIUM/HIGH de ações antes da execução (OpenHands SecurityAnalyzer)](story-201-cycle-action-risk-analyzer.md)
+- [202 — CycleStateResetter NickFury: reset coordenado de estado efêmero entre ciclos (OpenHands AgentController.reset)](story-202-cycle-state-resetter.md)
 
 ## Milestone 30 — OpenHands Patterns Wave 1: Sub-Agent Delegate, Retry Mixin, Agent State Machine, Event Source Tagger, Batched Exporter
 

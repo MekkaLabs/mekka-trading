@@ -408,6 +408,18 @@ const AGENTS = [
                a:"#dc2626", A:"#7f1d1d", p:"#1c1c2c", P:"#0c0c1c" },
   },
   {
+    id: "dailypnl",
+    name: "DailyPnLWriter",
+    role: "Reporting",
+    layer: "L4",
+    color: "#22c55e",
+    summary: "Drafts the daily PnL note and incident summaries.",
+    task: "Writing close-of-day report v07",
+    palette: { k:"#1a1a1a", h:"#c0a060", H:"#806838", s:"#f0c8a0", S:"#c09870",
+               e:"#000000", m:"#7a3a2a", c:"#7c2d12", C:"#451a09",
+               a:"#facc15", A:"#a16207", p:"#1c1c2c", P:"#0c0c1c" },
+  },
+  {
     id: "vision",
     name: "Vision",
     role: "Strategy Synthesis",
@@ -537,56 +549,120 @@ const AGENTS = [
     overlay: { sprite: "MASK", palette: { A:"#dc2626", a:"#dc2626", e:"#ffffff" } },
   },
   {
+    id: "nighttrader",
+    name: "NightTrader",
+    role: "Asia Session",
+    layer: "L3",
+    color: "#fb923c",
+    summary: "Owns the overnight book — Asia open through London handoff.",
+    task: "JPY carry, 2 positions open",
+    palette: { k:"#0a0a14", h:"#1c0a3e", H:"#0a0020", s:"#a78bfa", S:"#5b21b6",
+               e:"#fde047", m:"#1a0a0a", c:"#0a0a14", C:"#000000",
+               a:"#7c3aed", A:"#3b0764", p:"#0a0a14", P:"#000000" },
+    overlay: { sprite: "MASK", palette: { A:"#0a0a14", a:"#0a0a14", e:"#fde047" } },
+  },
+  {
+    id: "hawkeye",
+    name: "Hawkeye",
+    role: "Microstructure",
+    layer: "L1",
+    color: "#38bdf8",
+    summary: "Picks resting orders. Surgical level-2 reader.",
+    task: "Sniping hidden bids on SOL/USDT",
+    palette: { k:"#1a1a0a", h:"#7c2d12", H:"#451a09", s:"#e8b888", S:"#b88860",
+               e:"#0e7490", m:"#7a3a2a", c:"#5b21b6", C:"#3b0764",
+               a:"#fde047", A:"#a16207", p:"#27272a", P:"#0a0a0a" },
+  },
+  {
+    id: "hulk",
+    name: "Hulk",
+    role: "Risk Stress Test",
+    layer: "L3",
+    color: "#fb923c",
+    summary: "Replays scenarios at 3-10× notional. Breaks things on purpose.",
+    task: "Stress: 2008 vol regime — caps holding",
+    palette: { k:"#0a1a0a", h:"#0a1a0a", H:"#000000", s:"#22c55e", S:"#15803d",
+               e:"#fde047", m:"#0a0a0a", c:"#7c2d12", C:"#451a09",
+               a:"#cfd9ec", A:"#9ca3af", p:"#3f3f46", P:"#27272a" },
+  },
+  {
     id: "flash",
     name: "Flash",
-    role: "Momentum Scalper",
-    layer: "L1.5",
-    color: "#fbbf24",
-    summary: "Detecta micro-momentum em janelas 5m–15m. Advisory — emite MomentumSignal UP/DOWN/SIDEWAYS.",
-    task: "Detectando spike de volume — BTC 15m",
-    palette: { k:"#1a0a0a", h:"#dc2626", H:"#7f1d1d", s:"#f5c8a0", S:"#c59870",
-               e:"#fde047", m:"#7a3a2a", c:"#dc2626", C:"#7f1d1d",
-               a:"#fde047", A:"#a16207", p:"#dc2626", P:"#7f1d1d" },
+    role: "Low-Latency Execution",
+    layer: "L1",
+    color: "#facc15",
+    summary: "Ultra-fast tape reader. Sub-ms reaction.",
+    task: "Front-running latency on 3 venues",
+    palette: { k:"#1a0a0a", h:"#7c2d12", H:"#451a09", s:"#f5c8a0", S:"#c59870",
+               e:"#1e40af", m:"#7a3a2a", c:"#dc2626", C:"#7f1d1d",
+               a:"#facc15", A:"#a16207", p:"#dc2626", P:"#7f1d1d" },
+    overlay: { sprite: "MASK", palette: { A:"#dc2626", a:"#dc2626", e:"#facc15" } },
   },
   {
     id: "wolverine",
     name: "Wolverine",
-    role: "Recovery Agent",
+    role: "Position Cutter",
     layer: "L3",
     color: "#fb923c",
-    summary: "Monitor de posições abertas. Classifica risco (HOLD/TIGHTEN/TRAIL/CLOSE). Read-only — nunca toca SDK.",
-    task: "Vigilando 3 posições — PnL nominal",
-    palette: { k:"#1a1a0a", h:"#fde047", H:"#a16207", s:"#e8b888", S:"#b88860",
+    summary: "Slices losing positions fast. No mercy on stops.",
+    task: "Stopped 2 longs — net -0.18%",
+    palette: { k:"#1a0a0a", h:"#0f1f5c", H:"#0a0a3a", s:"#e8b888", S:"#b88860",
                e:"#000000", m:"#5a3a2a", c:"#1e40af", C:"#0f1f5c",
-               a:"#fde047", A:"#a16207", p:"#fde047", P:"#a16207" },
-    overlay: { sprite: "MASK", palette: { A:"#1e40af", a:"#0f1f5c", e:"#fde047" } },
+               a:"#fde047", A:"#a16207", p:"#1e40af", P:"#0f1f5c" },
+    overlay: { sprite: "MASK", palette: { A:"#1e40af", a:"#fde047", e:"#000000" } },
   },
   {
     id: "cyclops",
     name: "Cyclops",
-    role: "Position Monitor",
+    role: "Order Sniper",
     layer: "L3",
     color: "#fb923c",
-    summary: "Monitora SL/TP e ordens órfãs. Aciona partial closes, trailing stops e auto-TP ladder.",
-    task: "Escaneando brackets SL/TP — 3 posições ativas",
-    palette: { k:"#0a1a2a", h:"#1e3a8a", H:"#0f1f5c", s:"#e8c890", S:"#b8a060",
-               e:"#dc2626", m:"#7a3a2a", c:"#1e40af", C:"#0f1f5c",
-               a:"#facc15", A:"#a16207", p:"#0a0a14", P:"#000000" },
-    overlay: { sprite: "GLASSES", palette: { A:"#dc2626", a:"#dc2626" } },
+    summary: "Precision execution. Fires only when the line is clean.",
+    task: "Aiming 4 limit orders at level 2",
+    palette: { k:"#1a0a0a", h:"#5a3826", H:"#3d2817", s:"#e8b888", S:"#b88860",
+               e:"#ef4444", m:"#5a2a1a", c:"#1e40af", C:"#0f1f5c",
+               a:"#fde047", A:"#a16207", p:"#1e40af", P:"#0f1f5c" },
+    overlay: { sprite: "VISOR", palette: { A:"#1c1c1c", a:"#ef4444", e:"#ef4444" } },
   },
   {
     id: "deadpool",
     name: "Deadpool",
-    role: "Performance Analytics",
+    role: "Chaos Hedger",
     layer: "L2",
     color: "#a78bfa",
-    summary: "Lê SQLite e computa win rate, Sharpe, drawdown, aprovação Batman. Emite PerformanceVerdict.",
-    task: "Calculando Sharpe ratio — últimos 30 dias",
-    palette: { k:"#1a0a0a", h:"#0a0a0a", H:"#0a0a0a", s:"#d4a884", S:"#a47854",
-               e:"#ffffff", m:"#1a0a0a", c:"#dc2626", C:"#7f1d1d",
-               a:"#1c1c1c", A:"#0a0a0a", p:"#1c1c1c", P:"#0a0a0a" },
-    overlay: { sprite: "MASK", palette: { A:"#dc2626", a:"#dc2626", e:"#ffffff" } },
+    summary: "Tail-risk specialist. Buys cheap insurance — loudly.",
+    task: "Loading OTM puts on QQQ — laughing",
+    palette: { k:"#1a0a0a", h:"#7f1d1d", H:"#451209", s:"#dc2626", S:"#7f1d1d",
+               e:"#0a0a0a", m:"#0a0a0a", c:"#dc2626", C:"#7f1d1d",
+               a:"#0a0a0a", A:"#1c1c1c", p:"#0a0a0a", P:"#000000" },
+    overlay: { sprite: "MASK", palette: { A:"#dc2626", a:"#dc2626", e:"#f9fafb" } },
   },
+];
+
+// Visor overlay — Cyclops style horizontal red band across eyes
+const VISOR_OVERLAY = [
+  "................",
+  "................",
+  "................",
+  "................",
+  "................",
+  "...AAAAAAAAAA...",
+  "...AaeeAAeeaA...",
+  "...AAAAAAAAAA...",
+  "................",
+  "................",
+  "................",
+  "................",
+  "................",
+  "................",
+  "................",
+  "................",
+  "................",
+  "................",
+  "................",
+  "................",
+  "................",
+  "................",
 ];
 
 const OVERLAYS = {
@@ -595,6 +671,7 @@ const OVERLAYS = {
   MASK: MASK_OVERLAY,
   EYEPATCH: EYEPATCH_OVERLAY,
   GLASSES: GLASSES_OVERLAY,
+  VISOR: VISOR_OVERLAY,
 };
 
 // Walking leg overlays: paint OVER rows 18-21 of the base sprite to show a
@@ -660,16 +737,68 @@ function drawBubble(ctx, x, y, icon, color = "#cfd9ec") {
   }
 }
 
+// Wheelchair (drawn UNDER an agent whose legs are hidden). The chair is
+// 16w x 12h, drawn at (x, y+12) so the seat overlaps the agent's hips and
+// the wheels sit on the floor at y+22.
+function drawWheelchair(ctx, x, y, frame, opts = {}) {
+  const dir = opts.dir || 0; // 0 idle, > 0 wheels spin forward, < 0 reverse
+  // Erase the pants section of the base sprite — paint chair seat over it.
+  // Seat
+  ctx.fillStyle = "#1c1c1c"; ctx.fillRect(x + 2, y + 16, 12, 4);
+  ctx.fillStyle = "#3a3a3a"; ctx.fillRect(x + 2, y + 16, 12, 1);
+  // Armrests
+  ctx.fillStyle = "#0a0a0a"; ctx.fillRect(x + 1, y + 12, 1, 6);
+  ctx.fillStyle = "#0a0a0a"; ctx.fillRect(x + 14, y + 12, 1, 6);
+  // Backrest hint
+  ctx.fillStyle = "#1c1c1c"; ctx.fillRect(x + 2, y + 11, 12, 2);
+  // Wheels — large left + small right (motorized chair); spokes animate
+  // Left wheel (8w, 8h at floor)
+  function drawWheel(cx, cy, r, spinFrame) {
+    // outer ring
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const d2 = dx*dx + dy*dy;
+        if (d2 <= r*r && d2 >= (r-1)*(r-1)) {
+          ctx.fillStyle = "#0a0a0a"; ctx.fillRect(cx+dx, cy+dy, 1, 1);
+        }
+      }
+    }
+    // hub
+    ctx.fillStyle = "#cfd9ec"; ctx.fillRect(cx-1, cy-1, 2, 2);
+    // 4 spokes rotating
+    ctx.fillStyle = "#3a3a3a";
+    const spokes = [0, Math.PI/4, Math.PI/2, 3*Math.PI/4];
+    for (const base of spokes) {
+      const a = base + spinFrame * 0.15;
+      for (let i = 1; i < r-1; i++) {
+        const px = Math.round(cx + Math.cos(a) * i);
+        const py = Math.round(cy + Math.sin(a) * i);
+        ctx.fillRect(px, py, 1, 1);
+      }
+    }
+  }
+  // Big back wheel left side
+  drawWheel(x + 2, y + 19, 4, dir !== 0 ? frame : 0);
+  // Big back wheel right side
+  drawWheel(x + 14, y + 19, 4, dir !== 0 ? frame : 0);
+  // Floor shadow
+  ctx.fillStyle = "rgba(0,0,0,0.4)";
+  ctx.fillRect(x + 1, y + 23, 14, 1);
+}
+
 // Render a complete agent at (x, y) on ctx
 function drawAgent(ctx, agent, x, y, opts = {}) {
   const bobAmt = (opts.bob || 0);
   const walking = !!opts.walking;
+  const wheelchair = !!opts.wheelchair;
   // cape goes BEHIND character
   if (agent.overlay && agent.overlay.sprite === "CAPE") {
     drawSprite(ctx, OVERLAYS.CAPE, x, y + bobAmt, agent.overlay.palette, opts);
   }
   drawSprite(ctx, CHAR_BASE, x, y + bobAmt, agent.palette, opts);
-  if (walking) {
+  if (wheelchair) {
+    drawWheelchair(ctx, x, y + bobAmt, opts.frame || 0, { dir: walking ? (opts.flip ? -1 : 1) : 0 });
+  } else if (walking) {
     const legs = (opts.legFrame || 0) ? WALK_LEGS_B : WALK_LEGS_A;
     drawSprite(ctx, legs, x, y + bobAmt, agent.palette, opts);
   }
@@ -681,5 +810,5 @@ function drawAgent(ctx, agent, x, y, opts = {}) {
   }
 }
 
-Object.assign(window, { CHAR_BASE, CAPE_OVERLAY, OVERLAYS, AGENTS, drawSprite, drawAgent,
+Object.assign(window, { CHAR_BASE, CAPE_OVERLAY, OVERLAYS, AGENTS, drawSprite, drawAgent, drawWheelchair,
   DESK_BACK, DESK_FRONT, PLANT, MUG, POPUP, SERVER, WINDOW, HEX });

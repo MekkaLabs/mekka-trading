@@ -1,1 +1,0 @@
-# Mekka Trading — models package

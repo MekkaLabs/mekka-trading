@@ -4,7 +4,7 @@ type: dashboard
 tags: [dashboard, home, mekka-trading]
 project: mekka-trading
 created: 2026-05-07
-updated: 2026-05-15
+updated: 2026-05-16
 ---
 
 # 🧠 Mekka Trading — Segundo Cérebro
@@ -18,12 +18,13 @@ Este é o vault de conhecimento do projeto: arquitetura, decisões, agentes, run
 
 ---
 
-## 🚀 Estado Atual — 2026-05-15
+## 🚀 Estado Atual — 2026-05-16
 
 | Item | Status |
 |---|---|
 | **Última story entregue** | `136 — MekkaEventBus: pub/sub in-process` |
 | **Milestone atual** | `21 — Memory Intelligence + Adaptive Routing + Observability` |
+| **Mudanças do dia** | `Sem novas stories (apenas refresh de dashboard snapshot)` |
 | **Modo padrão** | `PAPER_TRADING=True` |
 | **Exchanges suportadas** | Hyperliquid (primary), Bybit, Binance (via CCXT) |
 | **Dashboard** | `http://localhost:8787` com WebSocket em tempo real |

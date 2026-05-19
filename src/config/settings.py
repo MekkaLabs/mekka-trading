@@ -450,6 +450,18 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Story 247 — Flash divergence size reduction (Batman gate 3r)
+    flash_divergence_size_reduction: float = Field(
+        default=0.30,
+        ge=0.0,
+        le=0.80,
+        description=(
+            "Batman gate 3r: When Flash signals STRONG momentum opposing the trade "
+            "direction, reduce position size_pct by this fraction. "
+            "0.30 = 30% reduction. 0.0 disables the soft gate."
+        ),
+    )
+
     # Story 083 — Auto-TP Ladder (multi-level partial exits)
     tp_ladder_enabled: bool = Field(
         default=False,
@@ -1061,6 +1073,60 @@ class Settings(BaseSettings):
             "Minimum number of successful proposals required for MoA synthesis. "
             "If fewer proposals succeed (due to API failures), VisionMoA falls "
             "back to the single Vision._run() path. Default 2 of 3."
+        ),
+    )
+
+    # --------------------------------------------------------------------------
+    # Multiagent Debate (Story 239-243 — Milestone 39)
+    # --------------------------------------------------------------------------
+    debate_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, ProfessorX runs a DebateModerator round between L1 agents "
+            "before forwarding MarketAnalysis to Vision. The DebateVerdict is "
+            "attached to MarketAnalysis.debate_verdict and logged to audit_log. "
+            "Adds 1–2 async rounds of heuristic voting (~50ms overhead). "
+            "Set DEBATE_ENABLED=true to activate."
+        ),
+    )
+    debate_max_rounds: int = Field(
+        default=2,
+        ge=1,
+        le=5,
+        description="Maximum debate rounds before forcing consensus. Default 2.",
+    )
+    debate_consensus_threshold: float = Field(
+        default=0.60,
+        ge=0.50,
+        le=1.0,
+        description=(
+            "Minimum weighted vote fraction to declare consensus and stop early. "
+            "Default 0.60 (60%). Lower = stops faster; higher = more rounds."
+        ),
+    )
+
+    # --------------------------------------------------------------------------
+    # Beast — Continuous System Improvement Agent (Story 248)
+    # --------------------------------------------------------------------------
+    beast_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, Beast runs periodic system audits and sends improvement "
+            "proposals via Telegram. Fully read-only — never modifies the system. "
+            "Set BEAST_ENABLED=true to activate."
+        ),
+    )
+    beast_analysis_period_days: int = Field(
+        default=7,
+        ge=1,
+        le=90,
+        description="Number of days Beast looks back when auditing trade and gate stats.",
+    )
+    beast_schedule_cron: str = Field(
+        default="0 9 * * 1",  # every Monday at 09:00 UTC
+        description=(
+            "Cron expression for Beast's automatic analysis schedule. "
+            "Default: every Monday at 09:00 UTC (0 9 * * 1)."
         ),
     )
 

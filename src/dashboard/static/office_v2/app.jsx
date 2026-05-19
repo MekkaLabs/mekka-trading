@@ -3,140 +3,13 @@
 
 const { useState, useEffect, useRef, useMemo } = React;
 
-// ---------------------------------------------------------------------------
-// Trading Mode Panel
-// ---------------------------------------------------------------------------
-const MODE_META = {
-  conservative: { label: "🛡️ Conservador", color: "#22c55e", desc: "Posições pequenas · BTC only · 0.5% · 2x" },
-  balanced:     { label: "⚖️ Balanceado",  color: "#38bdf8", desc: "Configuração padrão · 2% · 5x · BTC/ETH/SOL" },
-  aggressive:   { label: "⚡ Agressivo",   color: "#fb923c", desc: "Máximo desempenho · 5% · 10x · 4 ativos" },
-};
-
-function TradingModePanel() {
-  const [mode, setMode] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [offline, setOffline] = useState(false);
-
-  function loadMode() {
-    fetch('/api/mode?t=' + Date.now())
-      .then(r => {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.json();
-      })
-      .then(d => { setMode(d.mode); setOffline(false); setError(null); })
-      .catch(e => { setOffline(true); setError('API offline: ' + e.message); });
-  }
-
-  useEffect(() => { loadMode(); }, []);
-
-  async function changeMode(newMode) {
-    if (loading || newMode === mode) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch('/api/mode', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: newMode }),
-      });
-      const text = await res.text();
-      if (!res.ok) throw new Error('HTTP ' + res.status + ': ' + text);
-      setMode(newMode);
-      setOffline(false);
-    } catch(e) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  const activeMeta = (!offline && mode) ? MODE_META[mode] : null;
-
-  return (
-    <div style={{
-      background: 'var(--panel)',
-      border: '1px solid var(--line)',
-      borderTop: offline ? '3px solid #ef4444' : (activeMeta ? `3px solid ${activeMeta.color}` : '3px solid var(--line)'),
-      borderRadius: 6,
-      padding: 18,
-      marginBottom: 16,
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-        <div style={{ fontFamily: 'var(--mono)', fontSize: 10, fontWeight: 600, letterSpacing: '0.14em', textTransform: 'uppercase', color: offline ? '#ef4444' : 'var(--orange)' }}>
-          {offline ? '✖ TRADING MODE — OFFLINE' : '⚙ Trading Mode'}
-        </div>
-        {offline && (
-          <button onClick={loadMode} style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--text-dim)', background: 'none', border: '1px solid var(--line)', borderRadius: 3, padding: '2px 6px', cursor: 'pointer' }}>
-            ↻ retry
-          </button>
-        )}
-      </div>
-
-      {offline ? (
-        <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: '#ef4444', lineHeight: 1.6 }}>
-          <div>{error}</div>
-          <div style={{ color: 'var(--text-dim)', marginTop: 6 }}>
-            Reinicie o servidor: <span style={{ color: 'var(--text)' }}>pkill -f "python run.py" &amp;&amp; python run.py --dashboard</span>
-          </div>
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {Object.entries(MODE_META).map(([id, meta]) => {
-            const active = mode === id;
-            return (
-              <button key={id} onClick={() => changeMode(id)} disabled={loading} style={{
-                display: 'flex', alignItems: 'center', gap: 10,
-                padding: '10px 14px',
-                background: active ? `rgba(${hexToRgb(meta.color)},0.12)` : 'rgba(5,11,24,0.6)',
-                border: `1px solid ${active ? meta.color : 'var(--line)'}`,
-                borderRadius: 4,
-                cursor: loading ? 'wait' : 'pointer',
-                textAlign: 'left',
-                transition: 'all 0.15s ease',
-              }}>
-                <div style={{ width: 8, height: 8, borderRadius: '50%', background: active ? meta.color : 'var(--text-mute)', flexShrink: 0, boxShadow: active ? `0 0 6px ${meta.color}` : 'none' }} />
-                <div>
-                  <div style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 600, color: active ? meta.color : 'var(--text)' }}>{meta.label}</div>
-                  <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-dim)', marginTop: 2 }}>{meta.desc}</div>
-                </div>
-                {active && <div style={{ marginLeft: 'auto', fontFamily: 'var(--mono)', fontSize: 9, color: meta.color, letterSpacing: '0.1em' }}>ATIVO</div>}
-              </button>
-            );
-          })}
-        </div>
-      )}
-
-      {error && !offline && <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: '#ef4444', marginTop: 8 }}>{error}</div>}
-      {loading && <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-dim)', marginTop: 8 }}>Aplicando...</div>}
-    </div>
-  );
-}
-
-function hexToRgb(hex) {
-  const r = parseInt(hex.slice(1,3),16);
-  const g = parseInt(hex.slice(3,5),16);
-  const b = parseInt(hex.slice(5,7),16);
-  return `${r},${g},${b}`;
-}
-
 const ACTIONS = [
-  // Layer-4: Nick Fury coordena
-  { id: "fanout",    from: "nickfury",      to: "portfolio",   label: "ASSIGN BOOK",    color: "#22c55e" },
-  // Layer-1→2: sinal percorre a cadeia
-  { id: "synth",     from: "superman",      to: "vision",      label: "FORWARD SIGNAL", color: "#38bdf8" },
-  { id: "flash2vis", from: "flash",         to: "vision",      label: "MOMENTUM",       color: "#fbbf24" },
-  // Layer-2→3: Vision → Batman → IronMan
-  { id: "exec",      from: "vision",        to: "batman",      label: "RISK GATE",      color: "#fb923c" },
-  { id: "approve",   from: "batman",        to: "ironman",     label: "APPROVED",       color: "#facc15" },
-  // Layer-3 recovery loop
-  { id: "recovery",  from: "wolverine",     to: "batman",      label: "RECOVERY PLAN",  color: "#fb923c" },
-  { id: "monitor",   from: "cyclops",       to: "ironman",     label: "MONITOR SL/TP",  color: "#fbbf24" },
-  // Analytics → Command
-  { id: "perf",      from: "deadpool",      to: "nickfury",    label: "PERF REPORT",    color: "#a78bfa" },
-  { id: "report",    from: "portfolio",     to: "deadpool",    label: "EQUITY DATA",    color: "#a78bfa" },
-  // Web search
-  { id: "search",    from: "doctorstrange", to: "__search",    label: "SEARCH WEB",     color: "#38bdf8" },
+  { id: "fanout", from: "nickfury",      to: "portfolio",     label: "ASSIGN BOOK",   color: "#22c55e" },
+  { id: "synth",  from: "superman",      to: "vision",        label: "FORWARD SIGNAL", color: "#38bdf8" },
+  { id: "exec",   from: "vision",        to: "ironman",       label: "EXECUTE PLAN",  color: "#fb923c" },
+  { id: "watch",  from: "ironman",       to: "batman",        label: "RISK CHECK",    color: "#facc15" },
+  { id: "report", from: "portfolio",     to: "dailypnl",      label: "WRITE PNL",     color: "#a78bfa" },
+  { id: "search", from: "doctorstrange", to: "__search",      label: "SEARCH WEB",    color: "#38bdf8" },
 ];
 
 const ANCHORS = {
@@ -154,6 +27,7 @@ function getAnchor(id) {
 function App() {
   const canvasRef = useRef(null);
   const motionRef = useRef(makeInitialMotion());
+  const powersRef = useRef(typeof makeInitialPowers === 'function' ? makeInitialPowers() : {});
   const flashesRef = useRef({}); // stationId → { color, label, until }
   const [frame, setFrame] = useState(0);
   const [selected, setSelected] = useState("nickfury");
@@ -166,6 +40,7 @@ function App() {
     "showMotion": true,
     "maxAway": 3,
     "showPoiMarkers": true,
+    "showPowers": true,
     "mode": "active"
   }/*EDITMODE-END*/);
 
@@ -192,6 +67,7 @@ function App() {
     });
     return () => { unsubTrade(); unsubTask(); };
   }, []);
+
   useEffect(() => {
     let raf, last = 0, tick = 0;
     function loop(t) {
@@ -199,6 +75,9 @@ function App() {
         tick++; last = t;
         if (tweaks.showMotion) {
           tickMotion(motionRef.current, tick, { maxAway: Number(tweaks.maxAway) });
+        }
+        if (tweaks.showPowers && typeof tickPowers === 'function') {
+          tickPowers(powersRef.current, tick, motionRef.current);
         }
         // Decay flashes
         const fl = flashesRef.current;
@@ -225,17 +104,17 @@ function App() {
       const f = flashesRef.current[k];
       flashSnap[k] = { color: f.color, label: f.label, intensity: f.until / f.max };
     }
-    paintScene(ctx, frame, AGENTS, motionRef.current, {
-      showPoiMarkers: tweaks.showPoiMarkers,
-      flashes: flashSnap,
-    });
-  }, [frame, tweaks.showPoiMarkers]);
+    paintScene(ctx, frame, AGENTS, motionRef.current,
+      tweaks.showPowers ? powersRef.current : null,
+      {
+        showPoiMarkers: tweaks.showPoiMarkers,
+        flashes: flashSnap,
+      });
+  }, [frame, tweaks.showPoiMarkers, tweaks.showPowers]);
 
   const selectedAgent = AGENTS.find(a => a.id === selected) || AGENTS[0];
   const liveTask = agentTasks[selectedAgent.id] || selectedAgent.task;
   const scale = Number(tweaks.scale) || 3;
-
-  const feedEventsLegacy = useMemo(() => [], []);
 
   // Build a snapshot of motion to drive the React-side overlays (labels, hits)
   // We re-read motionRef on every frame.
@@ -427,12 +306,14 @@ function App() {
             </div>
             <div className="agent-actions">
               <button className="btn btn-primary">Open transcript</button>
-              <button className="btn">Pause</button>
+              <button className="btn" onClick={() => {
+                // Trigger this hero's power now
+                const ps = powersRef.current[selectedAgent.id];
+                if (ps) { ps.phase = 'active'; ps.t = 0; }
+              }}>Use power</button>
               <button className="btn btn-danger">Kill</button>
             </div>
           </div>
-
-          <TradingModePanel />
 
           <div className="roster">
             <div className="roster-hdr">ROSTER · {AGENTS.length} agents</div>
@@ -474,6 +355,8 @@ function App() {
           <TweakSlider label="Max away from desk" value={Number(tweaks.maxAway)}
                        min={0} max={6} step={1}
                        onChange={(v)=>setTweaks({maxAway:v})} />
+          <TweakToggle label="Hero powers" value={tweaks.showPowers}
+                       onChange={(v)=>setTweaks({showPowers:v})} />
           <TweakRadio label="Mode" value={tweaks.mode}
                       options={[{value:"active",label:"Live"},{value:"standby",label:"Stand-down"}]}
                       onChange={(v)=>setTweaks({mode:v})} />

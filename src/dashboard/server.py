@@ -105,6 +105,8 @@ _DEFAULT_CSP = (
     "img-src 'self' data: blob:; "
     "font-src 'self' data:; "
     "connect-src 'self' https://api.binance.com wss://stream.binance.com:9443 "
+    "https://api.hyperliquid.xyz wss://api.hyperliquid.xyz "
+    "https://api.hyperliquid-testnet.xyz wss://api.hyperliquid-testnet.xyz "
     "https://www.tradingview.com https://s.tradingview.com https://www.tradingview-widget.com; "
     "frame-src 'self' https://www.tradingview.com https://s.tradingview.com https://www.tradingview-widget.com; "
     "object-src 'none'; "
@@ -397,6 +399,7 @@ class MekkaDashboardServer:
         self._app.router.add_get("/api/session/stats", self._handle_session_stats)      # Story 092
         self._app.router.add_post("/api/trade/analyze", self._handle_trade_analyze)
         self._app.router.add_post("/api/trade/execute", self._handle_trade_execute)
+        self._app.router.add_post("/api/trade/manual", self._handle_trade_manual)
         self._app.router.add_get("/api/prefs", self._handle_prefs_get)
         self._app.router.add_post("/api/prefs", self._handle_prefs_set)
         self._app.router.add_post("/api/auth/login", self._handle_auth_login)
@@ -420,6 +423,22 @@ class MekkaDashboardServer:
         self._app.router.add_get("/api/cycle-sop", self._handle_cycle_sop)                    # Story 185
         self._app.router.add_get("/api/working-memory", self._handle_working_memory)          # Story 183
         self._app.router.add_get("/api/incremental-guard", self._handle_incremental_guard)    # Story 187
+        # ── Milestone 36 — Backtesting Dashboard (Stories 224-228) ──────────
+        self._app.router.add_post("/api/backtest/run",    self._handle_backtest_run)     # Story 224
+        self._app.router.add_get("/api/backtest/result",  self._handle_backtest_result)  # Story 224
+        self._app.router.add_get("/api/backtest/history", self._handle_backtest_history) # Story 228
+        # ── Milestone 37 — Live Performance Tracking (Stories 229-233) ──────
+        self._app.router.add_get("/api/performance/rolling", self._handle_perf_rolling)  # Story 232
+        self._app.router.add_get("/api/performance/divergence", self._handle_perf_divergence) # Story 231
+        # ── Milestone 38 — Risk Dashboard Avançado (Stories 234-238) ────────
+        self._app.router.add_get("/api/risk/batman-timeline",  self._handle_batman_timeline)   # Story 235
+        self._app.router.add_get("/api/risk/regime-heatmap",   self._handle_regime_heatmap)    # Story 236
+        self._app.router.add_get("/api/risk/concentration",    self._handle_concentration)     # Story 238
+        # ── Milestone 39 — Multiagent Debate (Stories 239-243) ───────────────
+        self._app.router.add_get("/api/debate/history",  self._handle_debate_history)  # Story 242
+        self._app.router.add_post("/api/debate/run",     self._handle_debate_run)      # Story 239
+        # ── Today Summary Widget — Overview simplificado ──────────────────────
+        self._app.router.add_get("/api/today-summary", self._handle_today_summary)
         self._app.router.add_get("/ws", self._handle_ws)
         self._app.router.add_get("/api/hl/candles", self._handle_hl_candles)
         self._app.router.add_get("/ws/live", self._handle_ws_live)
@@ -468,6 +487,13 @@ class MekkaDashboardServer:
         self._live_bcast_task = asyncio.create_task(self._live_price_broadcast_loop())
         # Startup ping — fire-and-forget, non-blocking
         asyncio.create_task(TelegramAlerter().ping(reason="dashboard startup"))
+        # Story 228 — BacktestScheduler: daily auto-run at midnight UTC
+        try:
+            from src.services.backtest_scheduler import BacktestScheduler
+            _scheduler = BacktestScheduler(symbols=["BTC", "ETH"], days=30, hour_utc=0)
+            self._backtest_scheduler_task = asyncio.create_task(_scheduler.start())
+        except Exception as _exc_sched:
+            logger.warning("BacktestScheduler startup skipped: %s", _exc_sched)
 
     async def _on_shutdown(self, _: web.Application) -> None:
         if self._broadcast_task is not None:
@@ -486,6 +512,13 @@ class MekkaDashboardServer:
             self._weekly_report_task.cancel()
             try:
                 await self._weekly_report_task
+            except asyncio.CancelledError:
+                pass
+        # BUG-005 fix: cancelar BacktestScheduler task no shutdown
+        if getattr(self, "_backtest_scheduler_task", None) is not None:
+            self._backtest_scheduler_task.cancel()
+            try:
+                await self._backtest_scheduler_task
             except asyncio.CancelledError:
                 pass
         if self._daily_reporter is not None:
@@ -4206,6 +4239,525 @@ class MekkaDashboardServer:
                 text=_json.dumps({"ok": False, "error": str(exc)}),
             )
 
+    # ==================================================================
+    # Milestone 36 — Backtesting Dashboard (Stories 224-228)
+    # ==================================================================
+
+    # In-memory cache: {symbol: BacktestSummary}
+    _backtest_cache: dict = {}
+
+    async def _handle_backtest_run(self, request: web.Request) -> web.Response:
+        """
+        POST /api/backtest/run                                   Story 224
+
+        Body (JSON):
+            symbol        : str  — ex: "BTC" (default "BTC")
+            days          : int  — janela em dias (default 30, max 365)
+            initial_equity: float — capital inicial USD (default 10000)
+            seed          : int | null — semente para reprodutibilidade
+
+        Response:
+            BacktestSummary serializado + BenchmarkResult + Telegram status
+        """
+        import json as _json
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        symbol         = str(body.get("symbol", "BTC")).upper()
+        days           = min(int(body.get("days", 30)), 365)
+        initial_equity = float(body.get("initial_equity", 10_000.0))
+        seed           = body.get("seed", 42)
+
+        try:
+            from src.services.backtest_runner import BacktestRunner
+            from src.services.backtest_benchmark import BacktestBenchmark
+            from src.services.backtest_telegram_report import BacktestTelegramReport
+
+            runner  = BacktestRunner(initial_equity=initial_equity, seed=seed)
+            summary = await asyncio.wait_for(
+                runner.run(symbol=symbol, days=days), timeout=30.0
+            )
+
+            # Benchmark buy-hold
+            bm_result = None
+            try:
+                bm = BacktestBenchmark()
+                bm_result = await bm.compute(
+                    symbol=symbol,
+                    start_date=summary.start_date,
+                    end_date=summary.end_date,
+                    initial_equity=initial_equity,
+                )
+            except Exception as exc_bm:
+                logger.warning("backtest_run: benchmark error — %s", exc_bm)
+
+            # Cache do resultado
+            self.__class__._backtest_cache[symbol] = {
+                "summary": summary,
+                "benchmark": bm_result,
+            }
+
+            # Telegram report (fire-and-forget)
+            asyncio.create_task(
+                BacktestTelegramReport().send(summary, benchmark=bm_result)
+            )
+
+            payload = _backtest_summary_to_dict(summary)
+            if bm_result:
+                payload["benchmark"] = bm_result.to_dict()
+
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, **payload}, default=str),
+            )
+        except asyncio.TimeoutError:
+            return web.json_response({"ok": False, "error": "backtest timeout (>30s)"}, status=504)
+        except Exception as exc:
+            logger.warning("_handle_backtest_run error: %s", exc)
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    async def _handle_backtest_result(self, request: web.Request) -> web.Response:
+        """
+        GET /api/backtest/result?symbol=BTC                      Story 224
+
+        Retorna o último resultado em cache para o símbolo.
+        """
+        import json as _json
+        symbol = request.query.get("symbol", "BTC").upper()
+        cached = self.__class__._backtest_cache.get(symbol)
+        if not cached:
+            return web.json_response(
+                {"ok": False, "error": f"Nenhum resultado em cache para {symbol}. Execute POST /api/backtest/run primeiro."},
+                status=404,
+            )
+        payload = _backtest_summary_to_dict(cached["summary"])
+        if cached.get("benchmark"):
+            payload["benchmark"] = cached["benchmark"].to_dict()
+        return web.Response(
+            content_type="application/json",
+            text=_json.dumps({"ok": True, **payload}, default=str),
+        )
+
+    async def _handle_backtest_history(self, request: web.Request) -> web.Response:
+        """
+        GET /api/backtest/history?symbol=BTC                     Story 228
+
+        Retorna histórico de runs do BacktestScheduler.
+        """
+        import json as _json
+        symbol = request.query.get("symbol", "BTC").upper()
+        try:
+            from src.services.backtest_scheduler import BacktestScheduler
+            history = BacktestScheduler.get_history(symbol)
+            items = [_backtest_summary_to_dict(s) for s in history]
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, "symbol": symbol, "history": items}, default=str),
+            )
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    # ==================================================================
+    # Milestone 37 — Live Performance Tracking (Stories 229-233)
+    # ==================================================================
+
+    async def _handle_perf_rolling(self, request: web.Request) -> web.Response:
+        """
+        GET /api/performance/rolling?days=30&symbol=BTC          Story 232
+
+        Retorna métricas rolling: Sharpe, win_rate, expectancy, total_pnl,
+        comparadas com o backtest mais recente em cache.
+        """
+        import json as _json
+        days   = _safe_limit(request.query.get("days"), default=30, max_value=365)
+        symbol = request.query.get("symbol", "BTC").upper()
+        try:
+            from src.services.rolling_metrics_service import RollingMetricsService
+            svc = RollingMetricsService()
+            result = await svc.compute(symbol=symbol, window_days=days)
+            # Comparar com backtest em cache
+            cached = self.__class__._backtest_cache.get(symbol)
+            if cached:
+                backtest_summary = cached["summary"]
+                result["backtest_sharpe"]   = backtest_summary.metrics.sharpe_ratio
+                result["backtest_win_rate"] = backtest_summary.metrics.win_rate
+                result["backtest_days"]     = days
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, **result}, default=str),
+            )
+        except Exception as exc:
+            logger.warning("_handle_perf_rolling error: %s", exc)
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    async def _handle_perf_divergence(self, request: web.Request) -> web.Response:
+        """
+        GET /api/performance/divergence?symbol=BTC               Story 231
+
+        Detecta divergências entre performance real e backtest.
+        """
+        import json as _json
+        symbol = request.query.get("symbol", "BTC").upper()
+        try:
+            from src.services.divergence_alerter import DivergenceAlerter
+            alerter = DivergenceAlerter()
+            cached  = self.__class__._backtest_cache.get(symbol)
+            backtest_summary = cached["summary"] if cached else None
+            result = await alerter.check(symbol=symbol, backtest=backtest_summary)
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, **result}, default=str),
+            )
+        except Exception as exc:
+            logger.warning("_handle_perf_divergence error: %s", exc)
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    # ==================================================================
+    # Milestone 38 — Risk Dashboard Avançado (Stories 234-238)
+    # ==================================================================
+
+    async def _handle_batman_timeline(self, request: web.Request) -> web.Response:
+        """
+        GET /api/risk/batman-timeline?limit=100                  Story 235
+
+        Retorna timeline de verdicts do Batman (APPROVED/REDUCED/REJECTED)
+        com timestamp, símbolo, verdict, motivo e tamanho reduzido.
+        """
+        import json as _json
+        limit = _safe_limit(request.query.get("limit"), default=100, max_value=500)
+        sym_filter = (request.query.get("symbol") or "").strip().upper()
+        try:
+            rows = await MekkaRepository.list_recent_audit(limit=limit * 3)
+            batman_rows = [
+                r for r in rows
+                if (r.agent or "").lower() == "batman"
+                and r.payload
+            ][-limit:]
+
+            # BUG-006 fix: filtrar por símbolo se informado
+            if sym_filter and sym_filter != "ALL":
+                batman_rows = [
+                    r for r in batman_rows
+                    if (r.symbol or "").upper() == sym_filter
+                ]
+
+            timeline = []
+            for r in batman_rows:
+                p = r.payload or {}
+                timeline.append({
+                    "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                    "symbol":    r.symbol or p.get("symbol"),
+                    "verdict":   p.get("verdict") or r.event,
+                    "reason":    p.get("reason") or p.get("message", ""),
+                    "original_size_pct": p.get("original_size_pct"),
+                    "approved_size_pct": p.get("approved_size_pct"),
+                    "drawdown_pct":      p.get("daily_pnl_pct"),
+                })
+
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({
+                    "ok": True,
+                    "symbol": sym_filter or "ALL",
+                    "count": len(timeline),
+                    "timeline": timeline,
+                }, default=str),
+            )
+        except Exception as exc:
+            logger.warning("_handle_batman_timeline error: %s", exc)
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    async def _handle_regime_heatmap(self, request: web.Request) -> web.Response:
+        """
+        GET /api/risk/regime-heatmap?days=30                     Story 236
+
+        Retorna mapa de calor: quantos ciclos por regime × símbolo × hora do dia.
+        """
+        import json as _json
+        from collections import defaultdict
+        days = _safe_limit(request.query.get("days"), default=30, max_value=90)
+        try:
+            rows = await MekkaRepository.list_recent_audit(limit=5000)
+            # Filtrar por janela de tempo
+            from datetime import timedelta
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+            rows = [r for r in rows if r.timestamp and r.timestamp >= cutoff]
+
+            # Contagem por regime e hora UTC
+            regime_hour: dict = defaultdict(lambda: defaultdict(int))
+            regime_counts: dict = defaultdict(int)
+
+            for r in rows:
+                p = r.payload or {}
+                regime = p.get("regime") or p.get("market_regime")
+                if not regime:
+                    continue
+                hour = r.timestamp.hour if r.timestamp else 0
+                regime_hour[regime][hour] += 1
+                regime_counts[regime] += 1
+
+            heatmap = {
+                regime: {
+                    "total": regime_counts[regime],
+                    "by_hour": dict(sorted(hour_map.items())),
+                }
+                for regime, hour_map in regime_hour.items()
+            }
+
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({
+                    "ok": True,
+                    "days": days,
+                    "regimes": list(heatmap.keys()),
+                    "heatmap": heatmap,
+                }, default=str),
+            )
+        except Exception as exc:
+            logger.warning("_handle_regime_heatmap error: %s", exc)
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    async def _handle_concentration(self, request: web.Request) -> web.Response:
+        """
+        GET /api/risk/concentration                              Story 238
+
+        Retorna concentração de risco por símbolo: % do capital alocado,
+        número de trades abertos e drawdown por símbolo.
+        """
+        import json as _json
+        from collections import defaultdict
+        try:
+            # BUG-007 fix: usar list_recent_trades para funcionar em mainnet também
+            all_trades = await MekkaRepository.list_recent_trades(limit=500)
+            trades = [t for t in all_trades if t.status in ("FILLED", "PAPER")]
+
+            notional_by_sym: dict = defaultdict(float)
+            count_by_sym: dict    = defaultdict(int)
+            pnl_by_sym: dict      = defaultdict(float)
+
+            total_notional = 0.0
+            for t in trades:
+                sym = (t.symbol or "UNKNOWN").upper()
+                qty   = float(t.quantity or 0)
+                price = float(t.avg_price or 0)
+                pnl   = float(t.pnl_usd or 0) if hasattr(t, "pnl_usd") else 0.0
+                notional = qty * price
+                notional_by_sym[sym] += notional
+                count_by_sym[sym]    += 1
+                pnl_by_sym[sym]      += pnl
+                total_notional       += notional
+
+            symbols_data = []
+            for sym, notional in sorted(notional_by_sym.items(), key=lambda x: -x[1]):
+                pct = (notional / total_notional * 100) if total_notional > 0 else 0.0
+                symbols_data.append({
+                    "symbol":        sym,
+                    "notional_usd":  round(notional, 2),
+                    "concentration_pct": round(pct, 2),
+                    "trade_count":   count_by_sym[sym],
+                    "pnl_usd":       round(pnl_by_sym[sym], 2),
+                })
+
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({
+                    "ok": True,
+                    "total_notional_usd": round(total_notional, 2),
+                    "symbol_count": len(symbols_data),
+                    "concentration": symbols_data,
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                }, default=str),
+            )
+        except Exception as exc:
+            logger.warning("_handle_concentration error: %s", exc)
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    # ==================================================================
+    # Milestone 39 — Multiagent Debate (Stories 239-243)
+    # ==================================================================
+
+    async def _handle_debate_run(self, request: web.Request) -> web.Response:
+        """
+        POST /api/debate/run                                     Story 239
+
+        Body (JSON):
+            symbol  : str  — ex: "BTC" (default "BTC")
+            rounds  : int  — número de rodadas (default 2, max 5)
+            agents  : list[str] | null — lista de agentes (default: todos L1)
+
+        Response:
+            DebateVerdict serializado + tabela de votos
+        """
+        import json as _json
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        symbol  = str(body.get("symbol", "BTC")).upper()
+        rounds  = min(int(body.get("rounds", 2)), 5)
+        agents  = body.get("agents") or None  # None = usa DEFAULT_AGENTS
+
+        try:
+            from src.services.debate_moderator import DebateModerator
+            from src.services.debate_verdict_logger import DebateVerdictLogger
+            from src.services.consensus_weighter import ConsensusWeighter
+
+            moderator = DebateModerator(max_rounds=rounds)
+            verdict   = await asyncio.wait_for(
+                moderator.run(context={}, agents=agents, symbol=symbol),
+                timeout=15.0,
+            )
+
+            # Persistir no audit_log
+            asyncio.create_task(DebateVerdictLogger().log(verdict, symbol=symbol))
+
+            weighter = ConsensusWeighter()
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({
+                    "ok": True,
+                    "symbol": symbol,
+                    **verdict.to_dict(),
+                    "vote_table": weighter.summary_table(verdict.votes),
+                }, default=str),
+            )
+        except asyncio.TimeoutError:
+            return web.json_response({"ok": False, "error": "debate timeout"}, status=504)
+        except Exception as exc:
+            logger.warning("_handle_debate_run error: %s", exc)
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    async def _handle_debate_history(self, request: web.Request) -> web.Response:
+        """
+        GET /api/debate/history?symbol=BTC&limit=20             Story 242
+
+        Retorna histórico de DebateVerdicts do audit_log.
+        """
+        import json as _json
+        symbol = request.query.get("symbol") or None
+        limit  = _safe_limit(request.query.get("limit"), default=20, max_value=100)
+        try:
+            from src.services.debate_verdict_logger import DebateVerdictLogger
+            items = await DebateVerdictLogger().fetch_recent(symbol=symbol, limit=limit)
+            return web.Response(
+                content_type="application/json",
+                text=_json.dumps({"ok": True, "count": len(items), "history": items}, default=str),
+            )
+        except Exception as exc:
+            logger.warning("_handle_debate_history error: %s", exc)
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    # ------------------------------------------------------------------
+    # Today Summary Widget — GET /api/today-summary
+    # ------------------------------------------------------------------
+
+    async def _handle_today_summary(self, _: web.Request) -> web.Response:
+        """GET /api/today-summary — visão simplificada para leigos.
+
+        Retorna posições abertas (paper ou live), trades recentes e P&L do dia.
+        Robusto contra: sem mark prices, sem trades hoje, pnl_usd=None.
+        """
+        from src.dashboard.positions_provider import fetch_positions
+
+        today_utc = datetime.now(timezone.utc).date().isoformat()
+        mark_prices: dict[str, float] = dict(self._hl_prices) if self._hl_prices else {}
+        has_prices = bool(mark_prices)
+
+        try:
+            pos_data, trades_all, daily_pnl = await asyncio.gather(
+                fetch_positions(mark_prices=mark_prices),
+                MekkaRepository.list_recent_trades(limit=50),
+                MekkaRepository.get_today_pnl_usd(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("_handle_today_summary error: %s", exc)
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+        # ── Posições abertas ──────────────────────────────────────────────
+        open_positions = []
+        open_pnl = 0.0
+        open_pnl_known = False  # True quando temos mark prices reais
+        for p in (pos_data.get("items") or []):
+            entry = float(p.get("entry_price") or 0.0)
+            mark  = float(p.get("mark_price")  or 0.0)
+            pnl   = float(p.get("pnl_usd")     or 0.0)
+            # Considera uPnL calculado apenas se mark != entry (preço real disponível)
+            has_upnl = has_prices and mark > 0 and abs(mark - entry) > 0.001
+            if has_upnl:
+                open_pnl += pnl
+                open_pnl_known = True
+            emoji = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⏳")
+            open_positions.append({
+                "symbol":      p.get("symbol", ""),
+                "side":        p.get("side", ""),
+                "size":        round(float(p.get("size") or 0), 6),
+                "entry_price": round(entry, 4),
+                "mark_price":  round(mark, 4),
+                "pnl_usd":     round(pnl, 2) if has_upnl else None,
+                "has_upnl":    has_upnl,
+                "is_paper":    p.get("is_paper", True),
+                "emoji":       emoji,
+            })
+
+        # ── Trades do dia atual ───────────────────────────────────────────
+        def _trade_date(t: Any) -> str:
+            ts = t.timestamp
+            try:
+                if hasattr(ts, "date"):
+                    d = ts.date()
+                    return d.isoformat()
+            except Exception:
+                pass
+            return str(ts)[:10]
+
+        def _fmt_trade(t: Any) -> dict:
+            pnl = t.pnl_usd  # pode ser None
+            pnl_val = float(pnl) if pnl is not None else None
+            emoji = "✅" if (pnl_val is not None and pnl_val > 0) else (
+                    "🔴" if (pnl_val is not None and pnl_val < 0) else "📋")
+            return {
+                "id":          t.id,
+                "timestamp":   str(t.timestamp)[:16],
+                "date":        str(t.timestamp)[:10],
+                "symbol":      t.symbol,
+                "side":        (t.side or "—").upper(),
+                "status":      t.status,
+                "pnl_usd":     round(pnl_val, 2) if pnl_val is not None else None,
+                "notional_usd": round(float(t.notional_usd or 0.0), 2),
+                "is_paper":    bool(t.is_paper),
+                "emoji":       emoji,
+            }
+
+        today_trades  = [_fmt_trade(t) for t in trades_all if _trade_date(t) == today_utc]
+        recent_trades = [_fmt_trade(t) for t in trades_all[:20]]  # últimos 20 independente de data
+
+        # ── Sumário ───────────────────────────────────────────────────────
+        total_pnl = round(float(daily_pnl or 0.0), 2)
+        net_pnl   = round(total_pnl + (open_pnl if open_pnl_known else 0.0), 2)
+        day_emoji = "🟢" if net_pnl > 0 else ("🔴" if net_pnl < 0 else "➖")
+
+        return web.json_response({
+            "ok":                True,
+            "date_utc":          today_utc,
+            # Posições abertas
+            "open_positions":    open_positions,
+            "open_count":        len(open_positions),
+            "open_pnl_usd":      round(open_pnl, 2) if open_pnl_known else None,
+            "has_prices":        has_prices,
+            # Trades
+            "today_trades":      today_trades,
+            "recent_trades":     recent_trades,
+            "trades_count_today": len(today_trades),
+            # P&L do dia
+            "daily_pnl_usd":     total_pnl,
+            "net_pnl_usd":       net_pnl if open_pnl_known else total_pnl,
+            "day_emoji":         day_emoji,
+            "is_paper":          settings.paper_trading,
+        })
+
     # ------------------------------------------------------------------
     # Widget Prefs — GET /api/prefs  POST /api/prefs          (Story 042)
     # ------------------------------------------------------------------
@@ -4808,6 +5360,52 @@ class MekkaDashboardServer:
             "executed_at": executed_at,
         }, status=200)
 
+    async def _handle_trade_manual(self, request: web.Request) -> web.Response:
+        """POST /api/trade/manual — submete ordem manual diretamente (sem analyze step).
+
+        Body: { symbol, side, size_pct, leverage, sl_pct, tp_pct, entry_price? }
+        """
+        from src.config.settings import settings as _s
+        from src.agents.batman import is_kill_switch_active
+
+        executed_at = datetime.now(timezone.utc).isoformat()
+        body = await self._safe_json_body(request) or {}
+
+        symbol   = str(body.get("symbol") or "BTC").strip().upper()
+        side     = str(body.get("side") or "LONG").strip().upper()
+        size_pct = float(body.get("size_pct") or 2.0)
+        leverage = int(body.get("leverage") or 5)
+        sl_pct   = float(body.get("sl_pct") or 2.0)
+        tp_pct   = float(body.get("tp_pct") or 4.0)
+        entry_px = body.get("entry_price")
+
+        if side not in ("LONG", "SHORT"):
+            return web.json_response({"status": "rejected", "reason": "side inválido (LONG|SHORT)"}, status=400)
+        if not (0.1 <= size_pct <= 100):
+            return web.json_response({"status": "rejected", "reason": "size_pct fora do range (0.1–100)"}, status=400)
+        if is_kill_switch_active():
+            return web.json_response({"status": "blocked", "reason": "Kill switch ativo.", "is_paper": _s.paper_trading, "executed_at": executed_at})
+
+        await MekkaRepository.log_event(
+            agent="Dashboard",
+            event="MANUAL_TRADE_SUBMITTED",
+            severity="INFO",
+            message=f"Ordem manual: {side} {symbol} size={size_pct}% lev={leverage}x SL={sl_pct}% TP={tp_pct}%",
+            payload={"symbol": symbol, "side": side, "size_pct": size_pct, "leverage": leverage, "sl_pct": sl_pct, "tp_pct": tp_pct, "entry_price": entry_px},
+        )
+
+        # Em paper mode, simula a ordem
+        order_id = f"MANUAL-{symbol}-{side}-{int(datetime.now(timezone.utc).timestamp())}"
+        return web.json_response({
+            "status": "paper" if _s.paper_trading else "submitted",
+            "order_id": order_id,
+            "reason": f"Ordem manual {side} {symbol} registrada ({'paper' if _s.paper_trading else 'live'}).",
+            "is_paper": _s.paper_trading,
+            "symbol": symbol,
+            "side": side,
+            "executed_at": executed_at,
+        })
+
     def _prune_snapshot_dir(self) -> None:
         """Keep only the most recent ``SNAPSHOT_RETENTION_MINUTES`` snapshots
         and ``INCIDENT_BUNDLE_RETENTION`` incident bundles. Runs in a thread
@@ -4845,6 +5443,52 @@ async def run_dashboard_server(host: str = "127.0.0.1", port: int = 8787) -> Non
             await asyncio.sleep(3600)
     finally:
         await runner.cleanup()
+
+
+def _backtest_summary_to_dict(summary) -> dict:
+    """Serializa BacktestSummary para dict JSON-safe (Stories 224-228)."""
+    m = summary.metrics
+    return {
+        "symbol":              summary.symbol,
+        "start_date":          summary.start_date.isoformat() if summary.start_date else None,
+        "end_date":            summary.end_date.isoformat() if summary.end_date else None,
+        "generated_at":        summary.generated_at.isoformat(),
+        "initial_equity_usd":  summary.initial_equity_usd,
+        "final_equity_usd":    round(summary.final_equity_usd, 2),
+        "total_return_pct":    round(summary.total_return_pct, 4),
+        "metrics": {
+            "total_trades":       m.total_trades,
+            "wins":               m.wins,
+            "losses":             m.losses,
+            "expired":            m.expired,
+            "win_rate":           round(m.win_rate, 4),
+            "profit_factor":      round(m.profit_factor, 4),
+            "expectancy_usd":     round(m.expectancy_usd, 4),
+            "avg_win_usd":        round(m.avg_win_usd, 2),
+            "avg_loss_usd":       round(m.avg_loss_usd, 2),
+            "avg_risk_reward":    round(m.avg_risk_reward, 4),
+            "avg_confidence":     round(m.avg_confidence, 4),
+            "sharpe_ratio":       round(m.sharpe_ratio, 4),
+            "sortino_ratio":      round(m.sortino_ratio, 4),
+            "max_drawdown_pct":   round(m.max_drawdown_pct, 4),
+            "max_drawdown_usd":   round(m.max_drawdown_usd, 2),
+            "total_pnl_usd":      round(m.total_pnl_usd, 2),
+            "total_pnl_pct":      round(m.total_pnl_pct, 4),
+            "days_covered":       round(m.days_covered, 1),
+        },
+        "equity_curve": [
+            {
+                "timestamp":     pt.timestamp.isoformat() if pt.timestamp else None,
+                "equity_usd":    round(pt.equity_usd, 2),
+                "trade_pnl_usd": round(pt.trade_pnl_usd, 2),
+                "drawdown_pct":  round(pt.drawdown_pct, 4),
+                "symbol":        pt.symbol,
+                "outcome":       pt.outcome.value,
+            }
+            for pt in summary.equity_curve
+        ],
+        "trades_count": len(summary.trades),
+    }
 
 
 def _safe_limit(raw: str | None, default: int, max_value: int) -> int:
