@@ -383,6 +383,7 @@ class MekkaDashboardServer:
         self._app.router.add_post("/api/killswitch/release", self._handle_killswitch_release)
         self._app.router.add_get("/api/mode", self._handle_mode_get)
         self._app.router.add_post("/api/mode", self._handle_mode_set)
+        self._app.router.add_get("/api/env", self._handle_env)
         self._app.router.add_get("/api/report/daily", self._handle_report_daily)
         self._app.router.add_get("/api/report/weekly", self._handle_report_weekly)  # Story 090
         self._app.router.add_get("/api/positions", self._handle_positions)
@@ -3057,6 +3058,48 @@ class MekkaDashboardServer:
 
         logger.info("Trading mode changed to '%s' via dashboard API", mode)
         return web.json_response({"mode": mode, "params": get_params()})
+
+    async def _handle_env(self, _: web.Request) -> web.Response:
+        """GET /api/env — environment & safety posture for the UI badge.
+
+        Returns the smallest payload the operator needs to know which
+        venue/environment their actions will hit. NEVER returns secrets or
+        even partial credential prefixes — the operator can derive that
+        from their own .env if they need it.
+
+        The response is intentionally pessimistic on errors: if anything
+        below raises, the UI keeps its "???" badge state instead of
+        accidentally showing a stale safe-looking value.
+        """
+        if settings.active_exchange == "hyperliquid":
+            network = settings.hyperliquid_network  # "testnet" | "mainnet"
+        elif settings.active_exchange == "bybit":
+            network = "testnet" if settings.bybit_testnet else "mainnet"
+        elif settings.active_exchange == "binance":
+            network = "testnet" if settings.binance_testnet else "mainnet"
+        else:
+            network = "unknown"
+
+        # `mode` collapses paper/testnet/mainnet into the single label the
+        # badge uses to pick a colour. Order matters: paper wins because
+        # an operator in paper mode is safe even on a mainnet endpoint
+        # (no real orders are sent).
+        if settings.paper_trading:
+            mode = "paper"
+        elif network == "mainnet":
+            mode = "mainnet"
+        elif network == "testnet":
+            mode = "testnet"
+        else:
+            mode = "unknown"
+
+        return web.json_response({
+            "exchange": settings.active_exchange,
+            "network": network,
+            "paper_trading": bool(settings.paper_trading),
+            "live_confirmed": bool(settings.live_trading_confirmed),
+            "mode": mode,
+        })
 
     async def _handle_report_daily(self, request: web.Request) -> web.Response:
         """

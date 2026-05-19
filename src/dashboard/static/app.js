@@ -2941,6 +2941,58 @@ function _mkBootTopBar() {
   _mkLoadTopBar();
   if (_ftbTimer) clearInterval(_ftbTimer);
   _ftbTimer = setInterval(_mkLoadTopBar, 30000);
+  // The env badge is loaded once at boot and then refreshed lazily every
+  // 60s. Changes are rare (operator edits .env and restarts) but a stale
+  // badge is dangerous on a mainnet → testnet downgrade so we still poll.
+  _mkLoadEnvBadge();
+  setInterval(_mkLoadEnvBadge, 60000);
+}
+
+// ── Environment badge ────────────────────────────────────────
+/**
+ * Populate the #env-badge with the active exchange + network. Pulls
+ * /api/env and reflects the result on the existing span. Three colour
+ * classes are mutually exclusive: paper (cyan), testnet (orange),
+ * mainnet (red, pulsing). On any error we keep the "unknown" state
+ * rather than silently rendering a misleading safe label.
+ */
+async function _mkLoadEnvBadge() {
+  const el = document.getElementById('env-badge');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/env').then(r => r.json());
+    if (!res || !res.exchange) throw new Error('bad payload');
+    const ex = String(res.exchange).toUpperCase();
+    const net = String(res.network || 'unknown').toUpperCase();
+    const mode = String(res.mode || 'unknown');
+    // Label content: include both exchange and network so an operator
+    // never has to remember which one is "current". Paper override is
+    // shown explicitly so the operator knows the mainnet colour does
+    // NOT mean live orders.
+    let label;
+    if (mode === 'paper') label = `${ex} · PAPER`;
+    else                  label = `${ex} · ${net}`;
+    el.textContent = label;
+    el.title = `Exchange: ${ex}\nNetwork: ${net}\nPaper trading: ${res.paper_trading}\nLive confirmed: ${res.live_confirmed}`;
+    // Reset class list before reapplying — order doesn't matter, only
+    // exactly one of the four states should be present.
+    el.classList.remove(
+      'env-badge-unknown',
+      'env-badge-paper',
+      'env-badge-testnet',
+      'env-badge-mainnet',
+    );
+    el.classList.add(`env-badge-${mode}`);
+  } catch (_e) {
+    // Pessimistic fallback: stay on "unknown". A grey badge is the right
+    // signal when we cannot prove which network we are talking to.
+    el.textContent = '??? · ???';
+    el.title = 'Environment unknown — /api/env unreachable';
+    el.classList.remove(
+      'env-badge-paper', 'env-badge-testnet', 'env-badge-mainnet',
+    );
+    el.classList.add('env-badge-unknown');
+  }
 }
 
 // ── Widget Customizer ────────────────────────────────────────

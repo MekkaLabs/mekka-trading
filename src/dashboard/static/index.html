@@ -90,7 +90,19 @@
     <div class="content-shell">
       <header class="topbar">
         <div>
-          <h1>Mekka Trading Command Center</h1>
+          <h1>
+            Mekka Trading Command Center
+            <!--
+              Environment badge — populated at boot from /api/env.
+              Initial state is intentionally pessimistic ("???") so a stale
+              page never silently implies a safe environment. The class
+              env-badge-testnet / env-badge-mainnet is applied by
+              _mkLoadEnvBadge in app.js.
+            -->
+            <span id="env-badge" class="env-badge env-badge-unknown" title="Exchange / network">
+              ??? · ???
+            </span>
+          </h1>
           <p>Nick Fury Operations • Wall Street Marvel Office</p>
         </div>
         <div class="topbar-actions">
