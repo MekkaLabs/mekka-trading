@@ -514,6 +514,55 @@ class IronMan(BaseAgent[ExecutionResult]):
             self._log.info(f"[IronMan] Connected to {exchange_id} via CCXT")
             return exchange
 
+    async def _check_clock_skew(
+        self,
+        exchange: Any,
+        exchange_id: str,
+        max_skew_ms: int = 5000,
+    ) -> tuple[bool, int, str]:
+        """Compare the system clock to the exchange server clock.
+
+        Bybit V5 rejects orders whose recv_window-relative timestamp drifts
+        more than ~5 seconds from server time (error code 10002). The
+        symptom is opaque from CCXT's side ("invalid request") and the
+        operator usually loses minutes debugging keys before noticing the
+        machine clock is off. This check runs at most once per CCXT order
+        and emits a clear human-readable rejection instead.
+
+        Returns (ok, skew_ms, message). ``ok`` is True when the absolute
+        skew is below ``max_skew_ms``. A network failure in fetch_time
+        does NOT count as a fail — we degrade open (returning ok=True
+        with skew_ms=0 and a "could not measure" message) because we
+        would rather risk a 10002 from Bybit than block trading on a
+        transient connectivity blip.
+        """
+        import time
+        try:
+            # fetch_time returns milliseconds since epoch on every CCXT
+            # exchange that supports it (bybit, binance both do).
+            server_ms = int(await exchange.fetch_time())
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(
+                "[IronMan/%s] clock-skew probe failed (%s) — degrading open",
+                exchange_id, exc,
+            )
+            return True, 0, f"could not measure ({type(exc).__name__})"
+
+        local_ms = int(time.time() * 1000)
+        skew_ms = local_ms - server_ms
+        if abs(skew_ms) > max_skew_ms:
+            return (
+                False,
+                skew_ms,
+                (
+                    f"local clock is {skew_ms:+d}ms vs {exchange_id} server "
+                    f"(limit ±{max_skew_ms}ms). Bybit will reject orders with "
+                    f"code 10002. Fix: run `sudo sntp -sS time.apple.com` (mac) "
+                    f"or `sudo timedatectl set-ntp true` (linux)."
+                ),
+            )
+        return True, skew_ms, "ok"
+
     async def _place_ccxt_order(
         self,
         signal: Any,
@@ -533,6 +582,32 @@ class IronMan(BaseAgent[ExecutionResult]):
         is_buy = signal.action.value.upper() == "LONG"
         ccxt_symbol = f"{symbol}/USDT:USDT"
         ccxt_side = "buy" if is_buy else "sell"
+
+        # Clock-skew pre-flight — Bybit rejects ordered with code 10002 when
+        # the local clock drifts more than ~5s from server time, and the
+        # CCXT error surface for that case is unhelpful. Catch it here so
+        # the operator gets an actionable message instead of a mystery
+        # "invalid request".
+        ok, skew_ms, msg = await self._check_clock_skew(exchange, exchange_id)
+        if not ok:
+            self._log.error(
+                "[IronMan/%s] aborting order: clock skew %+dms (%s)",
+                exchange_id, skew_ms, msg,
+            )
+            return ExecutionResult(
+                symbol=symbol,
+                status=ExecutionStatus.REJECTED,
+                is_paper=False,
+                side="long" if is_buy else "short",
+                error=f"Clock skew {skew_ms:+d}ms: {msg}",
+            )
+        elif abs(skew_ms) > 1000:
+            # Below the hard limit but worth surfacing — operators usually
+            # want to fix NTP before drift grows further.
+            self._log.warning(
+                "[IronMan/%s] clock skew %+dms (within tolerance, but consider syncing NTP)",
+                exchange_id, skew_ms,
+            )
 
         # Set leverage
         try:
