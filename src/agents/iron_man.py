@@ -46,6 +46,7 @@ from src.config.settings import settings
 from src.models.execution import ExecutionResult, ExecutionStatus
 from src.models.risk import RiskApproval, RiskVerdict
 from src.models.signal import TradeAction, TradingSignal
+from src.services.market_registry import to_ccxt, to_mekka
 
 
 class IronMan(BaseAgent[ExecutionResult]):
@@ -578,9 +579,13 @@ class IronMan(BaseAgent[ExecutionResult]):
         stop orders after the entry fills.
         """
         exchange = await self._get_ccxt_exchange(exchange_id)
-        symbol = signal.symbol
+        # Normalise the incoming symbol before composing the CCXT format.
+        # signal.symbol *should* be bare (``BTC``), but defensive normalisation
+        # via MarketRegistry means any legacy format (``BTC-USD``, ``BTCUSDT``)
+        # still routes correctly.
+        symbol = to_mekka(signal.symbol)
         is_buy = signal.action.value.upper() == "LONG"
-        ccxt_symbol = f"{symbol}/USDT:USDT"
+        ccxt_symbol = to_ccxt(symbol, exchange_id)  # type: ignore[arg-type]
         ccxt_side = "buy" if is_buy else "sell"
 
         # Clock-skew pre-flight — Bybit rejects ordered with code 10002 when
@@ -854,7 +859,9 @@ class IronMan(BaseAgent[ExecutionResult]):
     ) -> dict:
         """CCXT (Bybit/Binance): cancel open reduce-only orders, place new bracket."""
         exchange = await self._get_ccxt_exchange(exchange_id)
-        ccxt_symbol = f"{symbol}/USDT:USDT"
+        # Same defensive normalisation as the entry path — keeps the two
+        # places in sync if the caller eventually passes a non-bare symbol.
+        ccxt_symbol = to_ccxt(to_mekka(symbol), exchange_id)  # type: ignore[arg-type]
         is_buy = side.lower() == "long"
         sl_side = "sell" if is_buy else "buy"
 

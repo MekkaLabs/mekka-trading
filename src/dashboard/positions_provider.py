@@ -41,6 +41,7 @@ import logging
 from typing import Any
 
 from src.config.settings import settings
+from src.services.market_registry import to_mekka
 
 
 logger = logging.getLogger("mekka.dashboard.positions")
@@ -381,12 +382,11 @@ def map_ccxt_positions(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
         size = _to_float(row.get("contracts"))
         if size == 0:
             continue
-        # CCXT symbol → bare Mekka symbol. Defensive parse: handle both
-        # the perp format (BTC/USDT:USDT) and the spot format (BTC/USDT)
-        # because some exchanges leak the spot row even for swap-only
-        # accounts.
-        sym_raw = (row.get("symbol") or "").upper()
-        coin = sym_raw.split("/")[0] if "/" in sym_raw else sym_raw
+        # CCXT symbol → bare Mekka symbol. Delegating to MarketRegistry.to_mekka
+        # gives us the union of every reasonable input format (perp, spot,
+        # dash, glued) for free, and keeps the contract identical to the
+        # rest of the system.
+        coin = to_mekka(row.get("symbol") or "")
         side_raw = (row.get("side") or "").lower()
         side = "LONG" if side_raw == "long" else "SHORT"
         out.append({

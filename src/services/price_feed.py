@@ -53,6 +53,7 @@ from typing import Iterable
 import aiohttp
 
 from src.config.settings import settings
+from src.services.market_registry import to_bybit_wire, to_mekka
 
 logger = logging.getLogger("mekka.price_feed")
 
@@ -162,8 +163,15 @@ class BybitPriceFeed(PriceFeedProvider):
 
     def _topics_for(self, symbols: Iterable[str]) -> list[str]:
         # Bybit V5 perp linear uses ``{COIN}USDT`` (no slash, no colon).
-        # Internal Mekka format is the bare coin (``BTC``).
-        return [f"tickers.{sym.upper()}USDT" for sym in symbols if sym]
+        # We delegate the bare→wire mapping to MarketRegistry so any
+        # operator-supplied input (``btc``, ``BTC-USD``, ``BTC/USDT:USDT``)
+        # collapses to the right topic without surprise.
+        out: list[str] = []
+        for sym in symbols:
+            wire = to_bybit_wire(sym)
+            if wire:
+                out.append(f"tickers.{wire}")
+        return out
 
     async def run(self, prices: dict[str, float]) -> None:
         url = self._ws_url()
@@ -207,10 +215,13 @@ class BybitPriceFeed(PriceFeedProvider):
                                     # Bybit ticker frames carry the symbol
                                     # explicitly; trust that over parsing the
                                     # topic suffix.
-                                    raw_sym = (data.get("symbol") or "").upper()
-                                    if not raw_sym.endswith("USDT"):
+                                    raw_sym = data.get("symbol") or ""
+                                    # to_mekka handles BTCUSDT → BTC, plus
+                                    # any defensive edge cases (case, dash,
+                                    # alternate quote currencies).
+                                    coin = to_mekka(raw_sym)
+                                    if not coin:
                                         continue
-                                    coin = raw_sym[:-4]  # BTCUSDT → BTC
                                     last = data.get("lastPrice") or data.get("markPrice")
                                     if last is None:
                                         continue
