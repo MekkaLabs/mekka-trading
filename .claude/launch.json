@@ -1,0 +1,47 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Mekka Dashboard (UI + API only)",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["run.py", "--dashboard-only", "--dashboard-host", "127.0.0.1", "--dashboard-port", "8787"],
+      "port": 8787
+    },
+    {
+      "name": "Mekka Runtime + Dashboard",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["run.py", "--dashboard", "--dashboard-host", "127.0.0.1", "--dashboard-port", "8787"],
+      "port": 8787
+    },
+    {
+      "name": "Mekka Runtime (headless, Python)",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["run.py"],
+      "port": null
+    },
+    {
+      "name": "Mekka Runtime — single cycle (paper)",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["run.py", "--once", "--equity", "10000"],
+      "port": null
+    },
+    {
+      "name": "Megazord Node Runtime (TypeScript)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "run:runtime"],
+      "port": null
+    },
+    {
+      "name": "TypeScript build watch (tsc --watch)",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["tsc", "-p", "tsconfig.json", "--watch"],
+      "port": null
+    },
+    {
+      "name": "Office v2 frontend build (one-shot)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "build:office-v2"],
+      "port": null
+    }
+  ]
+}
