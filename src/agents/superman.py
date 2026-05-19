@@ -186,6 +186,24 @@ class Superman(BaseAgent[MarketData]):
             try:
                 cfg = self._build_ccxt_config(ex_id)
                 exchange = getattr(ccxt, ex_id)(cfg)
+
+                # Sandbox routing happens AFTER construction but BEFORE
+                # load_markets so we hit the correct catalog endpoint.
+                # Hyperliquid is handled inside _build_ccxt_config via the
+                # `options.sandboxMode` flag; Bybit/Binance use the
+                # set_sandbox_mode() helper introduced for testnet support.
+                try:
+                    if ex_id == "bybit" and settings.bybit_testnet:
+                        exchange.set_sandbox_mode(True)
+                        self._log.warning("[Superman/bybit] SANDBOX (testnet) mode ENABLED")
+                    elif ex_id == "binance" and settings.binance_testnet:
+                        exchange.set_sandbox_mode(True)
+                        self._log.warning("[Superman/binance] SANDBOX (testnet) mode ENABLED")
+                except Exception as _sbx_exc:
+                    self._log.error(
+                        f"[Superman/{ex_id}] set_sandbox_mode failed: {_sbx_exc}"
+                    )
+
                 await exchange.load_markets()
                 self._exchange = exchange
                 self._exchange_id = ex_id

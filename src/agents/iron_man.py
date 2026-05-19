@@ -489,6 +489,26 @@ class IronMan(BaseAgent[ExecutionResult]):
                 cfg["secret"] = settings.binance_api_secret
 
             exchange = getattr(ccxt, exchange_id)(cfg)
+
+            # Route to testnet/sandbox BEFORE load_markets so the symbol list
+            # comes from the right environment. Without this, Bybit testnet
+            # keys would 401 against the mainnet endpoint (or — worse — live
+            # keys would hit production). Default is True in settings so the
+            # safe path is also the path of least surprise.
+            try:
+                if exchange_id == "bybit" and settings.bybit_testnet:
+                    exchange.set_sandbox_mode(True)
+                    self._log.warning("[IronMan/bybit] SANDBOX (testnet) mode ENABLED")
+                elif exchange_id == "binance" and settings.binance_testnet:
+                    exchange.set_sandbox_mode(True)
+                    self._log.warning("[IronMan/binance] SANDBOX (testnet) mode ENABLED")
+            except Exception as _sbx_exc:
+                # set_sandbox_mode is best-effort: log and continue. CCXT raises
+                # for exchanges that don't support it, but bybit/binance do.
+                self._log.error(
+                    f"[IronMan/{exchange_id}] set_sandbox_mode failed: {_sbx_exc}"
+                )
+
             await exchange.load_markets()
             self._ccxt_exchange = exchange
             self._log.info(f"[IronMan] Connected to {exchange_id} via CCXT")
