@@ -4,30 +4,35 @@ type: dashboard
 tags: [dashboard, home, mekka-trading]
 project: mekka-trading
 created: 2026-05-07
-updated: 2026-05-15
+updated: 2026-05-19
 ---
 
 # 🧠 Mekka Trading — Segundo Cérebro
 
 > **Projeto:** `mekka-trading`
-> **Repositório:** https://github.com/labsmekka/mekka-trading
-> **Cópia espelhada no vault Obsidian:** `~/Documents/Obsidian Vault/mekka-trading/`
+> **Repositório:** https://github.com/MekkaLabs/mekka-trading
 
-Sistema de Trading Autônomo orquestrado por IA, baseado em AIOX Core + Hyperliquid (multi-exchange).
+Sistema de Trading Autônomo orquestrado por IA, baseado em AIOX Core + multi-exchange (Hyperliquid / Bybit / Binance via CCXT).
 Este é o vault de conhecimento do projeto: arquitetura, decisões, agentes, runbooks e aprendizados.
 
 ---
 
-## 🚀 Estado Atual — 2026-05-15
+## 🚀 Estado Atual — 2026-05-19
 
 | Item | Status |
 |---|---|
-| **Última story entregue** | `136 — MekkaEventBus: pub/sub in-process` |
-| **Milestone atual** | `21 — Memory Intelligence + Adaptive Routing + Observability` |
+| **Última story entregue** | `140 — Degraded Mode` |
+| **Milestone atual** | `22 — Bybit Testnet Readiness` (Phase 1+2 entregues nesta sessão) |
 | **Modo padrão** | `PAPER_TRADING=True` |
-| **Exchanges suportadas** | Hyperliquid (primary), Bybit, Binance (via CCXT) |
-| **Dashboard** | `http://localhost:8787` com WebSocket em tempo real |
-| **Agentes ativos** | NickFury, Batman, Wolverine, IronMan, Vision (+ VisionCritic), Deadpool, ProfessorX, Superman, DoctorStrange, BlackPanther, Thor, Aquaman, Spider-Man, Flash, PortfolioManager |
+| **Exchange recomendada para validação** | **Bybit testnet** (via CCXT, `set_sandbox_mode(True)`) |
+| **Exchanges suportadas** | Hyperliquid (testnet/mainnet), Bybit (testnet/mainnet), Binance (placeholder) |
+| **Dashboard** | `http://localhost:8787` com WebSocket em tempo real + env badge multi-exchange |
+| **Agentes ativos (16)** | Nick Fury, Superman, Vision (+ VisionCritic), Batman, Iron Man, Cyclops, Wolverine, Doctor Strange, Professor X, Flash, Aquaman, Spider-Man, Black Panther, Thor, Deadpool, Portfolio Manager |
+
+### Marcos recentes
+
+- **Stories 126–140**: LangGraph durability, MoA Vision, Adaptive Routing, EventBus, Memory Consolidation, Degraded Mode.
+- **Sessão 2026-05-19**: prontidão para Bybit testnet — sandbox routing, exchange-agnostic price feed, env badge, clock skew check, painel Trading Mode no Overview. Veja [[2026-05-19]] e [[ADR-003 - Bybit Testnet Readiness]].
 
 ---
 
@@ -98,7 +103,8 @@ LIMIT 10
 
 ## 🔗 Recursos do Projeto
 
-- Repositório: https://github.com/labsmekka/mekka-trading
-- Stories entregues: 001–136
+- Repositório: https://github.com/MekkaLabs/mekka-trading
+- Stories entregues: 001–140 (61 stories totais — veja [[Stories do Projeto]])
 - Squads baseline: `alpha-risk-command`, `hyperliquid-mock-ops`, `market-intel-lab`
-- Projeto ativo: [[10 - Projects/Projeto - Mekka Trading|Projeto — Mekka Trading]]
+- Projeto ativo: [[Projeto - Mekka Trading]]
+- Runbook para subir Bybit testnet: [[Runbook - Bybit Testnet Setup]]
