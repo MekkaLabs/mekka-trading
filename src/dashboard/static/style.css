@@ -1410,6 +1410,76 @@ input, select { padding: 7px 10px; }
 .muted-line { color: var(--muted); font-size: 0.82rem; }
 
 /* --- 5.5 Trading Mode Settings --- */
+
+/* Global Mode row — the preset selector (conservative/balanced/aggressive)
+   that bridges the dashboard v1 toggles and the office_v2 enum. Lives at
+   the top of #sec-trading-settings; the granular toggles sit below as
+   "overrides". Stacking order: label on the left, buttons on the right,
+   wrapping to two rows on narrow screens. */
+.global-mode-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-lg);
+  flex-wrap: wrap;
+}
+.global-mode-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 160px;
+  flex: 0 0 auto;
+}
+.global-mode-label strong { font-size: 0.92rem; color: var(--text); }
+.global-mode-buttons {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  flex-wrap: wrap;
+}
+.global-mode-btn {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 14px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--glass-border);
+  background: rgba(5, 11, 24, 0.45);
+  color: var(--text-2);
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  font-size: 0.78rem;
+  transition: border-color var(--t-base), background var(--t-base), color var(--t-base);
+  min-width: 130px;
+}
+.global-mode-btn:hover {
+  border-color: var(--glass-border-lg);
+  color: var(--text);
+}
+.global-mode-btn.is-active {
+  border-color: var(--accent);
+  background: rgba(0, 212, 255, 0.10);
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.global-mode-btn .gmb-label { font-weight: 700; }
+.global-mode-btn .gmb-desc  { font-size: 0.68rem; color: var(--muted); line-height: 1.4; }
+.global-mode-hint {
+  margin: 6px 0 14px;
+  padding-left: 4px;
+  font-size: 0.76rem;
+}
+.global-mode-hint em {
+  color: var(--text-2);
+  font-style: normal;
+  font-weight: 600;
+}
+
 .trading-modes-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));

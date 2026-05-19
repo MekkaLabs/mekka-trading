@@ -2809,7 +2809,12 @@ if (pnlWindowSelect) {
 
 // ── Page→section mapping ─────────────────────────────────────
 const _PAGE_SECTIONS = {
-  overview:    ['sec-office', 'sec-live-market', 'sec-metrics'],
+  // `sec-trading-settings` appears in BOTH overview and settings so the
+  // operator can change the trading mode from the landing page without
+  // hunting through nav. The panel's HTML carries `data-page="overview
+  // settings"` for parity — keep these two lists in sync if you change
+  // either.
+  overview:    ['sec-office', 'sec-live-market', 'sec-metrics', 'sec-trading-settings'],
   wallet:      ['sec-killswitch', 'sec-pnl', 'sec-positions', 'sec-funding'],
   performance: ['sec-equity-curve', 'sec-trades-timeline', 'sec-replay-charts', 'sec-hero-sla'],
   agents:      ['sec-layers', 'sec-agents', 'sec-internals'],
@@ -4192,6 +4197,90 @@ async function _bootTradingModes() {
   }
 }
 
+// ── Global Mode (preset selector that drives /api/mode) ──────────────
+/**
+ * Render the three preset buttons (conservative/balanced/aggressive)
+ * inside #global-mode-buttons, wire each click to POST /api/mode, and
+ * keep the active button highlighted by polling /api/mode on a minimal
+ * interval. This is the bridge between the dashboard v1 toggles
+ * (super_aggressive / altcoins) and the office_v2 preset system: both
+ * mechanisms now coexist on the same panel so the operator can see
+ * what's active without bouncing between two UIs.
+ *
+ * Server contract (from src/config/runtime_mode.py):
+ *   GET /api/mode  → { mode: "balanced", modes: [{id,label,description,active}, ...] }
+ *   POST /api/mode { mode: "aggressive" } → 200 with new params
+ */
+async function _bootGlobalMode() {
+  const container = document.getElementById('global-mode-buttons');
+  if (!container) return;
+
+  function render(modes, active) {
+    container.innerHTML = '';
+    (modes || []).forEach(m => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `global-mode-btn ${m.id === active ? 'is-active' : ''}`;
+      btn.dataset.modeId = m.id;
+      btn.title = m.description || '';
+      btn.innerHTML = `
+        <span class="gmb-label">${m.label || m.id}</span>
+        <span class="gmb-desc">${m.description || ''}</span>
+      `;
+      btn.addEventListener('click', () => _setGlobalMode(m.id));
+      container.appendChild(btn);
+    });
+  }
+
+  async function loadAndRender() {
+    try {
+      const res = await fetch('/api/mode', { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      // /api/mode payload shape uses either `modes` (full list with
+      // labels/descriptions/active flag) or just `mode` (string). Be
+      // forgiving of both so a server rolling back the runtime_mode
+      // change doesn't break the UI.
+      const list = Array.isArray(data.modes) && data.modes.length
+        ? data.modes
+        : ['conservative', 'balanced', 'aggressive'].map(id => ({ id, label: id, description: '' }));
+      render(list, data.mode);
+    } catch (_e) {
+      // On error, still render the three buttons so the user has SOME
+      // way to drive the mode. Without an active marker.
+      const fallback = ['conservative', 'balanced', 'aggressive']
+        .map(id => ({ id, label: id, description: '' }));
+      render(fallback, null);
+    }
+  }
+
+  async function _setGlobalMode(modeId) {
+    const saveStatus = document.getElementById('mode-save-status');
+    if (saveStatus) { saveStatus.textContent = `Mudando para ${modeId}…`; saveStatus.style.opacity = '1'; }
+    try {
+      const res = await fetch('/api/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: modeId }),
+        credentials: 'include',
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      if (saveStatus) {
+        saveStatus.textContent = `✅ Modo global: ${modeId}`;
+        setTimeout(() => { if (saveStatus) saveStatus.style.opacity = '0'; }, 2500);
+      }
+      await loadAndRender();
+    } catch (e) {
+      if (saveStatus) { saveStatus.textContent = `❌ Falha: ${e.message}`; saveStatus.style.opacity = '1'; }
+    }
+  }
+
+  await loadAndRender();
+  // Refresh every 30s so a CLI/Telegram-driven mode change reflects in
+  // the UI without a page reload.
+  setInterval(loadAndRender, 30000);
+}
+
 // ── Global Live WebSocket — sempre conectado (topbar + posições + live page) ──
 let _gWs = null;
 let _gWsOn = false;
@@ -4336,6 +4425,7 @@ function _mkBootDashboardV2() {
   try { _mkBootTopBar();  } catch (e) { console.error('[v2] _mkBootTopBar failed:', e); }
   try { _mkBootTradeNow();} catch (e) { console.error('[v2] _mkBootTradeNow failed:', e); }
   try { _bootTradingModes(); } catch (e) { console.error('[v2] _bootTradingModes failed:', e); }
+  try { _bootGlobalMode();   } catch (e) { console.error('[v2] _bootGlobalMode failed:', e); }
   // Global WS — real-time topbar + positions across all pages
   try { _bootGlobalWs(); } catch (e) { console.error('[v2] _bootGlobalWs failed:', e); }
 }
