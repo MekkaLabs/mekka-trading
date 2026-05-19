@@ -294,10 +294,16 @@ class MekkaDashboardServer:
         self._daily_report_task: asyncio.Task[Any] | None = None
         self._weekly_report_task: asyncio.Task[Any] | None = None  # Story 090
         self._daily_reporter: Any | None = None  # DailyReporter, lazy import
-        # Live trading panel — Hyperliquid WebSocket price feed
+        # Live trading panel — exchange-agnostic WebSocket price feed.
+        # The pump is dispatched by `src.services.price_feed.make_price_feed`,
+        # which picks the right implementation based on ACTIVE_EXCHANGE.
+        # `_mark_prices` is keyed by bare Mekka symbol (BTC, ETH, …) so the
+        # downstream broadcast loop never needs to know which venue it came
+        # from. Kept as a plain dict (not a TypedDict) because the provider
+        # mutates it in place; the empty-state contract is "missing key".
         self._live_sockets: set[web.WebSocketResponse] = set()
-        self._hl_prices: dict[str, float] = {}      # coin → mark price
-        self._hl_pump_task: asyncio.Task[Any] | None = None
+        self._mark_prices: dict[str, float] = {}      # symbol → mark price
+        self._price_pump_task: asyncio.Task[Any] | None = None
         self._live_bcast_task: asyncio.Task[Any] | None = None
         # Drawdown monitor state (reset each UTC day)
         self._dd_peak_equity: float = 0.0           # highest equity seen today
@@ -463,8 +469,14 @@ class MekkaDashboardServer:
         self._broadcast_task = asyncio.create_task(self._broadcast_loop())
         self._daily_report_task = asyncio.create_task(self._daily_reporter.run_loop())
         self._weekly_report_task = asyncio.create_task(self._daily_reporter.run_weekly_loop())  # Story 090
-        # Live price feed — connect to Hyperliquid WS
-        self._hl_pump_task = asyncio.create_task(self._hl_price_pump_loop())
+        # Live price feed — exchange-agnostic pump. The factory inspects
+        # settings.active_exchange and returns the right provider
+        # (HyperliquidPriceFeed, BybitPriceFeed, …). The shared
+        # `self._mark_prices` dict is mutated in place.
+        from src.services.price_feed import make_price_feed  # noqa: WPS433
+        self._price_pump_task = asyncio.create_task(
+            make_price_feed().run(self._mark_prices)
+        )
         self._live_bcast_task = asyncio.create_task(self._live_price_broadcast_loop())
         # Startup ping — fire-and-forget, non-blocking
         asyncio.create_task(TelegramAlerter().ping(reason="dashboard startup"))
@@ -498,7 +510,7 @@ class MekkaDashboardServer:
             await ws.close(code=1001, message=b"server shutdown")
         for ws in list(self._live_sockets):
             await ws.close(code=1001, message=b"server shutdown")
-        for task in (self._hl_pump_task, self._live_bcast_task):
+        for task in (self._price_pump_task, self._live_bcast_task):
             if task is not None:
                 task.cancel()
                 try:
@@ -2276,7 +2288,7 @@ class MekkaDashboardServer:
         from src.dashboard.positions_provider import fetch_positions
 
         # Pass cached mark prices so paper positions show live uPnL (Story 099)
-        _mark_prices: dict[str, float] = dict(self._hl_prices) if self._hl_prices else {}
+        _mark_prices: dict[str, float] = dict(self._mark_prices) if self._mark_prices else {}
 
         try:
             data = await fetch_positions(mark_prices=_mark_prices)
@@ -2445,51 +2457,11 @@ class MekkaDashboardServer:
 
         return web.json_response({"status": "ok", "settings": cfg})
 
-    # ── Hyperliquid Live Price Feed ────────────────────────────────────────
-
-    async def _hl_price_pump_loop(self) -> None:
-        """Background task: connects to Hyperliquid WebSocket and keeps
-        self._hl_prices updated with the latest mark prices (allMids).
-        Reconnects automatically on any error.
-        """
-        hl_ws_url = (
-            "wss://api.hyperliquid.xyz/ws"
-            if settings.is_mainnet
-            else "wss://api.hyperliquid-testnet.xyz/ws"
-        )
-        while True:
-            try:
-                async with aiohttp.ClientSession() as _sess:
-                    async with _sess.ws_connect(
-                        hl_ws_url,
-                        heartbeat=20,
-                        timeout=aiohttp.ClientWSTimeout(ws_close=5.0),
-                    ) as _ws:
-                        await _ws.send_json({
-                            "method": "subscribe",
-                            "subscription": {"type": "allMids"},
-                        })
-                        logger.info("HL price pump connected: %s", hl_ws_url)
-                        async for _msg in _ws:
-                            if _msg.type == aiohttp.WSMsgType.TEXT:
-                                try:
-                                    _d = json.loads(_msg.data)
-                                    if _d.get("channel") == "allMids":
-                                        _mids = (_d.get("data") or {}).get("mids") or {}
-                                        for _coin, _price in _mids.items():
-                                            try:
-                                                self._hl_prices[_coin] = float(_price)
-                                            except (TypeError, ValueError):
-                                                pass
-                                except Exception:
-                                    pass
-                            elif _msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                                break
-            except asyncio.CancelledError:
-                return
-            except Exception as _exc:
-                logger.warning("HL price pump disconnected (%s) — reconnecting in 5s", _exc)
-                await asyncio.sleep(5)
+    # ── Live Price Feed ────────────────────────────────────────────────────
+    # The provider implementation lives in `src.services.price_feed` and is
+    # dispatched by `make_price_feed()` based on ACTIVE_EXCHANGE. The task
+    # is created in `_on_startup` and shut down in `_on_shutdown` along with
+    # the other background tasks.
 
     async def _live_price_broadcast_loop(self) -> None:
         """Push live prices + open position PnL to all /ws/live clients every 1s."""
@@ -2503,7 +2475,7 @@ class MekkaDashboardServer:
                 await asyncio.sleep(1.0)
                 if not self._live_sockets:
                     continue
-                prices = dict(self._hl_prices)
+                prices = dict(self._mark_prices)
                 # Enrich paper positions with live mark prices + real PnL
                 pos_data: dict = {}
                 try:
@@ -2623,11 +2595,11 @@ class MekkaDashboardServer:
         self._live_sockets.add(_ws)
         try:
             # Send current snapshot immediately on connect
-            if self._hl_prices:
+            if self._mark_prices:
                 try:
                     await _ws.send_str(json.dumps({
                         "type": "live_tick",
-                        "prices": dict(self._hl_prices),
+                        "prices": dict(self._mark_prices),
                         "positions": [],
                         "ts": datetime.now(timezone.utc).isoformat(),
                     }))
@@ -2716,7 +2688,7 @@ class MekkaDashboardServer:
             except (KeyError, TypeError, ValueError):
                 continue
 
-        _last_price = self._hl_prices.get(_sym) or (_candles[-1]["close"] if _candles else 0.0)
+        _last_price = self._mark_prices.get(_sym) or (_candles[-1]["close"] if _candles else 0.0)
         return web.json_response({
             "symbol": _sym,
             "tf": _tf,
@@ -2990,7 +2962,7 @@ class MekkaDashboardServer:
             try:
                 from src.dashboard.positions_provider import get_paper_equity_summary  # noqa: WPS433
                 eq = await asyncio.wait_for(
-                    get_paper_equity_summary(mark_prices=dict(self._hl_prices)), timeout=2.0
+                    get_paper_equity_summary(mark_prices=dict(self._mark_prices)), timeout=2.0
                 )
                 data["paper_equity"] = eq
                 # Override latest_equity_usd in the window summary for accuracy
