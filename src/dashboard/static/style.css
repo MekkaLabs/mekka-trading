@@ -4133,3 +4133,16 @@ body[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: rgba(2,13
 .impr-reject { background: var(--bad-dim);  border-color: var(--bad-border);  color: var(--bad); }
 .impr-reset  { background: var(--bg-3); color: var(--muted); }
 .page-nav-improvements { color: #7cb342; }
+
+/* MODO DEUS (god mode) — escalation of Force Execute (item c). Prominent
+   warning styling. The mainnet hard-block lives in the server, not here. */
+.godmode {
+  border: 1px dashed var(--bad-border) !important;
+  background: var(--bad-dim);
+  border-radius: var(--r-sm);
+  padding: 6px 10px !important;
+  color: var(--bad) !important;
+  font-weight: 700;
+}
+.godmode em { font-weight: 500; opacity: 0.8; font-style: italic; }
+.godmode input { accent-color: var(--bad); }

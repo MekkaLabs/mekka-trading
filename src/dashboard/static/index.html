@@ -1011,8 +1011,8 @@
         <div class="manual-trade-actions">
           <button type="button" class="mt-analyze-btn" id="mt-analyze-btn">🤖 Pedir parecer dos robôs</button>
           <button type="button" class="mt-execute-btn" id="mt-execute-btn" disabled>⚡ Executar</button>
-          <label class="mt-force-label" title="Override do veredito do Batman (só funciona em paper/testnet)">
-            <input type="checkbox" id="mt-force-execute"> Force execute
+          <label class="mt-force-label godmode" title="MODO DEUS: executa mesmo se os agentes (Batman) NÃO aprovarem. Bloqueado em mainnet/live por regra de segurança — só paper/testnet. Kill switch nunca é ignorado.">
+            <input type="checkbox" id="mt-force-execute"> 🔱 Modo Deus <em>(só paper/testnet)</em>
           </label>
         </div>
 
@@ -1276,9 +1276,9 @@
               so toggling the checkbox in DevTools on a mainnet+live build
               still gets rejected with HTTP 200 status="rejected".
             -->
-            <label id="trade-force-execute-row" class="trade-force-execute hidden" title="Atalho operacional: ignora veredito do Batman. Só funciona em testnet/paper.">
+            <label id="trade-force-execute-row" class="trade-force-execute godmode hidden" title="MODO DEUS: executa mesmo se os agentes (Batman) NÃO aprovarem. Bloqueado em mainnet/live por regra de segurança — só funciona em paper ou testnet. Kill switch nunca é ignorado.">
               <input type="checkbox" id="trade-force-execute" />
-              <span>⚠️ <strong>Force Execute</strong> — ignorar veredito do Batman (somente testnet/paper)</span>
+              <span>🔱 <strong>MODO DEUS</strong> — executar mesmo sem aprovação dos agentes <em>(só paper/testnet)</em></span>
             </label>
             <div class="trade-modal-actions">
               <button id="trade-confirm-btn" type="button" class="btn-engage">✅ Confirmar e Executar</button>
