@@ -39,17 +39,26 @@ def _signal(
     risk_reward: float = 2.0,
     metadata: dict | None = None,
 ) -> TradingSignal:
+    trade_action = TradeAction(action)
+    entry_price = 50000.0
+    if trade_action == TradeAction.SHORT:
+        stop_loss = 52000.0
+        take_profit = 46000.0
+    else:
+        stop_loss = 48000.0
+        take_profit = 54000.0
+
     return TradingSignal(
         symbol=symbol,
-        action=TradeAction(action),
+        action=trade_action,
         confidence=confidence,
         size_pct=size_pct,
         leverage=leverage,
         risk_reward_ratio=risk_reward,
         timeframe="1h",
-        entry_price=50000.0,
-        stop_loss=48000.0,
-        take_profit=54000.0,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
         reasoning="test",
         metadata=metadata or {},
     )

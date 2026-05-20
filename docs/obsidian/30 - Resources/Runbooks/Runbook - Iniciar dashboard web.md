@@ -69,6 +69,6 @@ python run.py --dashboard --equity 25000
 
 ## Referências
 
-- [[../../20 - Areas/Arquitetura/Dashboard Web (Pixel 3D)]]
+- [[Dashboard Web (Pixel 3D)]]
 - README — seção "Dashboard Web + Pixel 3D"
-- [[../../50 - MOCs/MOC - Operações & Observability]]
+- [[MOC - Operações & Observability]]

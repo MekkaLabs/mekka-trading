@@ -58,5 +58,5 @@ severity: low
 
 ## Referências
 
-- [[../../50 - MOCs/MOC - Operações & Observability]]
+- [[MOC - Operações & Observability]]
 - README — seção "Start"

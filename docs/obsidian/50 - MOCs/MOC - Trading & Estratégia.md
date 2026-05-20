@@ -51,9 +51,9 @@ equity = initial_capital + realized_pnl + unrealized_pnl
 
 ## Notas relacionadas
 
-- [[../20 - Areas/Agentes IA/Superman]]
-- [[../20 - Areas/Agentes IA/Vision]]
-- [[../20 - Areas/Agentes IA/Batman]]
-- [[../20 - Areas/Agentes IA/Iron Man]]
-- [[../20 - Areas/Agentes IA/Cyclops]]
-- [[../20 - Areas/Trading/Market Data]]
+- [[Superman]]
+- [[Vision]]
+- [[Batman]]
+- [[Iron Man]]
+- [[Cyclops]]
+- [[Market Data]]

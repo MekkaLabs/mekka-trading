@@ -73,11 +73,11 @@ Ver `.env.example`:
 ## Próximos passos sugeridos
 
 - [ ] Criar runbook "Diagnosticar dashboard que não carrega"
-- [ ] Documentar o esquema SQLite em [[../../30 - Resources/Decisoes Tecnicas/]]
+- [ ] Documentar o esquema SQLite em [[Decisoes Tecnicas]]
 - [ ] ADR sobre escolha do FastAPI vs Flask
-- [ ] Mapear sprites/animações do pixel 3D em [[../../80 - Attachments/]]
+- [ ] Mapear sprites/animações do pixel 3D em [[80 - Attachments]]
 
 ## Notas relacionadas
 
 - [[_Arquitetura Index]]
-- [[../../50 - MOCs/MOC - Operações & Observability]]
+- [[MOC - Operações & Observability]]

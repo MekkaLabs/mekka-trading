@@ -9,7 +9,7 @@ created: 2026-05-07
 
 > Runbooks, alertas, métricas, incidentes.
 
-Ver também: [[../../50 - MOCs/MOC - Operações & Observability]]
+Ver também: [[MOC - Operações & Observability]]
 
 ## Notas
 

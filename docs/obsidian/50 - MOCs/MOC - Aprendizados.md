@@ -43,6 +43,6 @@ SORT file.mtime DESC
 ## Como capturar
 
 1. Aconteceu algo digno de nota? Crie nota no `00 - Inbox`
-2. Use o template `[[../70 - Templates/Template - Aprendizado]]`
+2. Use o template `[[Template - Aprendizado]]`
 3. Tag com `#aprendizado/<categoria>`
 4. Nas suas daily notes, vincule ao aprendizado quando relevante

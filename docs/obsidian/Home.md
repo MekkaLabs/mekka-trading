@@ -41,12 +41,12 @@ Este é o vault de conhecimento do projeto: arquitetura, decisões, agentes, run
 ## 🚀 Navegação Rápida
 
 ### Mapas de Conteúdo (MOCs) — comece aqui
-- [[50 - MOCs/MOC - Arquitetura|🏗️ MOC Arquitetura]]
-- [[50 - MOCs/MOC - Agentes IA|🦸 MOC Agentes IA]]
-- [[50 - MOCs/MOC - Trading & Estratégia|📈 MOC Trading & Estratégia]]
-- [[50 - MOCs/MOC - Risco & Compliance|🛡️ MOC Risco & Compliance]]
-- [[50 - MOCs/MOC - Operações & Observability|🔭 MOC Operações]]
-- [[50 - MOCs/MOC - Aprendizados|📚 MOC Aprendizados]]
+- [[MOC - Arquitetura|🏗️ MOC Arquitetura]]
+- [[MOC - Agentes IA|🦸 MOC Agentes IA]]
+- [[MOC - Trading & Estratégia|📈 MOC Trading & Estratégia]]
+- [[MOC - Risco & Compliance|🛡️ MOC Risco & Compliance]]
+- [[MOC - Operações & Observability|🔭 MOC Operações]]
+- [[MOC - Aprendizados|📚 MOC Aprendizados]]
 
 ### Estrutura PARA
 | Pasta | Propósito |

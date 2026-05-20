@@ -3,14 +3,14 @@ title: Agentes IA — Index
 type: area
 tags: [area, agente]
 created: 2026-05-07
-updated: 2026-05-19
+updated: 2026-05-20
 ---
 
 # Área — Agentes IA
 
-> Uma nota por agente. Use `Template - Agente`. Roster organizado pela camada AIOX (Command → Strategy → Execution → Monitoring → Recovery).
+> Uma nota por agente. Use `Template - Agente`. Roster organizado pela camada AIOX (Command → Strategy → Execution → Monitoring → Recovery → Analytics).
 
-## Roster (16 agentes)
+## Roster (17 agentes)
 
 ### 🎖️ Command Layer
 - [x] [[Nick Fury]] — Mission Commander (orquestra o ciclo completo)
@@ -39,8 +39,12 @@ updated: 2026-05-19
 
 ### 📊 Analytics Layer
 - [x] [[Deadpool]] — Performance Analytics Agent (daily + weekly reports)
+- [x] [[Beast]] — Continuous Improvement Analyst (Story 248, codex M40)
 
-> Cyclops e Wolverine **NUNCA** colocam ordens reais — somente paper trades. Iron Man é o único caminho para ordens live em qualquer exchange.
+> Cyclops, Wolverine **e Beast** NUNCA colocam ordens reais. Cyclops e
+> Wolverine fazem paper trades (close/recover); Beast é estritamente
+> read-only. **Iron Man é o único caminho para ordens live** em
+> qualquer exchange.
 
 ## Agentes documentados
 

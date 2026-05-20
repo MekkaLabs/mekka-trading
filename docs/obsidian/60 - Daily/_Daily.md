@@ -7,7 +7,7 @@ tags: [daily]
 # 📅 Daily Notes
 
 > Log diário. Use `Cmd/Ctrl + P` → "Daily notes: Open today's daily note".
-> Template em `[[../70 - Templates/Daily Note]]`.
+> Template em `[[Daily Note]]`.
 
 ## Última semana
 

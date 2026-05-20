@@ -59,7 +59,7 @@ Tudo mais em `.obsidian/` é versionado — incluindo `community-plugins.json`, 
 
 ## Convenções de wikilink
 
-- Use **short links** (`[[Nick Fury]]`) e não paths relativos (`[[../20 - Areas/Agentes IA/Nick Fury]]`). O Obsidian resolve sozinho graças a `newLinkFormat: "shortest"` em `app.json`.
+- Use **short links** (`[[Nick Fury]]`) e não paths relativos (`[[Nick Fury]]`). O Obsidian resolve sozinho graças a `newLinkFormat: "shortest"` em `app.json`.
 - Quando houver ambiguidade (duas notas com o mesmo nome), o Obsidian sugere um caminho parcial — aceite a sugestão em vez de digitar manualmente.
 
 ## Sincronização com `docs/stories/`

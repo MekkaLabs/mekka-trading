@@ -67,6 +67,22 @@ updated: 2026-05-19
 
 > Stories 137–139 não foram entregues (numeração reservada / pulada).
 
+## Milestone 40 — Agent Communication Upgrade (codex, ✅)
+
+Entregue pelo codex em 2026-05-19 em sessão paralela à M22. Sete stories que reorganizam a comunicação entre agentes + adicionam capacidade de melhoria contínua e checkpointing por ciclo.
+
+| Story | Título |
+|---|---|
+| 244 | Flash→Vision direct link |
+| 245 | DebateVerdict→Vision |
+| 247 | Batman gate 3r — Flash divergence rejection |
+| 248 | **Beast — Continuous Improvement Agent** ([[Beast]]) |
+| 249 | DecisionMemory |
+| 250 | Vision structured output (JSON schema) |
+| 251 | CycleCheckpoint |
+
+> Story 246 reservada / não entregue.
+
 ## Milestone 22 — Bybit Testnet Readiness (em andamento)
 
 Esta milestone **não tem story numerada** ainda — foi entregue como uma sessão pontual em 2026-05-19. Decisão técnica capturada em [[ADR-003 - Bybit Testnet Readiness]] e runbook em [[Runbook - Bybit Testnet Setup]]. Resumo dos commits:

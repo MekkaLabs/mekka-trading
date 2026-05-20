@@ -119,7 +119,14 @@ def _good_signal() -> TradingSignal:
 @pytest.mark.asyncio
 async def test_portfolio_paper_fallback_on_placeholder_wallet():
     """conftest sets HYPERLIQUID_WALLET_ADDRESS to all-zeros — that's the placeholder."""
-    snapshot = await PortfolioManager().run()
+    from src.config.settings import settings as real_settings
+
+    old_exchange = real_settings.active_exchange
+    real_settings.__dict__["active_exchange"] = "hyperliquid"
+    try:
+        snapshot = await PortfolioManager().run()
+    finally:
+        real_settings.__dict__["active_exchange"] = old_exchange
 
     assert snapshot.source == EquitySource.PAPER_FALLBACK
     assert snapshot.is_paper is True
@@ -133,6 +140,8 @@ async def test_portfolio_paper_fallback_on_network_error(monkeypatch):
     """When fetch raises, Portfolio Manager returns paper fallback with the error."""
     # Force a non-placeholder wallet so we exit the early-return branch
     from src.config.settings import settings as real_settings
+    old_exchange = real_settings.active_exchange
+    real_settings.__dict__["active_exchange"] = "hyperliquid"
     real_settings.__dict__["hyperliquid_wallet_address"] = "0xdeadbeef1234567890abcdef0000000000000000"
 
     pm = PortfolioManager()
@@ -141,6 +150,7 @@ async def test_portfolio_paper_fallback_on_network_error(monkeypatch):
     try:
         snapshot = await pm.run()
     finally:
+        real_settings.__dict__["active_exchange"] = old_exchange
         # Restore the placeholder so other tests stay isolated
         real_settings.__dict__["hyperliquid_wallet_address"] = (
             "0x0000000000000000000000000000000000000000"
@@ -155,6 +165,8 @@ async def test_portfolio_paper_fallback_on_network_error(monkeypatch):
 async def test_portfolio_parses_clearinghouse_state(monkeypatch):
     """Successful clearinghouseState response → HYPERLIQUID source with parsed positions."""
     from src.config.settings import settings as real_settings
+    old_exchange = real_settings.active_exchange
+    real_settings.__dict__["active_exchange"] = "hyperliquid"
     real_settings.__dict__["hyperliquid_wallet_address"] = "0xdeadbeef1234567890abcdef0000000000000000"
 
     raw_response: dict[str, Any] = {
@@ -201,6 +213,7 @@ async def test_portfolio_parses_clearinghouse_state(monkeypatch):
     try:
         snapshot = await pm.run()
     finally:
+        real_settings.__dict__["active_exchange"] = old_exchange
         real_settings.__dict__["hyperliquid_wallet_address"] = (
             "0x0000000000000000000000000000000000000000"
         )
@@ -212,6 +225,56 @@ async def test_portfolio_parses_clearinghouse_state(monkeypatch):
     assert snapshot.open_positions_count == 2  # BTC + ETH; SOL skipped
     sides = {p.symbol: p.side for p in snapshot.positions}
     assert sides == {"BTC": "long", "ETH": "short"}
+
+
+def test_portfolio_parses_bybit_ccxt_snapshot():
+    pm = PortfolioManager()
+    balance = {
+        "info": {
+            "result": {
+                "list": [
+                    {
+                        "totalEquity": "9991.45",
+                        "totalAvailableBalance": "9991.45",
+                    }
+                ]
+            }
+        },
+        "free": {"USDT": 10000.0},
+        "total": {"USDT": 10000.0},
+    }
+    positions = [
+        {
+            "symbol": "BTC/USDT:USDT",
+            "side": "short",
+            "contracts": 0.015,
+            "entryPrice": 76500.5,
+            "unrealizedPnl": 12.34,
+            "leverage": 2,
+            "info": {"size": "0.015", "symbol": "BTCUSDT"},
+        },
+        {
+            "symbol": "ETH/USDT:USDT",
+            "side": None,
+            "contracts": 0.0,
+            "entryPrice": None,
+            "unrealizedPnl": None,
+            "leverage": 10,
+            "info": {"size": "0", "symbol": "ETHUSDT"},
+        },
+    ]
+
+    snapshot = pm._parse_ccxt_snapshot("bybit", balance, positions)
+
+    assert snapshot.source == EquitySource.BYBIT
+    assert snapshot.equity_usd == pytest.approx(9991.45, rel=1e-6)
+    assert snapshot.available_balance_usd == pytest.approx(9991.45, rel=1e-6)
+    assert snapshot.margin_used_usd == pytest.approx(0.0, rel=1e-6)
+    assert snapshot.open_positions_count == 1
+    assert snapshot.positions[0].symbol == "BTC"
+    assert snapshot.positions[0].side == "short"
+    assert snapshot.positions[0].size == pytest.approx(0.015, rel=1e-6)
+    assert snapshot.positions[0].entry_price == pytest.approx(76500.5, rel=1e-6)
 
 
 # ===========================================================================

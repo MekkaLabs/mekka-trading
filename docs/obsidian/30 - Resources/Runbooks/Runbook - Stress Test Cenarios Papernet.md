@@ -613,4 +613,4 @@ curl -s "http://localhost:8787/api/audit?since=<timestamp_do_marker>" | jq
 - [ ] `python scripts/stress_inject.py kill-switch-release` (garantir estado limpo)
 - [ ] `python scripts/stress_inject.py close-all-paper` (garantir sem posições)
 - [ ] Marker final no audit log
-- [ ] Resumo da sessão em [[60 - Daily/{{date}}]]
+- [ ] Resumo da sessão em [[{{date}}]]

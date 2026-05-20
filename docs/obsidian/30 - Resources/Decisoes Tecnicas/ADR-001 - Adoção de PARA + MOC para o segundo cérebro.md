@@ -59,8 +59,8 @@ Adotar **PARA** (Tiago Forte) + **MOCs** (Maps of Content):
 
 ## Notas Relacionadas
 
-- [[../../Home]]
-- [[../../50 - MOCs/MOC - Arquitetura]]
+- [[Home]]
+- [[MOC - Arquitetura]]
 
 ## Referências
 

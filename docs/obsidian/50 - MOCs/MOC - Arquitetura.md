@@ -47,7 +47,7 @@ INPUT → ANALYSIS → DECOMPOSITION → ROUTING → EXECUTION → VALIDATION �
 
 ### Runtime Python (`src/`)
 - `src/agents/` — implementações Python dos agentes super-heroes (Aquaman, Batman, Black Panther, Doctor Strange, Iron Man, Nick Fury, Professor X, Spider-Man, Superman, Thor, Vision)
-- `src/dashboard/` — [[../20 - Areas/Arquitetura/Dashboard Web (Pixel 3D)|Dashboard Web (Pixel 3D)]] (FastAPI + WebSocket + pixel 3D Marvel/Wall Street)
+- `src/dashboard/` — [[Dashboard Web (Pixel 3D)|Dashboard Web (Pixel 3D)]] (FastAPI + WebSocket + pixel 3D Marvel/Wall Street)
 - `src/persistence/` — SQLite (db, models, repository)
 - `src/config/` — settings + .env loader
 - `src/models/` — modelos compartilhados

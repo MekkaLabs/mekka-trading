@@ -172,8 +172,8 @@ MEKKA_DAILY_REPORT_MINUTE_UTC=55
 
 ## Links
 
-- [[../50 - MOCs/MOC - Arquitetura|MOC Arquitetura]]
-- [[../50 - MOCs/MOC - Agentes IA|MOC Agentes IA]]
-- [[../50 - MOCs/MOC - Trading & Estratégia|MOC Trading & Estratégia]]
-- [[../50 - MOCs/MOC - Risco & Compliance|MOC Risco & Compliance]]
-- [[../30 - Resources/Runbooks/_Runbooks Index|Runbooks]]
+- [[MOC - Arquitetura|MOC Arquitetura]]
+- [[MOC - Agentes IA|MOC Agentes IA]]
+- [[MOC - Trading & Estratégia|MOC Trading & Estratégia]]
+- [[MOC - Risco & Compliance|MOC Risco & Compliance]]
+- [[_Runbooks Index|Runbooks]]

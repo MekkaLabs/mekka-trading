@@ -9,7 +9,7 @@ created: 2026-05-07
 
 > Políticas, limites, kill-switch, gates de validação.
 
-Ver também: [[../../50 - MOCs/MOC - Risco & Compliance]]
+Ver também: [[MOC - Risco & Compliance]]
 
 ## Notas
 
