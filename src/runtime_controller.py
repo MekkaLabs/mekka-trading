@@ -42,11 +42,20 @@ class RuntimeController:
         self._task: asyncio.Task[Any] | None = None
         self._poller_task: asyncio.Task[Any] | None = None
         self._fury: Any | None = None
+        # Optional Telegram inbound poller living in the always-on control
+        # plane. The controller injects/clears the runtime refs on it so the
+        # operator can /ligar and /desligar from Telegram.
+        self._poller: Any | None = None
         self._state: RuntimeState = "stopped"
         self._started_at: float | None = None
         self._cycles: int = 0
         self._last_error: str | None = None
         self._lock = asyncio.Lock()
+
+    def attach_poller(self, poller: Any) -> None:
+        """Wire a control-plane Telegram poller so it learns when the runtime
+        starts/stops (set_runtime / clear_runtime)."""
+        self._poller = poller
 
     # ── introspection ─────────────────────────────────────────────────────
     @property
@@ -125,26 +134,14 @@ class RuntimeController:
         try:
             await fury.initialize()
 
-            # Story 049 — optional Telegram inbound command poller.
-            if settings.telegram_inbound_enabled:
+            # Inject runtime refs into the control-plane Telegram poller (the
+            # poller itself lives in run.py so it survives stop/start, letting
+            # the operator /ligar after /desligar).
+            if self._poller is not None:
                 try:
-                    from src.services.telegram_inbound import TelegramInboundPoller
-                    from src.persistence.repository import MekkaRepository
-
-                    poller = TelegramInboundPoller(
-                        nick_fury=fury,
-                        portfolio=fury._portfolio,
-                        repo=MekkaRepository,
-                    )
-                    self._poller_task = asyncio.create_task(
-                        poller.run_forever(), name="telegram_inbound"
-                    )
-                    logger.info("[RuntimeController] TelegramInboundPoller started")
+                    self._poller.set_runtime(fury, getattr(fury, "_portfolio", None))
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "[RuntimeController] TelegramInboundPoller failed (non-fatal): {}",
-                        exc,
-                    )
+                    logger.warning("[RuntimeController] poller.set_runtime failed: {}", exc)
 
             monitor_interval = settings.monitor_interval_seconds
             main_interval = settings.main_loop_interval_seconds
@@ -176,6 +173,12 @@ class RuntimeController:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[RuntimeController] shutdown error (ignored): {}", exc)
             self._fury = None
+            # Tell the control-plane poller the runtime is gone.
+            if self._poller is not None:
+                try:
+                    self._poller.clear_runtime()
+                except Exception:  # noqa: BLE001
+                    pass
             # If we fell out of the loop without an explicit stop(), reflect it.
             if self._state != "stopping":
                 self._state = "stopped"

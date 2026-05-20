@@ -200,6 +200,22 @@ def main() -> int:
             # chamada de LLM continue após o shutdown.
             async def _run_both() -> None:
                 controller = RuntimeController(equity_usd=args.equity)
+                # Telegram inbound poller lives in the control plane (survives
+                # runtime stop/start) so /ligar, /desligar e /reboot funcionam
+                # mesmo com o sistema desligado.
+                poller_task = None
+                if settings.telegram_inbound_enabled:
+                    try:
+                        from src.services.telegram_inbound import TelegramInboundPoller
+                        from src.persistence.repository import MekkaRepository
+                        poller = TelegramInboundPoller(controller=controller, repo=MekkaRepository)
+                        controller.attach_poller(poller)
+                        poller_task = asyncio.create_task(
+                            poller.run_forever(), name="telegram_inbound"
+                        )
+                        logger.info("[run] TelegramInboundPoller started in control plane")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("[run] TelegramInboundPoller failed (non-fatal): %s", exc)
                 await controller.start()
                 try:
                     await run_dashboard_server(
@@ -208,6 +224,8 @@ def main() -> int:
                         controller=controller,
                     )
                 finally:
+                    if poller_task is not None:
+                        poller_task.cancel()
                     await controller.stop()
 
             asyncio.run(_run_both())

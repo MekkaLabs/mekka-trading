@@ -85,6 +85,15 @@ _HELP_TEXT = (
     "/weekly     — envia relatório semanal agora (Deadpool 7 dias)\n"
     "/equity     — breakdown de equity (inicial + realizado + não realizado)\n"
     "/balance    — saldo live da exchange (Hyperliquid clearinghouse)\n"
+    "—— Sistema ——\n"
+    "/sistema    — status do runtime (ligado/desligado, uptime, ciclos)\n"
+    "/ligar      — liga o sistema (inicia o runtime de trading)\n"
+    "/desligar   — desliga o sistema (para o runtime; sem gasto de tokens)\n"
+    "/reboot     — reinicia o sistema (desliga e liga)\n"
+    "—— Melhorias ——\n"
+    "/melhorias  — lista propostas pendentes do conselho (Mekka)\n"
+    "/aprovar <id>  — aprova proposta (envia ao dev) — sincroniza com o dashboard\n"
+    "/reprovar <id> — reprova proposta — sincroniza com o dashboard\n"
     "/help       — esta mensagem"
 )
 
@@ -100,14 +109,30 @@ class TelegramInboundPoller:
     def __init__(
         self,
         *,
-        nick_fury: "NickFury",
-        portfolio: "PortfolioManager",
+        nick_fury: "NickFury | None" = None,
+        portfolio: "PortfolioManager | None" = None,
+        controller: object | None = None,
         repo: type[MekkaRepository] = MekkaRepository,
     ) -> None:
+        # When the poller lives in the always-on control plane (so it can
+        # turn the runtime on/off), fury/portfolio start as None and are
+        # injected by the RuntimeController via set_runtime/clear_runtime.
         self._fury = nick_fury
         self._portfolio = portfolio
+        self._controller = controller
         self._repo = repo
         self._log = logger.bind(agent="TelegramInbound")
+
+    # -- runtime wiring (control-plane mode) ----------------------------
+    def set_runtime(self, nick_fury: object, portfolio: object) -> None:
+        """Called by RuntimeController when the runtime starts."""
+        self._fury = nick_fury
+        self._portfolio = portfolio
+
+    def clear_runtime(self) -> None:
+        """Called by RuntimeController when the runtime stops."""
+        self._fury = None
+        self._portfolio = None
 
     # ------------------------------------------------------------------
     # Public
@@ -233,13 +258,22 @@ class TelegramInboundPoller:
             "/weekly": self._cmd_weekly,       # Story 101
             "/equity": self._cmd_equity,       # Story 103
             "/balance": self._cmd_balance,     # Story 108
+            # System control (RuntimeController) — control plane
+            "/ligar": self._cmd_system_start,
+            "/desligar": self._cmd_system_stop,
+            "/reboot": self._cmd_system_reboot,
+            "/sistema": self._cmd_system_status,
+            # Improvement council (Mekka) — synced with the dashboard
+            "/melhorias": self._cmd_improvements,
+            "/aprovar": self._cmd_improve_accept,
+            "/reprovar": self._cmd_improve_reject,
             "/help": self._cmd_help,
         }
 
         handler = handlers.get(command)
         if handler is None:
             reply = await self._cmd_help()
-        elif command in ("/pnl", "/perf", "/mode", "/leaderboard", "/stats", "/unblacklist", "/dryrun"):
+        elif command in ("/pnl", "/perf", "/mode", "/leaderboard", "/stats", "/unblacklist", "/dryrun", "/aprovar", "/reprovar"):
             reply = await handler(args)  # type: ignore[call-arg]
         else:
             reply = await handler()  # type: ignore[call-arg]
@@ -281,6 +315,105 @@ class TelegramInboundPoller:
             f"Trades today: {trades_today}\n"
             f"Total signals: {total_signals}"
         )
+
+    # -- system control (RuntimeController) -----------------------------
+    async def _cmd_system_status(self) -> str:
+        c = self._controller
+        if c is None:
+            return "⚠️ Controle de sistema indisponível neste processo."
+        try:
+            st = c.status()
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ Erro ao ler status: {exc}"
+        emoji = {"running": "🟢", "stopped": "🔴", "starting": "🟡", "stopping": "🟡"}.get(st.get("state"), "⚪")
+        return (
+            f"{emoji} Sistema: {st.get('state','?').upper()}\n"
+            f"Uptime: {st.get('uptime_seconds',0)}s · Ciclos: {st.get('cycles',0)}\n"
+            f"Modo: {st.get('mode','?')} · {'PAPER' if st.get('paper_trading') else 'LIVE'}\n"
+            f"Comandos: /ligar /desligar /reboot"
+        )
+
+    async def _cmd_system_start(self) -> str:
+        c = self._controller
+        if c is None:
+            return "⚠️ Controle de sistema indisponível."
+        try:
+            await c.start()
+            return "🟢 Sistema LIGADO — o runtime de trading está rodando."
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ Falha ao ligar: {exc}"
+
+    async def _cmd_system_stop(self) -> str:
+        c = self._controller
+        if c is None:
+            return "⚠️ Controle de sistema indisponível."
+        try:
+            await c.stop()
+            return "🔴 Sistema DESLIGADO — runtime parado, sem novas chamadas de LLM (sem gasto de tokens)."
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ Falha ao desligar: {exc}"
+
+    async def _cmd_system_reboot(self) -> str:
+        c = self._controller
+        if c is None:
+            return "⚠️ Controle de sistema indisponível."
+        try:
+            await c.reboot()
+            return "🔄 Sistema REINICIADO — runtime parado e ligado novamente."
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ Falha ao reiniciar: {exc}"
+
+    # -- improvement council (Mekka) — synced with dashboard ------------
+    async def _cmd_improvements(self) -> str:
+        try:
+            from src.agents.mekka import Mekka
+            report = await Mekka().run(period_days=7)
+            recs = getattr(report, "recommendations", []) or []
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ Erro ao consultar o conselho: {exc}"
+        pend = [r for r in recs if getattr(r, "status", "pending") == "pending"]
+        if not pend:
+            return "🛠️ Nenhuma proposta pendente no conselho de melhorias."
+        lines = ["🛠️ Propostas pendentes (use /aprovar <id> ou /reprovar <id>):"]
+        for r in pend[:8]:
+            rid = getattr(r, "id", "?")
+            title = getattr(r, "title", "(sem título)")
+            area = getattr(r, "area", "")
+            lines.append(f"• `{rid}` — {title} [{area}]")
+        return "\n".join(lines)
+
+    async def _cmd_improve_accept(self, args: list[str] | None = None) -> str:
+        return await self._improve_decide(args, "accepted")
+
+    async def _cmd_improve_reject(self, args: list[str] | None = None) -> str:
+        return await self._improve_decide(args, "rejected")
+
+    async def _improve_decide(self, args: list[str] | None, status: str) -> str:
+        if not args:
+            return "Uso: /aprovar <id>  ou  /reprovar <id> (veja os ids em /melhorias)."
+        rec_id = args[0]
+        try:
+            from src.agents.mekka import Mekka
+            mekka = Mekka()
+            ok = mekka.record_decision(rec_id, status)
+            # On accept, enqueue the dev brief (best-effort) — try to find the rec.
+            if ok and status == "accepted":
+                try:
+                    report = await mekka.run(period_days=7)
+                    for r in getattr(report, "recommendations", []) or []:
+                        rd = r.to_dict() if hasattr(r, "to_dict") else dict(r)
+                        if rec_id in (rd.get("id"), rd.get("rec_id")):
+                            from src.services import improvement_queue
+                            improvement_queue.enqueue_brief(rd)
+                            break
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ Erro ao registrar decisão: {exc}"
+        if not ok:
+            return f"⚠️ Não foi possível registrar `{rec_id}` (id inválido?)."
+        verb = "aprovada ✅ (enviada ao dev)" if status == "accepted" else "reprovada ❌"
+        return f"Proposta `{rec_id}` {verb}. Sincronizado com a Central de Melhorias do dashboard."
 
     async def _cmd_pnl(self, args: list[str] | None = None) -> str:
         limit = 7
@@ -326,7 +459,8 @@ class TelegramInboundPoller:
             # [A3] Reset safety-net breakers so a residual streak from before
             # the halt doesn't immediately retrip the kill switch.
             try:
-                self._fury.reset_breakers()
+                if self._fury is not None:
+                    self._fury.reset_breakers()
             except Exception as exc:  # noqa: BLE001
                 self._log.warning(f"reset_breakers failed (non-fatal): {exc}")
             self._log.warning("Kill switch released via Telegram /resume")
@@ -336,6 +470,8 @@ class TelegramInboundPoller:
             return f"⚠️ Erro ao liberar kill switch: {exc}"
 
     async def _cmd_positions(self) -> str:
+        if self._portfolio is None:
+            return "🔴 Sistema desligado — ligue com /ligar para consultar posições ao vivo."
         try:
             snapshot = await self._portfolio.run()
         except Exception as exc:  # noqa: BLE001
