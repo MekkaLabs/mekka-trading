@@ -5816,7 +5816,23 @@ class MekkaDashboardServer:
                             "verdict": approval.verdict.value, "reasons": approval.reasons,
                         },
                     )
-                    # Fall through to IronMan as if approved.
+                    # Build an EXECUTABLE approval so IronMan actually places the
+                    # order. Merely "falling through" kept Batman's REJECTED
+                    # verdict, and IronMan independently SKIPs anything that
+                    # isn't is_executable (qty=0). Override with the operator's
+                    # requested size/leverage (clamped to model bounds). Safe
+                    # because we already gated on paper/testnet above.
+                    from src.models.risk import RiskApproval, RiskVerdict
+                    approval = RiskApproval(
+                        symbol=signal.symbol,
+                        verdict=RiskVerdict.APPROVED,
+                        reasons=["FORCE_EXECUTE (Modo Deus): override do Batman em paper/testnet"]
+                                + list(approval.reasons or []),
+                        adjusted_size_pct=max(0.0001, min(float(signal.size_pct), 0.10)),
+                        adjusted_leverage=max(1, min(int(signal.leverage), 50)),
+                        breached_limits=list(approval.breached_limits or []),
+                        metadata={**(approval.metadata or {}), "force_execute": True},
+                    )
                 elif force_execute and not env_is_safe_for_bypass:
                     reason = (
                         "FORCE_EXECUTE solicitado em ambiente mainnet/live — recusado por "
@@ -5904,7 +5920,13 @@ class MekkaDashboardServer:
                 f"qty={result.quantity} avg={result.avg_price}"
             )
             if not exec_ok and err_detail:
-                reason += f" — {err_detail}"
+                low = str(err_detail).lower()
+                if "10024" in str(err_detail) or "regulatory" in low or "kyc" in low:
+                    reason += (" — 🚫 A Bybit recusou por restrição regulatória/KYC desta conta "
+                               "(retCode 10024). Conclua o KYC na Bybit, troque de exchange, ou "
+                               "ative PAPER_TRADING=true para simular a abertura da posição.")
+                else:
+                    reason += f" — {err_detail}"
             return web.json_response({
                 "status": api_status,
                 "reason": reason,
