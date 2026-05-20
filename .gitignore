@@ -114,8 +114,16 @@ logs/
 npm-debug.log*
 
 # Memory / Audit trail (dados gerados em runtime)
+# NOTE (cleanup 2026-05-20): the audit log writes .ndjson + .head files,
+# not .jsonl — the old glob never matched them, so a Codex auto-commit
+# ("Sync local changes") swept hundreds of runtime files into git. Cover
+# every runtime extension here so it can never recur.
 memory/audit-log/*.jsonl
+memory/audit-log/*.ndjson
+memory/audit-log/*.head
 memory/alerts/*.jsonl
+memory/alerts/*.json
+memory/alerts/*.ndjson
 memory/reports/*.json
 !memory/audit-log/.gitkeep
 !memory/alerts/.gitkeep
@@ -194,8 +202,15 @@ temp/
 .env
 
 # Runtime data — não versionar
+# NOTE (cleanup 2026-05-20): broadened from the specific `mekka_trading.db`
+# name to all SQLite + JSON runtime artifacts under data/. The live DB is
+# actually data/mekka.db and the dashboard writes JSON caches/state here —
+# none of it belongs in git.
 data/dashboard_snapshots/
-data/mekka_trading.db
-data/mekka_trading.db-shm
-data/mekka_trading.db-wal
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.db-journal
+data/*.json
+!data/.gitkeep
 .agent-os/
