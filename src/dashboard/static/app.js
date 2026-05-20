@@ -267,11 +267,23 @@ function savePrefs(partial) {
 }
 
 function resetPrefs() {
+  // Wipe BOTH the v1 prefs key and the widget-customizer key.
+  // P0.1 (HANDOFF 2026-05-20): the Trading Mode panel was disappearing
+  // because the widget customizer could hide `sec-trading-settings` and
+  // the previous reset only cleared `PREF_KEY`. Now a single click on
+  // "Reset Preferences" restores every panel that the operator ever
+  // toggled off, regardless of which storage key persisted the choice.
+  try { localStorage.removeItem(PREF_KEY); } catch { /* noop */ }
+  try { localStorage.removeItem('mekka_widget_prefs_v1'); } catch { /* noop */ }
+  // Best-effort server-side wipe too (Story 042 syncs prefs back). If the
+  // dashboard is offline we still proceed with the reload.
   try {
-    localStorage.removeItem(PREF_KEY);
-  } catch {
-    // noop
-  }
+    fetch('/api/prefs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefs: {} }),
+    }).catch(() => {});
+  } catch { /* noop */ }
   window.location.reload();
 }
 
@@ -352,6 +364,72 @@ function applyLanguage(lang) {
     const isLight = document.body.getAttribute('data-theme') === 'light';
     themeToggleBtn.textContent = isLight ? t('theme_dark') : t('theme_light');
   }
+
+  // P0.5 (HANDOFF 2026-05-20): translate the current nav set, financial
+  // topbar cards, and high-traffic panel titles. Driven by data-* hooks
+  // and stable selectors so we don't have to bolt an `id` onto every
+  // markup element. Keys live in i18n.js under `nav.*`, `ftb.*`,
+  // `panel.*`, `topbar.*`.
+  document.querySelectorAll('.page-nav-btn[data-page]').forEach(btn => {
+    const key = 'nav.' + btn.dataset.page;
+    const translated = t(key);
+    if (translated && translated !== key) btn.textContent = translated;
+  });
+  const _ftbMap = {
+    'ftb-wallet':      'ftb.wallet',
+    'ftb-daypnl':      'ftb.day_pnl',
+    'ftb-daypnl-pct':  'ftb.day_pnl_pct',
+    'ftb-positions':   'ftb.positions',
+    'ftb-risk':        'ftb.risk',
+    'ftb-mode':        'ftb.mode',
+    'ftb-agents':      'ftb.agents',
+    'ftb-update':      'ftb.updated',
+  };
+  Object.entries(_ftbMap).forEach(([cardId, key]) => {
+    const card = document.getElementById(cardId);
+    if (!card) return;
+    const label = card.querySelector('.ftb-label');
+    if (label) {
+      const v = t(key);
+      if (v && v !== key) label.textContent = v;
+    }
+  });
+  const _panelMap = {
+    'sec-trading-settings':  'panel.trading_modes',
+    'sec-agents':            'panel.agents_roster',
+    'sec-memory':            'panel.episodic_memory',
+    'sec-settings':          'panel.customize',
+    'sec-killswitch':        'panel.kill_switch',
+    'sec-positions':         'panel.open_positions',
+    'sec-pnl':               'panel.equity_pnl',
+    'sec-funding':           'panel.funding_rates',
+    'sec-risk-panel':        'panel.risk_panel',
+    'sec-risk':              'panel.risk_heatmap',
+    'sec-anomalies':         'panel.anomalies',
+    'sec-incident-queue':    'panel.incident_queue',
+    'sec-replay-player':     'panel.replay_player',
+    'sec-replay-charts':     'panel.replay_charts',
+    'sec-manual':            'panel.mini_manual',
+    'sec-hero-sla':          'panel.hero_sla',
+    'sec-timeline':          'panel.timeline',
+    'sec-symbol-timeline':   'panel.symbol_timeline',
+  };
+  Object.entries(_panelMap).forEach(([secId, key]) => {
+    const sec = document.getElementById(secId);
+    if (!sec) return;
+    const h2 = sec.querySelector('h2');
+    if (h2) {
+      const v = t(key);
+      if (v && v !== key) h2.textContent = v;
+    }
+  });
+  // Topbar subtitle (the "Nick Fury Operations · …" line)
+  const _subtitleEl = document.querySelector('.topbar > div > p');
+  if (_subtitleEl) {
+    const v = t('topbar.subtitle');
+    if (v && v !== 'topbar.subtitle') _subtitleEl.textContent = v;
+  }
+
   remountOfficeV2Panel();
 }
 
@@ -443,6 +521,18 @@ function enhanceTitlesWithHelp() {
 function renderAgentsRoster() {
   const root = document.getElementById('agents-roster');
   if (!root) return;
+
+  // P0.6 (HANDOFF 2026-05-20): prefer the Office v2 sprite engine when
+  // /static/agents-sprites.js is loaded. It exposes window.AGENTS (22+
+  // characters with cape/helmet/mask overlays) plus window.drawAgent so
+  // the roster matches the Pixel Office one-to-one. Falls back to the
+  // legacy 10x12 totem sprites if the engine is unavailable.
+  if (Array.isArray(window.AGENTS) && typeof window.drawAgent === 'function') {
+    _renderRosterFromOfficeSprites(root);
+    return;
+  }
+
+  // ── Legacy fallback ────────────────────────────────────────
   root.innerHTML = AGENT_PALETTES.map(([name]) => `
     <div class="agent-card">
       <div class="sprite3d" data-agent="${name}"></div>
@@ -463,6 +553,45 @@ function renderAgentsRoster() {
       }
     }
     el.innerHTML = html;
+  });
+}
+
+// P0.6 helper: render the Agents Roster using the same Office v2 sprite
+// engine (16w x 22h base + overlays). Each agent gets a card with a
+// canvas (64x88, scale=4) so the pixel art reads cleanly in the roster
+// grid without bleeding into anti-aliased blur.
+function _renderRosterFromOfficeSprites(root) {
+  const AGENTS = window.AGENTS;
+  const SCALE  = 4;
+  const SPRITE_W = 16, SPRITE_H = 22;
+
+  root.innerHTML = AGENTS.map(a => `
+    <div class="agent-card" data-agent-id="${escapeHtml(a.id || '')}">
+      <canvas class="sprite-pixel" width="${SPRITE_W * SCALE}" height="${SPRITE_H * SCALE}"
+              title="${escapeHtml(a.role || '')}"></canvas>
+      <div class="agent-name">${escapeHtml(a.name || '')}</div>
+      <div class="agent-role muted-line">${escapeHtml(a.role || '')}</div>
+    </div>
+  `).join('');
+
+  root.querySelectorAll('.agent-card').forEach((card, idx) => {
+    const agent = AGENTS[idx];
+    const canvas = card.querySelector('canvas.sprite-pixel');
+    if (!canvas || !agent) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.imageSmoothingEnabled = false;
+    // Scale the 16x22 sprite by SCALE so pixels stay sharp.
+    ctx.save();
+    ctx.scale(SCALE, SCALE);
+    try {
+      window.drawAgent(ctx, agent, 0, 0, {});
+    } catch (err) {
+      // Defensive: a corrupt palette would crash drawAgent and blank
+      // the whole roster. Swallow per-agent failures and keep going.
+      console.warn('[roster] drawAgent failed for', agent && agent.id, err);
+    }
+    ctx.restore();
   });
 }
 
@@ -3054,8 +3183,15 @@ const _WIDGET_LABELS = {
   'sec-replay-player':  '▶️ Replay Player',
   'sec-manual':         '📖 Mini Manual',
   'sec-filters':           '🔍 Filters',
-  'sec-trading-settings':  '⚡ Modos de Trading',
+  // NOTE: sec-trading-settings is intentionally NOT listed here. It is a
+  // critical operations panel (mode preset + override toggles) that must
+  // never be hidden by the widget customizer. See _ALWAYS_VISIBLE_SECTIONS
+  // below and P0.1 in HANDOFF.md (2026-05-20).
 };
+// Sections that MUST always render regardless of widget prefs. Even if a
+// stale localStorage entry maps one of these to `false`, `_mkApplyWidgetPrefs`
+// will force them visible.
+const _ALWAYS_VISIBLE_SECTIONS = new Set(['sec-trading-settings']);
 const _WIDGET_PREFS_KEY = 'mekka_widget_prefs_v1';
 
 /** Load widget prefs from localStorage. */
@@ -3104,6 +3240,13 @@ function _mkApplyWidgetPrefs(activePage) {
   pageSections.forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
+    // _ALWAYS_VISIBLE_SECTIONS overrides any stored pref so a corrupted
+    // mekka_widget_prefs_v1 can never strand the operator without the
+    // Trading Mode panel (P0.1, HANDOFF 2026-05-20).
+    if (_ALWAYS_VISIBLE_SECTIONS.has(id)) {
+      el.classList.remove('page-section-hidden');
+      return;
+    }
     const visible = prefs[id] !== false; // default: visible
     el.classList.toggle('page-section-hidden', !visible);
   });
@@ -3517,6 +3660,7 @@ function _initLightweightChart() {
   if (!container) return false;
   if (typeof LightweightCharts === 'undefined') {
     _liveSetStatus('lightweight-charts não carregado', false);
+    _liveShowChartOverlay('⏳ Carregando lightweight-charts…', true);
     return false;
   }
   container.innerHTML = '';
@@ -4241,12 +4385,32 @@ async function _bootLiveChart() {
 
   // Double-RAF: first frame removes display:none, second frame lets the
   // browser complete layout so container.offsetWidth/clientHeight are non-zero.
-  // Falls back to a 60ms timeout as final safety net for slower devices.
   await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
-  // Extra guard: if container still has no height after double-RAF, wait a bit more.
+
+  // P0.2 (HANDOFF 2026-05-20): the old `setTimeout(60)` was insufficient on
+  // slower machines and on the first visit when Live is the landing page —
+  // the panel was created with `display: none` and the container reported
+  // clientHeight=0, so lightweight-charts mounted at fallback 500px but
+  // never properly resized when the panel became visible. Replace the fixed
+  // 60ms wait with a bounded poll that exits as soon as the container has
+  // real dimensions (max 2s).
   const _chartContainerCheck = document.getElementById('live-chart');
-  if (_chartContainerCheck && _chartContainerCheck.clientHeight === 0) {
-    await new Promise(r => setTimeout(r, 60));
+  if (_chartContainerCheck) {
+    const deadline = performance.now() + 2000;
+    while (_chartContainerCheck.clientHeight === 0 && performance.now() < deadline) {
+      await new Promise(r => setTimeout(r, 50));
+    }
+  }
+
+  // P0.2: same defensive poll for the vendor lib. `defer` scripts execute
+  // after the DOM is parsed, but a slow CDN fallback (sha384 onerror swap)
+  // can take seconds. Wait up to 5s for `LightweightCharts` to appear
+  // instead of failing instantly the first time the user clicks "Live".
+  if (typeof LightweightCharts === 'undefined') {
+    const libDeadline = performance.now() + 5000;
+    while (typeof LightweightCharts === 'undefined' && performance.now() < libDeadline) {
+      await new Promise(r => setTimeout(r, 100));
+    }
   }
 
   // Init chart

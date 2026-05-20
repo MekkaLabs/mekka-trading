@@ -33,6 +33,7 @@
     <aside class="sidebar">
       <div class="sidebar-brand">MEKKA OPS</div>
       <nav class="sidebar-nav">
+        <button class="page-nav-btn page-nav-live" data-page="live">📡 Live</button>
         <button class="page-nav-btn active" data-page="overview">🏠 Overview</button>
         <ul class="page-nav-sub">
           <li><a href="#sec-today-summary">📊 Resultado do Dia</a></li>
@@ -104,7 +105,6 @@
           <li><a href="#sec-concentration">🎯 Concentração</a></li>
           <li><a href="#sec-debate">🗳️ Debate Multiagente</a></li>
         </ul>
-        <button class="page-nav-btn page-nav-live" data-page="live">📡 Live</button>
       </nav>
     </aside>
     <div class="content-shell">
@@ -1186,6 +1186,11 @@
     </div>
 
     <script src="/static/i18n.js" defer></script>
+    <!-- agents-sprites.js exposes window.AGENTS / drawAgent / drawSprite
+         so the main dashboard Agents Roster renders the same pixel art
+         the Pixel Office uses (P0.6, HANDOFF 2026-05-20). MUST load
+         before app.js (which calls renderAgentsRoster() during boot). -->
+    <script src="/static/agents-sprites.js" defer></script>
     <script src="/static/app.js" defer></script>
   </body>
 </html>

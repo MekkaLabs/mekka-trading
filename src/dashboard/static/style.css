@@ -1045,6 +1045,24 @@ input, select { padding: 7px 10px; }
   box-shadow: 1px 1px 0 rgba(0,0,0,0.3);
 }
 
+/* P0.6: roster canvas variant — same agent sprites the Pixel Office uses.
+   The canvas is sized at sprite-resolution × SCALE (set in JS) so we keep
+   pixels crisp via `image-rendering: pixelated`. */
+.sprite-pixel {
+  display: block;
+  margin: 0 auto;
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+  filter: drop-shadow(0 0 6px rgba(0,212,255,0.30)) drop-shadow(2px 3px 0 rgba(0,0,0,0.6));
+}
+.agent-role {
+  font-size: 0.66rem;
+  margin-top: 2px;
+  letter-spacing: 0.02em;
+  opacity: 0.75;
+}
+
 /* --- 3.12 Toolbars --- */
 .positions-toolbar,
 .internals-toolbar,
@@ -3802,3 +3820,90 @@ th, td { padding: 9px 10px; }
 }
 .rpt-bt-row span:first-child { color: var(--muted); }
 .rpt-bt-row span:last-child  { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* ===================================================================
+   LAYER 7 — LIGHT THEME (P0.4 — HANDOFF 2026-05-20)
+   ===================================================================
+   The JS sets `body[data-theme="light"]` via applyTheme() in app.js, but
+   the design tokens were dark-only — that's why "Modo Claro" rendered as
+   black text on a black grid. This override redefines the token palette
+   for the light scheme. Accent neon-cyan is kept so the brand identity
+   survives, but every neutral and surface flips for legibility.
+   =================================================================== */
+body[data-theme="light"] {
+  /* --- Base canvas --- */
+  --bg:              #f5f7fb;          /* soft slate-white */
+  --bg-2:            #ffffff;          /* panel base */
+  --bg-3:            #eef2f8;          /* elevated surface */
+  --surface:         rgba(255,255,255,0.92);
+  --surface-hover:   rgba(241,245,250,0.96);
+  --surface-raised:  rgba(255,255,255,0.98);
+
+  /* --- Glass --- */
+  --glass:           rgba(255,255,255,0.82);
+  --glass-border:    rgba(0,90,160,0.16);
+  --glass-border-lg: rgba(0,90,160,0.22);
+  --glass-glow:      0 0 18px rgba(0,120,200,0.08), 0 0 40px rgba(0,120,200,0.04);
+
+  /* --- Panel aliases (used by legacy classes) --- */
+  --panel:           rgba(255,255,255,0.92);
+  --panel-border:    rgba(0,90,160,0.16);
+  --panel-border-rgb:0,90,160;
+
+  /* --- Accents — slightly darker so they read on white --- */
+  --accent:          #0284c7;
+  --accent-dim:      rgba(2,132,199,0.12);
+  --accent-glow:     0 0 12px rgba(2,132,199,0.20), 0 0 36px rgba(2,132,199,0.08);
+  --accent-1:        #0284c7;
+
+  --accent-2:        #7c3aed;
+  --accent-2-dim:    rgba(124,58,237,0.10);
+  --accent-2-glow:   0 0 12px rgba(124,58,237,0.20);
+
+  /* --- Semantic colors — saturated for contrast --- */
+  --good:            #047857;
+  --good-dim:        rgba(4,120,87,0.10);
+  --good-border:     rgba(4,120,87,0.30);
+
+  --bad:             #be123c;
+  --bad-dim:         rgba(190,18,60,0.10);
+  --bad-border:      rgba(190,18,60,0.30);
+
+  --warn:            #b45309;
+  --warn-dim:        rgba(180,83,9,0.10);
+  --warn-border:     rgba(180,83,9,0.30);
+
+  /* --- Text --- */
+  --text:            #0f172a;          /* near-black */
+  --text-2:          #334155;          /* slate-700 */
+  --muted:           #64748b;          /* slate-500 */
+  --text-muted:      #64748b;
+
+  /* --- Borders --- */
+  --border:          rgba(15,23,42,0.10);
+  --border-subtle:   rgba(15,23,42,0.05);
+
+  /* --- Shadows (lighter halo) --- */
+  --shadow-sm:  0 1px 3px rgba(15,23,42,0.08);
+  --shadow-md:  0 4px 14px rgba(15,23,42,0.10);
+  --shadow-lg:  0 10px 28px rgba(15,23,42,0.14);
+  --shadow-panel: 0 0 0 1px var(--glass-border), var(--glass-glow);
+
+  color-scheme: light;
+}
+
+/* Background grid + radial glow are baked into `body` with dark colors;
+   override them when light theme is active so the grid doesn't show as
+   harsh blue lines on white. */
+body[data-theme="light"] {
+  background-image:
+    radial-gradient(ellipse 80% 50% at 50% -20%, rgba(2,132,199,0.06) 0%, transparent 60%),
+    linear-gradient(rgba(15,23,42,0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15,23,42,0.04) 1px, transparent 1px);
+}
+
+body[data-theme="light"] .bg-grid { opacity: 0.35; }
+
+/* Scrollbar tint */
+body[data-theme="light"] ::-webkit-scrollbar-thumb       { background: rgba(2,132,199,0.30); }
+body[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: rgba(2,132,199,0.55); }
