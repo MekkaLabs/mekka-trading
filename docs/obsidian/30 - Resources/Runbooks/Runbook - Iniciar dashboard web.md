@@ -65,7 +65,7 @@ python run.py --dashboard --equity 25000
 
 - [ ] Logs em `observability/store/`
 - [ ] Audit em `memory/audit-log/`
-- [ ] Se mudou comportamento, registrar em [[Aprendizado]]
+- [ ] Se mudou comportamento, registrar em [[MOC - Aprendizados]]
 
 ## Referências
 

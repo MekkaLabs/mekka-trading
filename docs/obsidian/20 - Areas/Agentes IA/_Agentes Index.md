@@ -10,11 +10,12 @@ updated: 2026-05-20
 
 > Uma nota por agente. Use `Template - Agente`. Roster organizado pela camada AIOX (Command → Strategy → Execution → Monitoring → Recovery → Analytics).
 
-## Roster (17 agentes)
+## Roster (18 agentes)
 
 ### 🎖️ Command Layer
 - [x] [[Nick Fury]] — Mission Commander (orquestra o ciclo completo)
 - [x] [[Professor X]] — Swarm Coordinator
+- [x] [[Jean Grey]] — Memory Master (health scan do vault + manutenção do segundo cérebro)
 
 ### 🔭 Strategy Layer
 - [x] [[Superman]] — Chief Market Overseer (multi-exchange via CCXT)

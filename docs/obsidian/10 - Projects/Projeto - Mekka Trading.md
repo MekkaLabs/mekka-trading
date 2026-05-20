@@ -19,14 +19,14 @@ Construir um sistema autônomo de trading paper-first, modular, observável e co
 ## Estado Atual — 2026-05-19
 
 - **Última story entregue:** `Story 251 — Cycle Checkpoint`
-- **Total stories entregues:** **251 stories** ✅
+- **Stories entregues:** `001–251` (com lacunas; ver `docs/stories/INDEX.md` e [[Stories do Projeto]])
 - **Milestone:** `40 — Agent Communication Upgrade (Stories 244–251)`
-- **Mudanças do dia:** Milestone 40 entregue (Flash→Vision, DebateVerdict→Vision, Batman gate 3r, Beast, DecisionMemory, Vision structured output, CycleCheckpoint) + commit “chore: sync local changes”
+- **Mudanças do dia:** M40 (Flash→Vision, DebateVerdict→Vision, Batman gate 3r, Beast, DecisionMemory, Vision structured output, CycleCheckpoint) + M22 (Bybit testnet readiness + Force Execute) + P1.1 (painel de trading manual com parecer do Batman) + P2.1 (Jean Grey vault health)
 - **Modo padrão:** `PAPER_TRADING=True`
 - **Dashboard:** `http://localhost:8787` (WebSocket tempo real em todas as páginas)
 - **Gate absoluto:** Batman (gates 3a–3q) + Kill Switch
 - **Exchanges:** Hyperliquid (primary), Bybit, Binance via CCXT
-- **Agentes ativos:** NickFury, Batman, Wolverine, IronMan, Vision (+ VisionCritic), Deadpool, ProfessorX, Thor, Superman, DoctorStrange, BlackPanther, Aquaman, Spider-Man, Flash, PortfolioManager
+- **Agentes ativos:** NickFury, ProfessorX, Superman, Vision (+ VisionCritic), DoctorStrange, Aquaman, BlackPanther, Thor, Flash, Batman, IronMan, Cyclops, Spider-Man, PortfolioManager, Wolverine, Deadpool, Beast, Jean Grey
 
 ## Milestones Entregues
 

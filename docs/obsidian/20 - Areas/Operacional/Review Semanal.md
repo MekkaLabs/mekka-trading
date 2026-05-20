@@ -3,7 +3,7 @@ title: "Review Semanal — Operacional"
 type: area_note
 tags: [ops, review, weekly, mekka-trading]
 created: 2026-05-15
-updated: 2026-05-15
+updated: 2026-05-19
 ---
 
 # Review Semanal — Operacional
@@ -37,3 +37,25 @@ updated: 2026-05-15
 - `docs/stories/INDEX.md` (estado do roadmap)
 - `docs/adr/ADR-002-mekka-event-bus.md` (decisão EventBus)
 
+---
+
+## Semana (encerramento) — 2026-05-19
+
+### ✅ Entregas (high-signal)
+
+- **Milestone 40 (Stories 244–251)**: Flash→Vision, DebateVerdict→Vision, Batman gate 3r, Beast, DecisionMemory, Vision structured output, CycleCheckpoint.
+- **Bybit testnet readiness (Milestone 22)**: sandbox routing CCXT, MarketRegistry, env badge, clock skew check, stress injector + runbook.
+- **Operator UX (Dashboard)**: Force Execute opt-in (escape hatch), correções P0 visuais, **painel de trading manual com parecer do Batman (P1.1)**.
+- **Second brain ops**: **Jean Grey (P2.1)** — health scan do vault + endpoint `/api/jean/health-report`.
+
+### 🧱 Riscos / Dívidas observadas
+
+- `src/dashboard/server.py` segue monolítico; backlog: quebrar em routers.
+- `data/*` e `.claude/worktrees/*` sujam `git status` com facilidade (avaliar política de ignore/retention).
+- ADRs “lacuna” continuam pendentes (LangGraph/MoA/Adaptive Routing/CycleCheckpoint/Force Execute).
+
+### 🎯 Foco da próxima semana (ordem sugerida)
+
+1. **Milestone 36** — Dashboard de Backtesting (Stories 224–228).
+2. **Milestone 37** — Live Performance Tracking (Stories 229–233).
+3. ADRs pendentes: Force Execute, CycleCheckpoint, Beast, DecisionMemory.

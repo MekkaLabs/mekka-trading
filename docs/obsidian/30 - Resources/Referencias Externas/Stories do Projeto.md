@@ -9,8 +9,8 @@ updated: 2026-05-19
 # Stories do Projeto — Mekka Trading
 
 > Todas as stories estão em `docs/stories/` no repositório.
-> **Última story entregue: 140** (Degraded Mode)
-> **Total: 61 stories** (numeração esparsa — alguns números reservados/saltados)
+> **Última story entregue: 251** (Cycle Checkpoint — codex / Milestone 40)
+> **Total entregue (contagem): ~66 stories** (numeração esparsa — muitos números reservados/saltados)
 
 > ⚠️ Esta lista é mantida manualmente. O script
 > `scripts/sync_obsidian.py` (TODO em backlog) automatizará a sincronia.
@@ -95,11 +95,17 @@ Esta milestone **não tem story numerada** ainda — foi entregue como uma sess�
 | `2d1c898` | Env badge no header (paper/testnet/mainnet) |
 | `fc41821` | Clock skew pre-flight check para CCXT orders |
 | `9009b34` | Painel Trading Mode no Overview + consolidação dos dois sistemas |
+| `6e47109` | MarketRegistry centraliza symbol normalisation + integration test Bybit |
+| `adfa0ba` | Force Execute opt-in + Beast/Cyclops no roster do Office |
+| `53c70cc` | Dashboard: correção de bugs visuais críticos (nav/theme/prefs/chart/sprites/i18n) |
+| `3a2e5d1` | Dashboard: painel de trading manual com parecer do Batman (P1.1) |
+| `a4febf7` | Jean Grey (P2.1): health scan do vault + endpoint `/api/jean/health-report` |
+| `96815c2` | Cleanup: untrack de artefatos de runtime + correção dos globs do `.gitignore` |
 
 ## Próximas Stories (backlog)
 
-- [ ] **Bug #4 — Symbol normalization** (`MarketRegistry`) — centraliza `BTC ↔ BTCUSDT ↔ BTC-USD`
-- [ ] **Bug #5 — Teste de integração Bybit testnet** (skip-by-default)
+- [x] **Bug #4 — Symbol normalization** (`MarketRegistry`) — centraliza `BTC ↔ BTCUSDT ↔ BTC-USD`
+- [x] **Bug #5 — Teste de integração Bybit testnet** (skip-by-default)
 - [ ] **scripts/sync_obsidian.py** — sincroniza esta lista automaticamente
 - [ ] **ADRs retroativos** para Stories 126 (LangGraph), 131 (MoA), 135 (Adaptive Routing), 136 (EventBus)
 - [ ] **Refatoração**: `src/dashboard/server.py` (4.971 linhas → quebrar em routers)

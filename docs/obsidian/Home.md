@@ -23,12 +23,12 @@ Este é o vault de conhecimento do projeto: arquitetura, decisões, agentes, run
 |---|---|
 | **Última story entregue** | `251 — Cycle Checkpoint` (codex / milestone 40) |
 | **Milestone atual** | `40 — Agent Communication Upgrade (244–251)` + `22 — Bybit Testnet Readiness` (integrado nesta sessão) |
-| **Mudanças do dia** | M40 entregue pelo codex (Flash→Vision, DebateVerdict, Batman gate 3r, **Beast**, DecisionMemory, Vision structured output, CycleCheckpoint) + M22 Bybit Testnet (sandbox routing, MarketRegistry, env badge, clock skew, stress_inject) |
+| **Mudanças do dia** | M40 (Flash→Vision, DebateVerdict, Batman gate 3r, Beast, DecisionMemory, Vision structured output, CycleCheckpoint) + M22 (Bybit testnet: sandbox routing, MarketRegistry, env badge, clock skew, stress_inject) + **painel de trading manual com parecer do Batman (P1.1)** + **Jean Grey (P2.1) — health scan do vault** |
 | **Modo padrão** | `PAPER_TRADING=True` |
 | **Exchange recomendada para validação** | **Bybit testnet** (via CCXT, `set_sandbox_mode(True)`) |
 | **Exchanges suportadas** | Hyperliquid (testnet/mainnet), Bybit (testnet/mainnet), Binance (placeholder) |
 | **Dashboard** | `http://localhost:8787` com WebSocket em tempo real + env badge multi-exchange |
-| **Agentes ativos (16)** | Nick Fury, Superman, Vision (+ VisionCritic), Batman, Iron Man, Cyclops, Wolverine, Doctor Strange, Professor X, Flash, Aquaman, Spider-Man, Black Panther, Thor, Deadpool, Portfolio Manager |
+| **Agentes ativos (18)** | Nick Fury, Professor X, Superman, Vision (+ VisionCritic), Doctor Strange, Aquaman, Black Panther, Thor, Flash, Batman, Iron Man, Cyclops, Spider-Man, Portfolio Manager, Wolverine, Deadpool, Beast, **Jean Grey** |
 
 ### Marcos recentes
 
@@ -105,13 +105,8 @@ LIMIT 10
 
 ## 🔗 Recursos do Projeto
 
-<<<<<<< HEAD
-- Repositório: https://github.com/labsmekka/mekka-trading
-- Stories entregues: 001–251
-=======
 - Repositório: https://github.com/MekkaLabs/mekka-trading
-- Stories entregues: 001–140 (61 stories totais — veja [[Stories do Projeto]])
->>>>>>> origin/claude/quirky-ritchie-5352c4
+- Stories entregues: 001–251 (com lacunas; ver [[Stories do Projeto]])
 - Squads baseline: `alpha-risk-command`, `hyperliquid-mock-ops`, `market-intel-lab`
 - Projeto ativo: [[Projeto - Mekka Trading]]
 - Runbook para subir Bybit testnet: [[Runbook - Bybit Testnet Setup]]
