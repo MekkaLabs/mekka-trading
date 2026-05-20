@@ -253,7 +253,11 @@ class MekkaDashboardServer:
     MARKET_BREAKER_THRESHOLD = 4
     MARKET_BREAKER_COOLDOWN_S = 20.0
 
-    def __init__(self) -> None:
+    def __init__(self, controller=None) -> None:
+        # Runtime control plane: o RuntimeController (opcional) é injetado por
+        # run.py e dono do loop Nick Fury. Os handlers /api/system/* operam
+        # sobre ele. None = nenhum controller acoplado (estado "unknown").
+        self._runtime = controller
         # Per-request counter middleware. Defined inline so it can close
         # over `self._metrics`. Order matters: counter outermost, then
         # auth, then security headers (innermost = nearest the handler).
@@ -383,6 +387,11 @@ class MekkaDashboardServer:
         self._app.router.add_get("/api/killswitch/status", self._handle_killswitch_status)
         self._app.router.add_post("/api/killswitch/engage", self._handle_killswitch_engage)
         self._app.router.add_post("/api/killswitch/release", self._handle_killswitch_release)
+        # Runtime control plane (liga/desliga/reinicia o loop de trading).
+        self._app.router.add_get("/api/system/status", self._handle_system_status)
+        self._app.router.add_post("/api/system/start", self._handle_system_start)
+        self._app.router.add_post("/api/system/stop", self._handle_system_stop)
+        self._app.router.add_post("/api/system/reboot", self._handle_system_reboot)
         self._app.router.add_get("/api/mode", self._handle_mode_get)
         self._app.router.add_post("/api/mode", self._handle_mode_set)
         self._app.router.add_get("/api/env", self._handle_env)
@@ -411,6 +420,8 @@ class MekkaDashboardServer:
         self._app.router.add_get("/api/jean/health-report", self._handle_jean_health_report)
         self._app.router.add_get("/api/improvements", self._handle_improvements_get)
         self._app.router.add_post("/api/improvements/decision", self._handle_improvements_decision)
+        self._app.router.add_get("/api/improvements/pr-status", self._handle_improvements_pr_status)
+        self._app.router.add_post("/api/improvements/approve-pr", self._handle_improvements_approve_pr)
         self._app.router.add_get("/api/prefs", self._handle_prefs_get)
         self._app.router.add_post("/api/prefs", self._handle_prefs_set)
         self._app.router.add_post("/api/auth/login", self._handle_auth_login)
@@ -1487,6 +1498,47 @@ class MekkaDashboardServer:
         self._metrics["killswitch_released_total"] += 1
         self._payload_cache.clear()
         return web.json_response({"active": False, "had_file": existed}, status=200)
+
+    # ------------------------------------------------------------------
+    # Runtime control plane — liga/desliga/reinicia o loop de trading.
+    # O dashboard é always-on; o RuntimeController é dono do runtime que
+    # consome tokens de LLM. Desligar cancela o loop → zero token spend.
+    # ------------------------------------------------------------------
+    async def _handle_system_status(self, _: web.Request) -> web.Response:
+        """Estado atual do runtime. Read-only; sem controller acoplado o
+        estado é 'unknown' (ex.: dashboard rodando sem run.py)."""
+        if self._runtime is None:
+            return web.json_response({"state": "unknown", "running": False})
+        return web.json_response(self._runtime.status())
+
+    async def _handle_system_start(self, _: web.Request) -> web.Response:
+        """Liga o runtime. Idempotente (o controller trata o no-op)."""
+        if self._runtime is None:
+            return web.json_response({"error": "no runtime controller"}, status=503)
+        result = await self._runtime.start()
+        return web.json_response(result)
+
+    async def _handle_system_stop(self, request: web.Request) -> web.Response:
+        """Desliga o runtime — cancela o loop e cessa todo token spend.
+        Exige body {"confirm":"STOP"} para evitar parada acidental."""
+        if self._runtime is None:
+            return web.json_response({"error": "no runtime controller"}, status=503)
+        body = await self._safe_json_body(request)
+        if not isinstance(body, dict) or str(body.get("confirm") or "").upper() != "STOP":
+            return web.json_response({"error": "confirm required"}, status=400)
+        result = await self._runtime.stop()
+        return web.json_response(result)
+
+    async def _handle_system_reboot(self, request: web.Request) -> web.Response:
+        """Reinicia o runtime (stop seguido de start). Exige
+        body {"confirm":"REBOOT"}."""
+        if self._runtime is None:
+            return web.json_response({"error": "no runtime controller"}, status=503)
+        body = await self._safe_json_body(request)
+        if not isinstance(body, dict) or str(body.get("confirm") or "").upper() != "REBOOT":
+            return web.json_response({"error": "confirm required"}, status=400)
+        result = await self._runtime.reboot()
+        return web.json_response(result)
 
     async def _handle_office_v2_index(self, _: web.Request) -> web.FileResponse:
         """Serve the Office v2 single-page app entrypoint."""
@@ -4686,7 +4738,7 @@ class MekkaDashboardServer:
         from src.dashboard.positions_provider import fetch_positions
 
         today_utc = datetime.now(timezone.utc).date().isoformat()
-        mark_prices: dict[str, float] = dict(self._hl_prices) if self._hl_prices else {}
+        mark_prices: dict[str, float] = dict(self._mark_prices) if self._mark_prices else {}
         has_prices = bool(mark_prices)
 
         try:
@@ -5931,17 +5983,92 @@ class MekkaDashboardServer:
             )
         try:
             from src.agents.mekka import Mekka
-            ok = Mekka().record_decision(rec_id, status)
+            mekka = Mekka()
+            # On accept, fetch the full recommendation so the brief can be
+            # enqueued for the dev-squad (docs/improvement-queue/IMP-<id>.md).
+            rec_dict: dict | None = None
+            queued_path: str | None = None
+            if status == "accepted":
+                try:
+                    report = await mekka.run(period_days=7)
+                    for r in getattr(report, "recommendations", []) or []:
+                        rd = r.to_dict() if hasattr(r, "to_dict") else dict(r)
+                        if rec_id in (rd.get("id"), rd.get("rec_id")):
+                            rec_dict = rd
+                            break
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("could not load rec for enqueue: %s", exc)
+            ok = mekka.record_decision(rec_id, status, rec=rec_dict)
+            if status == "accepted" and rec_dict is not None:
+                from src.services import improvement_queue
+                queued_path = improvement_queue.enqueue_brief(rec_dict) or None
             await MekkaRepository.log_event(
                 agent="Dashboard",
                 event="IMPROVEMENT_DECISION",
                 severity="INFO",
                 message=f"Operador {status} recomendação {rec_id}",
-                payload={"id": rec_id, "status": status, "ok": ok},
+                payload={"id": rec_id, "status": status, "ok": ok, "queued": queued_path},
             )
-            return web.json_response({"ok": ok, "id": rec_id, "status": status}, status=200)
+            return web.json_response(
+                {"ok": ok, "id": rec_id, "status": status, "queued": queued_path},
+                status=200,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error("improvement decision failed: %s", exc, exc_info=True)
+            return web.json_response({"ok": False, "reason": str(exc)}, status=200)
+
+    async def _handle_improvements_pr_status(self, _: web.Request) -> web.Response:
+        """GET /api/improvements/pr-status — dev/PR lifecycle per recommendation.
+
+        Maps rec_id → {dev_state, pr:{...}} so the panel can show the
+        Fila → Em dev → PR aberto → Mergeado lifecycle and an approve button.
+        Read-only; degrades gracefully if `gh` is unavailable.
+        """
+        try:
+            from src.services import pr_tracker
+            return web.json_response(pr_tracker.get_pr_status(), status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("pr-status failed: %s", exc, exc_info=True)
+            return web.json_response({}, status=200)
+
+    async def _handle_improvements_approve_pr(self, request: web.Request) -> web.Response:
+        """POST /api/improvements/approve-pr — operator approves a rec's PR.
+
+        Body: { rec_id, pr_number, confirm: "APPROVE", merge?: bool }
+        By default this RECORDS the operator's approval (do_merge=False) — the
+        actual merge to main stays a deliberate @devops action. Pass
+        merge=true to also run `gh pr merge --squash`.
+        """
+        body = await self._safe_json_body(request) or {}
+        rec_id = str(body.get("rec_id") or "").strip()[:64]
+        confirm = str(body.get("confirm") or "").strip().upper()
+        try:
+            pr_number = int(body.get("pr_number"))
+        except (TypeError, ValueError):
+            pr_number = 0
+        if not rec_id or pr_number <= 0:
+            return web.json_response(
+                {"ok": False, "reason": "rec_id e pr_number são obrigatórios."},
+                status=400,
+            )
+        if confirm != "APPROVE":
+            return web.json_response(
+                {"ok": False, "reason": "confirm=APPROVE obrigatório."}, status=400,
+            )
+        do_merge = bool(body.get("merge", False))
+        try:
+            from src.services import pr_tracker
+            result = pr_tracker.approve_pr(rec_id, pr_number, do_merge=do_merge)
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="IMPROVEMENT_PR_APPROVED",
+                severity="INFO",
+                message=f"Operador aprovou PR #{pr_number} ({rec_id}) merge={do_merge}",
+                payload={"rec_id": rec_id, "pr_number": pr_number, **result},
+            )
+            return web.json_response({"ok": result.get("ok", False), **result}, status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("approve-pr failed: %s", exc, exc_info=True)
             return web.json_response({"ok": False, "reason": str(exc)}, status=200)
 
     def _prune_snapshot_dir(self) -> None:
@@ -5965,11 +6092,16 @@ class MekkaDashboardServer:
             logger.warning("snapshot prune failed: %s", exc)
 
 
-async def run_dashboard_server(host: str = "127.0.0.1", port: int = 8787) -> None:
+async def run_dashboard_server(
+    host: str = "127.0.0.1", port: int = 8787, controller=None
+) -> None:
     """Boot the dashboard. Default bind is loopback so the UI is not exposed
     on the LAN by accident; pass host='0.0.0.0' explicitly when sharing.
+
+    ``controller`` é o RuntimeController (opcional) que liga/desliga o loop
+    de trading via /api/system/*. None = control plane sem runtime acoplado.
     """
-    server = MekkaDashboardServer()
+    server = MekkaDashboardServer(controller=controller)
     runner = web.AppRunner(server.app)
     await runner.setup()
     site = web.TCPSite(runner, host=host, port=port)

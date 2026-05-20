@@ -325,10 +325,17 @@ class Mekka(BaseAgent[MekkaCouncilReport]):
         except (OSError, json.JSONDecodeError):
             return {}
 
-    def record_decision(self, rec_id: str, status: str) -> bool:
+    def record_decision(
+        self, rec_id: str, status: str, rec: dict | None = None
+    ) -> bool:
         """Persist an operator accept/reject. Returns True on success.
 
         ``status`` must be 'accepted' or 'rejected' (or 'pending' to reset).
+
+        When ``status == 'accepted'`` and a ``rec`` dict is provided, a
+        structured dev brief is enqueued for the AIOS dev-squad via
+        :func:`src.services.improvement_queue.enqueue_brief`. The enqueue is
+        best-effort and never affects the decision's success status.
         """
         if status not in ("accepted", "rejected", "pending"):
             return False
@@ -342,7 +349,16 @@ class Mekka(BaseAgent[MekkaCouncilReport]):
             _DECISIONS_FILE.write_text(
                 json.dumps(decisions, indent=2, ensure_ascii=False), encoding="utf-8"
             )
-            return True
         except OSError as exc:
             self._log.warning(f"[Mekka] could not persist decision: {exc}")
             return False
+
+        # On accept, enqueue a dev brief (lazy import to avoid import cycles).
+        if status == "accepted" and rec is not None:
+            try:
+                from src.services import improvement_queue
+                improvement_queue.enqueue_brief(rec)
+            except Exception as exc:  # noqa: BLE001
+                self._log.warning(f"[Mekka] could not enqueue brief: {exc}")
+
+        return True

@@ -1719,12 +1719,35 @@ function promptForLegacyToken() {
   renderAuthState();
 }
 
+// Feature B — last known kill switch state, so the command-center button
+// knows whether to engage or release (mirrors the Wallet panel state).
+let _ksLastActive = null;
+
+/** Update the command-center kill switch quick-action button (Feature B). */
+function _cmdSyncKillswitchBtn(active) {
+  _ksLastActive = active;
+  const title = document.getElementById('cmd-killswitch-title');
+  const sub   = document.getElementById('cmd-killswitch-sub');
+  const btn   = document.getElementById('cmd-killswitch');
+  if (!btn) return;
+  if (active) {
+    if (title) title.textContent = 'Liberar Kill Switch';
+    if (sub)   sub.textContent   = '🔴 ATIVO — trading bloqueado';
+    btn.classList.add('cmd-btn-kill-active');
+  } else {
+    if (title) title.textContent = 'Acionar Kill Switch';
+    if (sub)   sub.textContent   = 'Pausa imediata de todo o trading';
+    btn.classList.remove('cmd-btn-kill-active');
+  }
+}
+
 async function refreshKillswitchStatus() {
-  if (!killswitchStatus) return;
   try {
     const res = await fetch('/api/killswitch/status', { cache: 'no-store' });
     if (!res.ok) throw new Error('http ' + res.status);
     const data = await res.json();
+    _cmdSyncKillswitchBtn(!!data.active);
+    if (!killswitchStatus) return;
     if (data.active) {
       const reason = data.reason ? ` · motivo: ${data.reason}` : '';
       const ts = data.mtime_utc ? ` · desde ${data.mtime_utc}` : '';
@@ -1739,7 +1762,7 @@ async function refreshKillswitchStatus() {
       if (killswitchReleaseBtn) killswitchReleaseBtn.disabled = true;
     }
   } catch (err) {
-    killswitchStatus.textContent = `Falha ao ler status: ${err && err.message ? err.message : err}`;
+    if (killswitchStatus) killswitchStatus.textContent = `Falha ao ler status: ${err && err.message ? err.message : err}`;
   }
 }
 
@@ -2959,7 +2982,11 @@ const _PAGE_SECTIONS = {
   //     to change the active trading mode. The panel's HTML carries
   //     `data-page="overview settings"` to mirror this membership — keep
   //     these two lists in sync if you change either.
-  overview:    ['sec-today-summary', 'sec-office', 'sec-live-market', 'sec-metrics', 'sec-trading-settings'],
+  // Feature A — office + trade mode side by side: sec-office and
+  // sec-trading-settings now live together inside #overview-office-row
+  // (a 2-col grid). Ordering here keeps the office/trade-mode row first,
+  // followed by the operator command center, then the rest.
+  overview:    ['sec-today-summary', 'sec-office', 'sec-trading-settings', 'sec-command-center', 'sec-live-market', 'sec-metrics'],
   wallet:      ['sec-killswitch', 'sec-pnl', 'sec-positions', 'sec-funding'],
   performance: ['sec-equity-curve', 'sec-trades-timeline', 'sec-replay-charts', 'sec-hero-sla'],
   agents:      ['sec-layers', 'sec-agents', 'sec-internals'],
@@ -2999,6 +3026,21 @@ function _mkSetPage(pageKey) {
     const el = document.getElementById(id);
     if (el) el.classList.remove('page-section-hidden');
   });
+
+  // Feature A — the office/trade-mode grid wrapper (#overview-office-row)
+  // is not itself a tracked section, so toggle it manually: show it only
+  // when at least one of its children is part of the active page. On
+  // settings, only sec-trading-settings shows (sec-office stays hidden by
+  // the loop above) and the wrapper collapses to a single full-width col.
+  const _officeRow = document.getElementById('overview-office-row');
+  if (_officeRow) {
+    const ids = _PAGE_SECTIONS[pageKey] || [];
+    const wrapVisible = ids.includes('sec-office') || ids.includes('sec-trading-settings');
+    _officeRow.classList.toggle('page-section-hidden', !wrapVisible);
+    // When only the trade-mode panel is present (settings page), drop the
+    // 2-col grid so it spans full width like before.
+    _officeRow.classList.toggle('office-row-solo', wrapVisible && !ids.includes('sec-office'));
+  }
 
   // Apply per-widget visibility prefs on top
   _mkApplyWidgetPrefs(pageKey);
@@ -4784,6 +4826,224 @@ function _bootGlobalWs() {
   };
 }
 
+// ============================================================
+// FEATURE B — OPERATOR COMMAND CENTER (Overview quick actions)
+// ============================================================
+// All buttons REUSE existing handlers — no business logic is reinvented:
+//   • Trade manual  → navigate to the Manual page (_mkSetPage('manual'))
+//   • Executar (Modo Deus) → _tradeAnalyze() then auto-check the
+//     trade-force-execute opt-in inside the Trade Now modal
+//   • Kill switch   → openKillswitchModal('engage'|'release')
+//   • Trocar modo   → reveal the Modos de Trading panel (already on Overview)
+function _bootCommandCenter() {
+  const manualBtn = document.getElementById('cmd-manual-trade');
+  const execBtn   = document.getElementById('cmd-force-execute');
+  const killBtn   = document.getElementById('cmd-killswitch');
+  const modeBtn   = document.getElementById('cmd-switch-mode');
+
+  if (manualBtn) manualBtn.addEventListener('click', () => {
+    // Reuse the dedicated Manual Trading page (sec-manual-trade).
+    try { _mkSetPage('manual'); } catch (_) {}
+  });
+
+  if (execBtn) execBtn.addEventListener('click', async () => {
+    // Reuse the Trade Now flow: open the analysis modal, then pre-check
+    // the Modo Deus opt-in so the operator only confirms. The checkbox is
+    // only honored server-side in paper/testnet (force-execute row is
+    // hidden by _refreshForceExecuteVisibility in mainnet).
+    try {
+      await _tradeAnalyze();
+      const cb = document.getElementById('trade-force-execute');
+      const row = document.getElementById('trade-force-execute-row');
+      if (cb && row && !row.classList.contains('hidden')) cb.checked = true;
+    } catch (_) {}
+  });
+
+  if (killBtn) killBtn.addEventListener('click', () => {
+    // Reuse the kill switch modal; pick action from last known state.
+    try { openKillswitchModal(_ksLastActive ? 'release' : 'engage'); } catch (_) {}
+  });
+
+  if (modeBtn) modeBtn.addEventListener('click', () => {
+    // The Modos de Trading panel is already on the Overview (Feature A
+    // grid). Make sure we're on Overview and scroll it into view.
+    try { _mkSetPage('overview'); } catch (_) {}
+    const panel = document.getElementById('sec-trading-settings');
+    if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
+
+  // Reflect current kill switch state immediately (refreshKillswitchStatus
+  // also keeps it in sync on its 5s timer).
+  try { refreshKillswitchStatus(); } catch (_) {}
+}
+
+// ============================================================
+// FEATURE C — TOP BAR POWER CONTROL (system on/off/reboot)
+// ============================================================
+// Contract:
+//   GET  /api/system/status -> {state, running, uptime_seconds, cycles,
+//                               paper_trading, mode, last_error}
+//   POST /api/system/start
+//   POST /api/system/stop   {"confirm":"STOP"}
+//   POST /api/system/reboot {"confirm":"REBOOT"}
+// Polls every ~5s. Fails gracefully (state "unknown") if endpoints 404.
+let _sysPowerTimer = null;
+let _sysPowerBusy = false;     // true while a transition request is in-flight
+let _sysPowerState = 'unknown';
+let _sysPowerOk = false;       // true once we've received at least one good status
+
+function _fmtUptime(secs) {
+  const s = Math.max(0, Math.floor(Number(secs) || 0));
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s % 60}s`;
+  return `${s}s`;
+}
+
+function _sysPowerRender(data) {
+  const pill   = document.getElementById('sys-power-pill');
+  const toggle = document.getElementById('sys-power-toggle');
+  const reboot = document.getElementById('sys-power-reboot');
+  if (!pill || !toggle || !reboot) return;
+
+  const state = (data && data.state) || 'unknown';
+  _sysPowerState = state;
+  const running = state === 'running';
+  const transitioning = state === 'starting' || state === 'stopping';
+
+  // Pill text + color class
+  pill.classList.remove(
+    'sys-power-running', 'sys-power-stopped',
+    'sys-power-transition', 'sys-power-unknown'
+  );
+  let label;
+  if (running) { label = 'SISTEMA LIGADO'; pill.classList.add('sys-power-running'); }
+  else if (state === 'stopped') { label = 'SISTEMA DESLIGADO'; pill.classList.add('sys-power-stopped'); }
+  else if (state === 'starting') { label = 'LIGANDO…'; pill.classList.add('sys-power-transition'); }
+  else if (state === 'stopping') { label = 'DESLIGANDO…'; pill.classList.add('sys-power-transition'); }
+  else { label = 'SISTEMA ???'; pill.classList.add('sys-power-unknown'); }
+  pill.textContent = label;
+
+  // Subtitle / tooltip with uptime + cycles + mode
+  if (data) {
+    const parts = [];
+    if (running && data.uptime_seconds != null) parts.push(`uptime ${_fmtUptime(data.uptime_seconds)}`);
+    if (data.cycles != null) parts.push(`${data.cycles} ciclos`);
+    if (data.mode) parts.push(String(data.mode));
+    if (data.paper_trading === true) parts.push('paper');
+    else if (data.paper_trading === false) parts.push('LIVE');
+    if (data.last_error) parts.push(`erro: ${data.last_error}`);
+    pill.title = parts.length ? `Sistema: ${state} · ${parts.join(' · ')}` : `Sistema: ${state}`;
+  } else {
+    pill.title = 'Status do sistema indisponível';
+  }
+
+  // Toggle button (Ligar/Desligar)
+  toggle.classList.remove('sys-power-on', 'sys-power-off');
+  if (running) {
+    toggle.textContent = '⏻ Desligar';
+    toggle.classList.add('sys-power-off');
+  } else if (state === 'stopped') {
+    toggle.textContent = '⏻ Ligar';
+    toggle.classList.add('sys-power-on');
+  } else {
+    toggle.textContent = transitioning ? '…' : '⏻ —';
+  }
+
+  // Disable controls during transitions / in-flight requests / unknown.
+  const lock = _sysPowerBusy || transitioning || state === 'unknown';
+  toggle.disabled = lock || (!running && state !== 'stopped');
+  reboot.disabled = lock || (!running && state !== 'stopped');
+}
+
+async function _sysPowerFetchStatus(attempt = 0) {
+  try {
+    const res = await fetch('/api/system/status', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    _sysPowerOk = true;
+    _sysPowerRender(data);
+  } catch (_e) {
+    // The status can fail transiently while the runtime hogs the event loop
+    // during a boot/trading cycle. Retry quickly a few times instead of
+    // waiting for the 5s poll, and never clobber a known-good state.
+    if (attempt < 4) {
+      setTimeout(() => _sysPowerFetchStatus(attempt + 1), 1500);
+      if (!_sysPowerOk) _sysPowerRender(null);
+    } else if (!_sysPowerOk) {
+      _sysPowerRender(null);   // endpoint genuinely unavailable
+    }
+    // If we already had a good status, keep showing it (transient blip).
+  }
+}
+
+async function _sysPowerPost(path, body) {
+  const opts = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    let detail = '';
+    try { detail = (await res.json()).error || ''; } catch (_) { try { detail = await res.text(); } catch (_) {} }
+    throw new Error(detail ? `${res.status}: ${detail.slice(0, 140)}` : `HTTP ${res.status}`);
+  }
+  return res.json().catch(() => ({}));
+}
+
+async function _sysPowerToggle() {
+  if (_sysPowerBusy) return;
+  const running = _sysPowerState === 'running';
+  if (running) {
+    const ok = confirm(
+      '⚠️ DESLIGAR O SISTEMA?\n\n' +
+      'Isso PARA o trading automático e INTERROMPE o consumo de tokens ' +
+      '(chamadas a LLMs). Posições abertas não são fechadas automaticamente.\n\n' +
+      'Confirmar desligamento?'
+    );
+    if (!ok) return;
+  }
+  _sysPowerBusy = true;
+  _sysPowerRender({ state: running ? 'stopping' : 'starting' });
+  try {
+    if (running) await _sysPowerPost('/api/system/stop', { confirm: 'STOP' });
+    else          await _sysPowerPost('/api/system/start', null);
+  } catch (e) {
+    alert('❌ Falha ao ' + (running ? 'desligar' : 'ligar') + ' o sistema: ' + e.message);
+  } finally {
+    _sysPowerBusy = false;
+    _sysPowerFetchStatus();
+  }
+}
+
+async function _sysPowerReboot() {
+  if (_sysPowerBusy) return;
+  const ok = confirm('⚠️ Reiniciar todo o sistema?\n\nO loop de trading será parado e iniciado novamente.');
+  if (!ok) return;
+  _sysPowerBusy = true;
+  _sysPowerRender({ state: 'stopping' });
+  try {
+    await _sysPowerPost('/api/system/reboot', { confirm: 'REBOOT' });
+  } catch (e) {
+    alert('❌ Falha ao reiniciar o sistema: ' + e.message);
+  } finally {
+    _sysPowerBusy = false;
+    _sysPowerFetchStatus();
+  }
+}
+
+function _bootSystemPower() {
+  const toggle = document.getElementById('sys-power-toggle');
+  const reboot = document.getElementById('sys-power-reboot');
+  if (!toggle && !reboot) return;
+  if (toggle) toggle.addEventListener('click', _sysPowerToggle);
+  if (reboot) reboot.addEventListener('click', _sysPowerReboot);
+  _sysPowerFetchStatus();
+  if (_sysPowerTimer) clearInterval(_sysPowerTimer);
+  _sysPowerTimer = setInterval(_sysPowerFetchStatus, 5000);
+}
+
 // ── Boot all v2 features ─────────────────────────────────────
 function _mkBootDashboardV2() {
   // Sync prefs from server first (async, non-blocking — nav still works immediately)
@@ -4803,6 +5063,10 @@ function _mkBootDashboardV2() {
   try { _bootImprovements();} catch (e) { console.error('[v2] _bootImprovements failed:', e); }
   try { _bootTradingModes(); } catch (e) { console.error('[v2] _bootTradingModes failed:', e); }
   try { _bootGlobalMode();   } catch (e) { console.error('[v2] _bootGlobalMode failed:', e); }
+  // Feature B — operator command center quick actions (Overview)
+  try { _bootCommandCenter(); } catch (e) { console.error('[v2] _bootCommandCenter failed:', e); }
+  // Feature C — top bar power control (system on/off/reboot)
+  try { _bootSystemPower(); } catch (e) { console.error('[v2] _bootSystemPower failed:', e); }
   // Global WS — real-time topbar + positions across all pages
   try { _bootGlobalWs(); } catch (e) { console.error('[v2] _bootGlobalWs failed:', e); }
 }
@@ -5359,6 +5623,17 @@ function _cmdSetStatus(msg, type = 'info') {
 // ============================================================
 let _imprData = [];
 let _imprDomainFilter = 'all';
+// Feature D — dev lifecycle / PR status keyed by rec id (from
+// /api/improvements/pr-status). Empty when the endpoint is unavailable.
+let _imprPrStatus = {};
+
+// Feature D — dev lifecycle badge per recommendation.
+const _IMPR_DEV_BADGE = {
+  queued: { cls: 'queued', label: '🕓 Na fila' },
+  in_dev: { cls: 'in-dev', label: '🛠️ Em desenvolvimento' },
+  pr_open:{ cls: 'pr-open',label: '🔀 PR aberto' },
+  merged: { cls: 'merged', label: '✅ Mesclado' },
+};
 
 const _IMPR_DECISION_BADGE = {
   RECOMMEND:                 { cls: 'ok',   label: '✅ Recomendado' },
@@ -5380,6 +5655,15 @@ async function _imprLoad() {
       return;
     }
     _imprData = data.recommendations || [];
+    // Feature D — fetch dev lifecycle / PR status in parallel. Fails
+    // gracefully: if the endpoint 404s the panel still renders without
+    // badges/PR cards.
+    try {
+      const prRes = await fetch('/api/improvements/pr-status', { cache: 'no-store' });
+      _imprPrStatus = prRes.ok ? (await prRes.json()) : {};
+    } catch (_e) {
+      _imprPrStatus = {};
+    }
     const s = data.summary || {};
     if (sum) {
       sum.innerHTML = `
@@ -5410,6 +5694,11 @@ function _imprRender() {
     const pm = r.premortem || {};
     const mits = (pm.mitigations || []).slice(0, 4).map(m => `<li>${escapeHtml(m)}</li>`).join('');
     const statusCls = r.status === 'accepted' ? 'is-accepted' : r.status === 'rejected' ? 'is-rejected' : 'is-pending';
+    // Feature D — dev lifecycle (badge + PR card when a PR is open).
+    const dev = _imprPrStatus[r.id] || null;
+    const devBadge = dev && _IMPR_DEV_BADGE[dev.dev_state]
+      ? `<span class="impr-dev-badge impr-dev-${_IMPR_DEV_BADGE[dev.dev_state].cls}">${_IMPR_DEV_BADGE[dev.dev_state].label}</span>`
+      : '';
     return `
       <div class="impr-card ${statusCls}" data-id="${escapeHtml(r.id)}">
         <div class="impr-card-top">
@@ -5417,6 +5706,7 @@ function _imprRender() {
           <span class="impr-domain">${r.domain === 'trading-ops' ? '⚔️ Trading/Ops' : '🧑‍💻 Dev'}</span>
           <span class="impr-area">${escapeHtml(r.area)}</span>
           <span class="impr-decision impr-decision-${dec.cls}">${dec.label}</span>
+          ${devBadge}
           ${r.status !== 'pending' ? `<span class="impr-status impr-status-${statusCls}">${r.status === 'accepted' ? '✔ Aceita' : '✘ Reprovada'}</span>` : ''}
         </div>
         <div class="impr-title">${escapeHtml(r.title)}</div>
@@ -5427,6 +5717,7 @@ function _imprRender() {
           ${mits ? `<details class="impr-mits"><summary>Mitigações (${(pm.mitigations || []).length})</summary><ul>${mits}</ul></details>` : ''}
         </div>
         <div class="impr-rationale">🧠 <b>Mekka:</b> ${escapeHtml(r.rationale || '')}</div>
+        ${_imprPrCard(r.id, dev)}
         <div class="impr-actions">
           <button type="button" class="impr-btn impr-accept" onclick="_imprDecide('${escapeHtml(r.id)}','accepted')" ${r.status === 'accepted' ? 'disabled' : ''}>✔ Aceitar</button>
           <button type="button" class="impr-btn impr-reject" onclick="_imprDecide('${escapeHtml(r.id)}','rejected')" ${r.status === 'rejected' ? 'disabled' : ''}>✘ Reprovar</button>
@@ -5435,6 +5726,69 @@ function _imprRender() {
       </div>
     `;
   }).join('');
+}
+
+/**
+ * Feature D — render the PR card for a recommendation when dev_state is
+ * "pr_open". Shows title, link (_blank), branch, summary, changed files
+ * and an "Aprovar PR" button. Returns '' for other states.
+ */
+function _imprPrCard(recId, dev) {
+  if (!dev || dev.dev_state !== 'pr_open' || !dev.pr) return '';
+  const pr = dev.pr;
+  const files = Array.isArray(pr.files_changed) ? pr.files_changed : [];
+  const filesHtml = files.length
+    ? `<ul class="impr-pr-files">${files.map(f => `<li>${escapeHtml(String(f))}</li>`).join('')}</ul>`
+    : '<p class="muted-line">Nenhum arquivo informado.</p>';
+  const prNum = pr.number != null ? pr.number : '';
+  const link = pr.url
+    ? `<a href="${escapeHtml(pr.url)}" target="_blank" rel="noopener" class="impr-pr-link">#${escapeHtml(String(prNum))} ↗</a>`
+    : `<span class="impr-pr-link">#${escapeHtml(String(prNum))}</span>`;
+  return `
+    <div class="impr-pr-card">
+      <div class="impr-pr-head">
+        <span class="impr-pr-badge">🔀 PR ABERTO</span>
+        ${link}
+        ${pr.branch ? `<code class="impr-pr-branch">${escapeHtml(pr.branch)}</code>` : ''}
+      </div>
+      <div class="impr-pr-title">${escapeHtml(pr.title || 'Pull Request')}</div>
+      ${pr.summary ? `<div class="impr-pr-summary"><b>Resumo do que foi feito:</b> ${escapeHtml(pr.summary)}</div>` : ''}
+      <div class="impr-pr-files-wrap">
+        <span class="impr-pr-files-label">📄 Arquivos alterados (${files.length}):</span>
+        ${filesHtml}
+      </div>
+      <div class="impr-pr-actions">
+        <button type="button" class="impr-btn impr-pr-approve"
+                onclick="_imprApprovePr('${escapeHtml(recId)}', ${prNum === '' ? 'null' : Number(prNum)})">
+          ✅ Aprovar PR
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * Feature D — approve an open PR for a recommendation.
+ * POST /api/improvements/approve-pr {rec_id, pr_number, confirm:"APPROVE"}
+ * Confirms first; refreshes the panel on success; fails gracefully.
+ */
+async function _imprApprovePr(recId, prNumber) {
+  if (!confirm(`Aprovar e mesclar o PR #${prNumber ?? ''} desta recomendação?`)) return;
+  try {
+    const res = await fetch('/api/improvements/approve-pr', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rec_id: recId, pr_number: prNumber, confirm: 'APPROVE' }),
+    });
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.json()).error || ''; } catch (_) { try { detail = await res.text(); } catch (_) {} }
+      throw new Error(detail ? detail.slice(0, 160) : `HTTP ${res.status}`);
+    }
+    await _imprLoad();
+  } catch (e) {
+    alert('❌ Falha ao aprovar o PR: ' + (e && e.message ? e.message : e));
+  }
 }
 
 async function _imprDecide(id, status) {
@@ -5755,6 +6109,10 @@ function _mkToggleSound() {
   if (_soundEnabled) setTimeout(() => _mkPlayTradeSound('win'), 100);
 }
 
+// Declared here (before _mkRunAllBoots runs) so bootTodaySummary doesn't hit
+// the temporal dead zone when the script loads after DOM-ready (else branch).
+let _tsSummaryTimer = null;
+
 // Chart.js is loaded with `defer`, so wait for DOMContentLoaded once.
 function _mkRunAllBoots() {
   const safeBoot = (fn, label) => {
@@ -5968,8 +6326,6 @@ function bootReports() {
 // ═════════════════════════════════════════════════════════════════════════
 // Today Summary Widget — Overview simplificado para leigos
 // ═════════════════════════════════════════════════════════════════════════
-
-let _tsSummaryTimer = null;
 
 function _tsFmt(val) {
   const n = parseFloat(val);

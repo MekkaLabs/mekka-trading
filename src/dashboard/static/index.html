@@ -140,6 +140,14 @@
           <p>Nick Fury Operations • Wall Street Marvel Office</p>
         </div>
         <div class="topbar-actions">
+          <!-- Power control (Feature C) — liga/desliga/reinicia o sistema.
+               Polls /api/system/status a cada ~5s. Falha graciosamente
+               (estado "desconhecido") se o backend ainda não existir. -->
+          <div class="sys-power" id="sys-power" title="Controle de energia do sistema">
+            <span id="sys-power-pill" class="pill sys-power-pill sys-power-unknown" title="Status do sistema">SISTEMA ???</span>
+            <button id="sys-power-toggle" type="button" class="prefs-reset-btn sys-power-btn" disabled>—</button>
+            <button id="sys-power-reboot" type="button" class="prefs-reset-btn sys-power-btn sys-power-reboot" disabled>⟳ Reboot</button>
+          </div>
           <label for="lang-toggle" class="muted-line">Idioma</label>
           <select id="lang-toggle" class="prefs-reset-btn">
             <option value="pt">Português</option>
@@ -334,17 +342,122 @@
         <div class="ts-footer">Atualizado a cada 30s · <span id="ts-last-update">—</span></div>
       </section>
 
-      <section class="panel full office-hero" id="sec-office" data-page="overview">
-        <div class="office-hero-bar">
-          <span class="office-hero-label">⬡ PIXEL 3D OFFICE</span>
-          <a href="/office-v2/" target="_blank" rel="noopener" class="office-hero-expand" title="Abrir em tela cheia">↗</a>
+      <!-- Feature A — Office + Trade Mode lado a lado (grid 2fr/1fr).
+           Empilha verticalmente em telas < 1100px. O wrapper só é exibido
+           na Overview; o painel sec-trading-settings também aparece em
+           Settings (data-page="overview settings"), onde fica fora deste
+           grid e ocupa largura total normalmente. -->
+      <div class="overview-office-row" id="overview-office-row" data-page="overview">
+        <section class="panel full office-hero" id="sec-office" data-page="overview">
+          <div class="office-hero-bar">
+            <span class="office-hero-label">⬡ PIXEL 3D OFFICE</span>
+            <a href="/office-v2/" target="_blank" rel="noopener" class="office-hero-expand" title="Abrir em tela cheia">↗</a>
+          </div>
+          <iframe
+            id="office-v2-frame"
+            title="Mekka Pixel Office"
+            src="/office-v2/"
+            allow="same-origin"
+          ></iframe>
+        </section>
+
+        <!-- ── Trading Mode Settings ──────────────────────────────────────
+             data-page="overview settings": o painel aparece em AMBAS as
+             páginas. Na Overview vive dentro deste grid (lado a lado com o
+             office); em Settings é movido para fora pelo CSS .layout e
+             ocupa largura total. O `_PAGE_SECTIONS` espelha essa dupla
+             associação — mantenha sincronizado. -->
+        <section class="panel full" id="sec-trading-settings" data-page="overview settings">
+          <h2>⚡ Modos de Trading</h2>
+
+          <!-- Modo Global: 3 presets do /api/mode (runtime_mode.py).
+               Renderizado dinamicamente para que mudanças no enum no
+               backend (conservative/balanced/aggressive) apareçam aqui
+               sem editar HTML. -->
+          <div class="global-mode-row">
+            <div class="global-mode-label">
+              <strong>Modo Global</strong>
+              <span class="muted-line">Define o preset base do sistema (size, leverage, ativos).</span>
+            </div>
+            <div class="global-mode-buttons" id="global-mode-buttons">
+              <!-- buttons rendered by _bootGlobalMode in app.js -->
+            </div>
+          </div>
+
+          <p class="muted-line global-mode-hint">
+            Os dois toggles abaixo são <strong>overrides</strong> aplicados sobre o modo global.
+            <em>Super Agressivo</em> força size mínimo 5% e leverage 10x.
+            <em>Altcoins</em> expande o universo de ativos.
+          </p>
+
+          <div class="trading-modes-grid">
+            <!-- Super Agressivo -->
+            <div class="trading-mode-card">
+              <div class="mode-header">
+                <span class="mode-icon">🚀</span>
+                <div>
+                  <strong class="mode-title">Super Agressivo</strong>
+                  <p class="mode-desc">Posição mínima 5% do capital · Leverage 10x · Threshold de confiança reduzido para 55%</p>
+                </div>
+              </div>
+              <label class="toggle-switch" title="Ligar/desligar modo Super Agressivo">
+                <input type="checkbox" id="toggle-super-aggressive" />
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              </label>
+              <span class="mode-status" id="status-super-aggressive">OFF</span>
+            </div>
+            <!-- Altcoins -->
+            <div class="trading-mode-card">
+              <div class="mode-header">
+                <span class="mode-icon">🪙</span>
+                <div>
+                  <strong class="mode-title">Altcoins</strong>
+                  <p class="mode-desc">Expande universo de ativos para ETH, SOL, AVAX, BNB, LINK além de BTC</p>
+                </div>
+              </div>
+              <label class="toggle-switch" title="Ligar/desligar Altcoins">
+                <input type="checkbox" id="toggle-altcoins" />
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              </label>
+              <span class="mode-status" id="status-altcoins">OFF</span>
+            </div>
+          </div>
+          <p class="mode-save-status muted-line" id="mode-save-status"></p>
+        </section>
+      </div>
+
+      <!-- Feature B — Central de Comandos do operador.
+           Botões de ação rápida que REUTILIZAM os handlers existentes:
+           análise manual (_tradeAnalyze), Modo Deus (force execute via
+           _tradeAnalyze + checkbox), kill switch (openKillswitchModal) e
+           troca de modo (scroll até o painel Modos de Trading). -->
+      <section class="panel cmd-center-panel" id="sec-command-center" data-page="overview">
+        <div class="cmd-center-bar">
+          <span class="cmd-center-label">🎛️ CENTRAL DE COMANDOS</span>
+          <span class="muted-line cmd-center-hint">Ações rápidas do operador</span>
         </div>
-        <iframe
-          id="office-v2-frame"
-          title="Mekka Pixel Office"
-          src="/office-v2/"
-          allow="same-origin"
-        ></iframe>
+        <div class="cmd-center-grid">
+          <button type="button" class="cmd-btn cmd-btn-trade" id="cmd-manual-trade">
+            <span class="cmd-btn-icon">✋</span>
+            <span class="cmd-btn-title">Trade Manual</span>
+            <span class="cmd-btn-sub">Analisar e operar agora</span>
+          </button>
+          <button type="button" class="cmd-btn cmd-btn-exec" id="cmd-force-execute">
+            <span class="cmd-btn-icon">🔱</span>
+            <span class="cmd-btn-title">Executar (Modo Deus)</span>
+            <span class="cmd-btn-sub">Força execução · paper/testnet</span>
+          </button>
+          <button type="button" class="cmd-btn cmd-btn-kill" id="cmd-killswitch">
+            <span class="cmd-btn-icon">🚨</span>
+            <span class="cmd-btn-title" id="cmd-killswitch-title">Kill Switch</span>
+            <span class="cmd-btn-sub" id="cmd-killswitch-sub">Verificando…</span>
+          </button>
+          <button type="button" class="cmd-btn cmd-btn-mode" id="cmd-switch-mode">
+            <span class="cmd-btn-icon">⚡</span>
+            <span class="cmd-btn-title">Trocar Modo</span>
+            <span class="cmd-btn-sub">Conservador · Equilibrado · Agressivo</span>
+          </button>
+        </div>
       </section>
 
       <section class="panel replay-panel" id="sec-live-market" data-page="overview">
@@ -629,67 +742,10 @@
       </section>
 
       <!-- ── Trading Mode Settings ──────────────────────────────────────
-           data-page="overview settings": the panel surfaces on BOTH pages
-           so the operator never has to dig into Settings to find it. The
-           `_PAGE_SECTIONS` map in app.js mirrors this dual membership.
-      -->
-      <section class="panel full" id="sec-trading-settings" data-page="overview settings">
-        <h2>⚡ Modos de Trading</h2>
-
-        <!-- Modo Global: 3 presets do /api/mode (runtime_mode.py).
-             Renderizado dinamicamente para que mudanças no enum no
-             backend (conservative/balanced/aggressive) apareçam aqui
-             sem editar HTML. -->
-        <div class="global-mode-row">
-          <div class="global-mode-label">
-            <strong>Modo Global</strong>
-            <span class="muted-line">Define o preset base do sistema (size, leverage, ativos).</span>
-          </div>
-          <div class="global-mode-buttons" id="global-mode-buttons">
-            <!-- buttons rendered by _bootGlobalMode in app.js -->
-          </div>
-        </div>
-
-        <p class="muted-line global-mode-hint">
-          Os dois toggles abaixo são <strong>overrides</strong> aplicados sobre o modo global.
-          <em>Super Agressivo</em> força size mínimo 5% e leverage 10x.
-          <em>Altcoins</em> expande o universo de ativos.
-        </p>
-
-        <div class="trading-modes-grid">
-          <!-- Super Agressivo -->
-          <div class="trading-mode-card">
-            <div class="mode-header">
-              <span class="mode-icon">🚀</span>
-              <div>
-                <strong class="mode-title">Super Agressivo</strong>
-                <p class="mode-desc">Posição mínima 5% do capital · Leverage 10x · Threshold de confiança reduzido para 55%</p>
-              </div>
-            </div>
-            <label class="toggle-switch" title="Ligar/desligar modo Super Agressivo">
-              <input type="checkbox" id="toggle-super-aggressive" />
-              <span class="toggle-track"><span class="toggle-thumb"></span></span>
-            </label>
-            <span class="mode-status" id="status-super-aggressive">OFF</span>
-          </div>
-          <!-- Altcoins -->
-          <div class="trading-mode-card">
-            <div class="mode-header">
-              <span class="mode-icon">🪙</span>
-              <div>
-                <strong class="mode-title">Altcoins</strong>
-                <p class="mode-desc">Expande universo de ativos para ETH, SOL, AVAX, BNB, LINK além de BTC</p>
-              </div>
-            </div>
-            <label class="toggle-switch" title="Ligar/desligar Altcoins">
-              <input type="checkbox" id="toggle-altcoins" />
-              <span class="toggle-track"><span class="toggle-thumb"></span></span>
-            </label>
-            <span class="mode-status" id="status-altcoins">OFF</span>
-          </div>
-        </div>
-        <p class="mode-save-status muted-line" id="mode-save-status"></p>
-      </section>
+           Movido para o grid Office+TradeMode da Overview (Feature A).
+           O painel #sec-trading-settings agora vive em
+           #overview-office-row mais acima; em Settings ele é reposicionado
+           via CSS (.layout) para ocupar largura total. -->
 
       <section class="panel full" id="sec-filters" data-page="settings">
         <h2>Filters</h2>

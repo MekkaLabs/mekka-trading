@@ -410,11 +410,12 @@ function drawServer(ctx, x, y, frame) {
   ctx.fillRect(x + 22, y + 2, 1, 34);
 }
 
-// ---------- STATIONS (20 desks across 4 rooms) ----------
-// Room L1 (Analysis): 7 desks, 2 back-row clusters
+// ---------- STATIONS (24 desks across 4 rooms) ----------
+// Room L1 (Analysis): 8 desks, back + mid + front rows
 // Room L2 (Strategy): 3 desks, back
-// Room L3 (Risk/Exec): 5 desks, front
-// Room L4 (Command): 4 desks, both rows
+// Room L3 (Risk/Exec): 5 desks, two rows
+// Room L4 (Command): 8 desks, three rows — Nick Fury + data stations +
+//   the Improvement Council (Mekka, Galactus, Beast, Jean Grey)
 const STATIONS = [
   // ---- L1 ANALYSIS (back row left)
   { id:"superman",      deskX: 8,   deskY: 104, screen:"#1e40af", accent:"#fde047", deskAccent:"#38bdf8" },
@@ -437,11 +438,18 @@ const STATIONS = [
   { id:"wolverine",     deskX: 298, deskY: 220, screen:"#1e40af", accent:"#fde047", deskAccent:"#fb923c" },
   { id:"cyclops",       deskX: 194, deskY: 256, screen:"#1e40af", accent:"#ef4444", deskAccent:"#fb923c" },
   { id:"hulk",          deskX: 298, deskY: 256, screen:"#15803d", accent:"#fde047", deskAccent:"#fb923c" },
-  // ---- L4 COMMAND (right, 4 desks)
+  // ---- L4 COMMAND (right, 8 desks across 3 rows)
+  // back row — orchestration + data stations
   { id:"nickfury",      deskX: 372, deskY: 116, screen:"#0a0a0a", accent:"#dc2626", deskAccent:"#22c55e" },
   { id:"portfolio",     deskX: 432, deskY: 116, screen:"#1e3a8a", accent:"#22c55e", deskAccent:"#22c55e" },
   { id:"dailypnl",      deskX: 492, deskY: 116, screen:"#7c2d12", accent:"#fbbf24", deskAccent:"#22c55e" },
-  { id:"nighttrader",   deskX: 432, deskY: 220, screen:"#0a0a14", accent:"#a78bfa", deskAccent:"#22c55e" },
+  // mid row — Improvement Council (Mekka commands, Galactus premortem, Beast proposes)
+  { id:"mekka",         deskX: 372, deskY: 168, screen:"#14532d", accent:"#a3e635", deskAccent:"#22c55e" },
+  { id:"galactus",      deskX: 432, deskY: 168, screen:"#4c1d95", accent:"#c084fc", deskAccent:"#22c55e" },
+  { id:"beast",         deskX: 492, deskY: 168, screen:"#1e3a8a", accent:"#60a5fa", deskAccent:"#22c55e" },
+  // front row — memory + night ops
+  { id:"jeangrey",      deskX: 372, deskY: 224, screen:"#7f1d1d", accent:"#fb923c", deskAccent:"#22c55e" },
+  { id:"nighttrader",   deskX: 432, deskY: 224, screen:"#0a0a14", accent:"#a78bfa", deskAccent:"#22c55e" },
 ];
 
 // Wheelchair agents render with a chair instead of legs.

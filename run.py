@@ -25,6 +25,7 @@ from src.agents.nick_fury import NickFury, run_forever
 from src.config.settings import settings
 from src.dashboard.server import run_dashboard_server
 from src.persistence.repository import MekkaRepository
+from src.runtime_controller import RuntimeController
 
 
 def _configure_logger() -> None:
@@ -174,40 +175,40 @@ def main() -> int:
 
     try:
         if args.dashboard_only:
-            asyncio.run(
-                run_dashboard_server(host=args.dashboard_host, port=args.dashboard_port)
-            )
+            # Dashboard como control plane puro: cria o controller mas NÃO o
+            # inicia, para que o operador ligue o runtime pela UI.
+            async def _run_dashboard_only() -> None:
+                controller = RuntimeController(equity_usd=args.equity)
+                try:
+                    await run_dashboard_server(
+                        host=args.dashboard_host,
+                        port=args.dashboard_port,
+                        controller=controller,
+                    )
+                finally:
+                    await controller.stop()
+
+            asyncio.run(_run_dashboard_only())
             return 0
         if args.once:
             return asyncio.run(_run_once(equity_usd=args.equity, langgraph=args.langgraph))
         if args.dashboard:
+            # Dashboard é primário (sempre ligado); o runtime de trading é de
+            # propriedade do RuntimeController, que pode ligar/desligar/reiniciar
+            # via UI. Bootamos rodando por padrão (preserva o comportamento
+            # anterior), mas garantimos o stop() ao encerrar para que nenhuma
+            # chamada de LLM continue após o shutdown.
             async def _run_both() -> None:
-                # TaskGroup (Python 3.11+) propagates the first exception and
-                # cancels every sibling task. Without this, a crash inside
-                # run_forever would leave the dashboard running zombie-style
-                # (or vice-versa) — not what an operator expects when one
-                # half of the system dies. We catch the resulting
-                # ExceptionGroup as a plain Exception (it inherits from
-                # Exception on 3.11+) and log every wrapped error.
+                controller = RuntimeController(equity_usd=args.equity)
+                await controller.start()
                 try:
-                    async with asyncio.TaskGroup() as tg:
-                        tg.create_task(_run_forever_with_inbound(equity_usd=args.equity))
-                        tg.create_task(
-                            run_dashboard_server(
-                                host=args.dashboard_host,
-                                port=args.dashboard_port,
-                            )
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    sub = getattr(exc, "exceptions", None)
-                    if sub:
-                        for inner in sub:
-                            logger.exception(
-                                "[run] task group failure: {}", inner
-                            )
-                    else:
-                        logger.exception("[run] task group failure: {}", exc)
-                    raise
+                    await run_dashboard_server(
+                        host=args.dashboard_host,
+                        port=args.dashboard_port,
+                        controller=controller,
+                    )
+                finally:
+                    await controller.stop()
 
             asyncio.run(_run_both())
             return 0
