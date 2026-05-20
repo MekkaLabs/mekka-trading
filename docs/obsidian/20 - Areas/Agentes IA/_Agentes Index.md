@@ -10,7 +10,7 @@ updated: 2026-05-20
 
 > Uma nota por agente. Use `Template - Agente`. Roster organizado pela camada AIOX (Command → Strategy → Execution → Monitoring → Recovery → Analytics).
 
-## Roster (18 agentes)
+## Roster (20 agentes)
 
 ### 🎖️ Command Layer
 - [x] [[Nick Fury]] — Mission Commander (orquestra o ciclo completo)
@@ -40,12 +40,18 @@ updated: 2026-05-20
 
 ### 📊 Analytics Layer
 - [x] [[Deadpool]] — Performance Analytics Agent (daily + weekly reports)
-- [x] [[Beast]] — Continuous Improvement Analyst (Story 248, codex M40)
 
-> Cyclops, Wolverine **e Beast** NUNCA colocam ordens reais. Cyclops e
-> Wolverine fazem paper trades (close/recover); Beast é estritamente
-> read-only. **Iron Man é o único caminho para ordens live** em
-> qualquer exchange.
+### 🛠️ Continuous-Improvement Council
+> Time de melhoria contínua — atua nos heróis de trading/ops **e** nos squads de dev.
+- [x] [[Mekka]] — 👑 Commander & consolidador (lidera o conselho; `/Melhorias`)
+- [x] [[Beast]] — Propositor (Continuous Improvement Analyst, Story 248)
+- [x] [[Jean Grey]] — Memória/vault (contexto histórico)
+- [x] [[Galactus]] — 🪐 Premortem / devorador de ideias (contraponto de Beast e Jean)
+
+> Cyclops, Wolverine **e todo o Improvement Council** (Mekka, Beast, Jean Grey,
+> Galactus) NUNCA colocam ordens reais. Cyclops e Wolverine fazem paper trades
+> (close/recover); o council é estritamente read-only (só escreve decisões de
+> melhoria). **Iron Man é o único caminho para ordens live** em qualquer exchange.
 
 ## Agentes documentados
 

@@ -28,7 +28,8 @@ Este é o vault de conhecimento do projeto: arquitetura, decisões, agentes, run
 | **Exchange recomendada para validação** | **Bybit testnet** (via CCXT, `set_sandbox_mode(True)`) |
 | **Exchanges suportadas** | Hyperliquid (testnet/mainnet), Bybit (testnet/mainnet), Binance (placeholder) |
 | **Dashboard** | `http://localhost:8787` com WebSocket em tempo real + env badge multi-exchange |
-| **Agentes ativos (18)** | Nick Fury, Professor X, Superman, Vision (+ VisionCritic), Doctor Strange, Aquaman, Black Panther, Thor, Flash, Batman, Iron Man, Cyclops, Spider-Man, Portfolio Manager, Wolverine, Deadpool, Beast, **Jean Grey** |
+| **Agentes ativos (20)** | Nick Fury, Professor X, Superman, Vision (+ VisionCritic), Doctor Strange, Aquaman, Black Panther, Thor, Flash, Batman, Iron Man, Cyclops, Spider-Man, Portfolio Manager, Wolverine, Deadpool, Beast, **Jean Grey**, **Mekka** 👑, **Galactus** 🪐 |
+| **Improvement Council** | **Mekka** (líder/consolida) + **Beast** (propõe) + **Jean Grey** (memória) + **Galactus** (premortem) → operador aprova em `/Melhorias` |
 
 ### Marcos recentes
 
