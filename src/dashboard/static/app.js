@@ -159,6 +159,25 @@ let tradingViewRetryTimer = null;
 let tradingViewScriptRequested = false;
 const TRADINGVIEW_SCRIPT_URLS = ['https://s3.tradingview.com/tv.js', 'https://s3.tradingview.com/tv.js'];
 const PREF_KEY = 'mekka_dashboard_prefs_v1';
+
+// ── lightweight-charts v4/v5 compatibility shim ─────────────────────────────
+// v5 removed chart.addCandlestickSeries / addHistogramSeries / addLineSeries in
+// favour of chart.addSeries(LightweightCharts.<Type>Series, opts). The vendored
+// bundle is v5, but this code was written against the v4 method API. These
+// helpers call whichever API the loaded library exposes so the charts work
+// regardless of which version (local or CDN fallback) ends up loaded.
+function _lwcAddCandle(chart, opts) {
+  if (chart && typeof chart.addCandlestickSeries === 'function') return chart.addCandlestickSeries(opts);
+  return chart.addSeries(LightweightCharts.CandlestickSeries, opts);
+}
+function _lwcAddHistogram(chart, opts) {
+  if (chart && typeof chart.addHistogramSeries === 'function') return chart.addHistogramSeries(opts);
+  return chart.addSeries(LightweightCharts.HistogramSeries, opts);
+}
+function _lwcAddLine(chart, opts) {
+  if (chart && typeof chart.addLineSeries === 'function') return chart.addLineSeries(opts);
+  return chart.addSeries(LightweightCharts.LineSeries, opts);
+}
 let currentLang = 'pt';
 let officeV2Mounted = false;
 
@@ -612,14 +631,14 @@ function initMarketChart() {
     width: marketChartEl.clientWidth || 900,
     height: 430,
   });
-  marketSeries = marketChart.addCandlestickSeries({
+  marketSeries = _lwcAddCandle(marketChart, {
     upColor: '#2bc4b5',
     downColor: '#ff5c66',
     borderVisible: false,
     wickUpColor: '#2bc4b5',
     wickDownColor: '#ff5c66',
   });
-  marketVolumeSeries = marketChart.addHistogramSeries({
+  marketVolumeSeries = _lwcAddHistogram(marketChart, {
     color: '#2bc4b599',
     priceFormat: { type: 'volume' },
     priceScaleId: 'left',
@@ -3738,7 +3757,7 @@ function _initLightweightChart() {
     height: container.offsetHeight || container.clientHeight || 500,
   });
 
-  _liveCandleSeries = _liveChart.addCandlestickSeries({
+  _liveCandleSeries = _lwcAddCandle(_liveChart, {
     upColor:   '#26d07c',
     downColor: '#e94560',
     borderUpColor:   '#26d07c',
@@ -3747,7 +3766,7 @@ function _initLightweightChart() {
     wickDownColor: '#e94560',
   });
 
-  _liveVolumeSeries = _liveChart.addHistogramSeries({
+  _liveVolumeSeries = _lwcAddHistogram(_liveChart, {
     priceFormat: { type: 'volume' },
     priceScaleId: 'vol',
   });
@@ -3939,7 +3958,7 @@ function _initRsiChart() {
   if (!_liveRsiChart) return;
 
   // RSI line
-  _liveRsiSeries = _liveRsiChart.addLineSeries({ color: '#c47bff', lineWidth: 1, priceFormat: { type: 'price', precision: 1, minMove: 0.1 } });
+  _liveRsiSeries = _lwcAddLine(_liveRsiChart, { color: '#c47bff', lineWidth: 1, priceFormat: { type: 'price', precision: 1, minMove: 0.1 } });
 
   // Overbought / oversold reference lines (using priceLine API)
   _liveRsiSeries.createPriceLine({ price: 70, color: 'rgba(233,69,96,0.5)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'OB' });
@@ -3971,9 +3990,9 @@ function _initMacdChart() {
   _liveMacdChart = _createSubChart('live-macd-chart', 100);
   if (!_liveMacdChart) return;
 
-  _liveMacdHist   = _liveMacdChart.addHistogramSeries({ priceFormat: { type: 'price', precision: 4, minMove: 0.0001 } });
-  _liveMacdLine   = _liveMacdChart.addLineSeries({ color: '#38bdf8', lineWidth: 1, priceFormat: { type: 'price', precision: 4, minMove: 0.0001 } });
-  _liveMacdSignal = _liveMacdChart.addLineSeries({ color: '#fb923c', lineWidth: 1, priceFormat: { type: 'price', precision: 4, minMove: 0.0001 } });
+  _liveMacdHist = _lwcAddHistogram(_liveMacdChart, { priceFormat: { type: 'price', precision: 4, minMove: 0.0001 } });
+  _liveMacdLine = _lwcAddLine(_liveMacdChart, { color: '#38bdf8', lineWidth: 1, priceFormat: { type: 'price', precision: 4, minMove: 0.0001 } });
+  _liveMacdSignal = _lwcAddLine(_liveMacdChart, { color: '#fb923c', lineWidth: 1, priceFormat: { type: 'price', precision: 4, minMove: 0.0001 } });
 
   // Zero line
   _liveMacdLine.createPriceLine({ price: 0, color: 'rgba(122,144,187,0.3)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: false });
@@ -3996,9 +4015,9 @@ function _initMacdChart() {
 // ── Render helpers ────────────────────────────────────────────
 function _renderLiveBB(candles) {
   if (!_liveBbUpper) {
-    _liveBbUpper  = _liveChart.addLineSeries({ color: 'rgba(96,165,250,0.6)',  lineWidth: 1, priceScaleId: 'right', lastValueVisible: false, priceLineVisible: false });
-    _liveBbMiddle = _liveChart.addLineSeries({ color: 'rgba(251,191,36,0.55)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceScaleId: 'right', lastValueVisible: false, priceLineVisible: false });
-    _liveBbLower  = _liveChart.addLineSeries({ color: 'rgba(96,165,250,0.6)',  lineWidth: 1, priceScaleId: 'right', lastValueVisible: false, priceLineVisible: false });
+    _liveBbUpper = _lwcAddLine(_liveChart, { color: 'rgba(96,165,250,0.6)',  lineWidth: 1, priceScaleId: 'right', lastValueVisible: false, priceLineVisible: false });
+    _liveBbMiddle = _lwcAddLine(_liveChart, { color: 'rgba(251,191,36,0.55)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceScaleId: 'right', lastValueVisible: false, priceLineVisible: false });
+    _liveBbLower = _lwcAddLine(_liveChart, { color: 'rgba(96,165,250,0.6)',  lineWidth: 1, priceScaleId: 'right', lastValueVisible: false, priceLineVisible: false });
   }
   const bb = _calcBB(candles);
   _liveBbUpper.setData(bb.map(d => ({ time: d.time, value: d.upper  })));
