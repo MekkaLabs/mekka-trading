@@ -409,6 +409,8 @@ class MekkaDashboardServer:
         self._app.router.add_post("/api/trade/manual", self._handle_trade_manual)
         self._app.router.add_post("/api/trade/manual-analyze", self._handle_trade_manual_analyze)
         self._app.router.add_get("/api/jean/health-report", self._handle_jean_health_report)
+        self._app.router.add_get("/api/improvements", self._handle_improvements_get)
+        self._app.router.add_post("/api/improvements/decision", self._handle_improvements_decision)
         self._app.router.add_get("/api/prefs", self._handle_prefs_get)
         self._app.router.add_post("/api/prefs", self._handle_prefs_set)
         self._app.router.add_post("/api/auth/login", self._handle_auth_login)
@@ -5894,6 +5896,53 @@ class MekkaDashboardServer:
                 {"error": f"Falha ao gerar relatório do vault: {exc}"},
                 status=200,
             )
+
+    async def _handle_improvements_get(self, _: web.Request) -> web.Response:
+        """GET /api/improvements — run the Mekka improvement council.
+
+        Returns consolidated recommendations (Beast proposals + curated inbox,
+        each premortem-ed by Galactus and consolidated by Mekka) with the
+        operator's persisted accept/reject status. Read-only.
+        """
+        try:
+            from src.agents.mekka import Mekka
+            report = await Mekka().run(period_days=7)
+            return web.json_response(report.to_dict(), status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("improvements council failed: %s", exc, exc_info=True)
+            return web.json_response(
+                {"error": f"Falha ao montar o conselho de melhorias: {exc}",
+                 "recommendations": [], "summary": {}},
+                status=200,
+            )
+
+    async def _handle_improvements_decision(self, request: web.Request) -> web.Response:
+        """POST /api/improvements/decision — operator accepts/rejects a rec.
+
+        Body: { id: str, status: "accepted"|"rejected"|"pending" }
+        """
+        body = await self._safe_json_body(request) or {}
+        rec_id = str(body.get("id") or "").strip()[:64]
+        status = str(body.get("status") or "").strip().lower()
+        if not rec_id or status not in ("accepted", "rejected", "pending"):
+            return web.json_response(
+                {"ok": False, "reason": "Parâmetros inválidos (id + status accepted|rejected|pending)."},
+                status=400,
+            )
+        try:
+            from src.agents.mekka import Mekka
+            ok = Mekka().record_decision(rec_id, status)
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="IMPROVEMENT_DECISION",
+                severity="INFO",
+                message=f"Operador {status} recomendação {rec_id}",
+                payload={"id": rec_id, "status": status, "ok": ok},
+            )
+            return web.json_response({"ok": ok, "id": rec_id, "status": status}, status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("improvement decision failed: %s", exc, exc_info=True)
+            return web.json_response({"ok": False, "reason": str(exc)}, status=200)
 
     def _prune_snapshot_dir(self) -> None:
         """Keep only the most recent ``SNAPSHOT_RETENTION_MINUTES`` snapshots

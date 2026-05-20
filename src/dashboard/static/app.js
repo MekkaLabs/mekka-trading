@@ -2969,6 +2969,7 @@ const _PAGE_SECTIONS = {
   settings:    ['sec-trading-settings', 'sec-settings', 'sec-filters'],
   live:        ['sec-live-trading'],
   manual:      ['sec-manual-trade'],
+  improvements:['sec-improvements'],
   memory:      ['sec-memory'],
   leaderboard: ['sec-leaderboard'],
   reports:     ['sec-report-daily', 'sec-report-symbol', 'sec-report-backtest'],
@@ -3010,6 +3011,9 @@ function _mkSetPage(pageKey) {
 
   // Boot live chart on first visit to "live" page
   if (pageKey === 'live') _ensureLiveChartBooted();
+
+  // Load the improvement council whenever the Melhorias page is opened.
+  if (pageKey === 'improvements' && typeof _imprLoad === 'function') _imprLoad();
 
   // Re-carregar dados ao navegar para páginas dinâmicas
   if (pageKey === 'memory' && typeof loadMemory === 'function') loadMemory();
@@ -4796,6 +4800,7 @@ function _mkBootDashboardV2() {
   try { _mkBootTopBar();  } catch (e) { console.error('[v2] _mkBootTopBar failed:', e); }
   try { _mkBootTradeNow();} catch (e) { console.error('[v2] _mkBootTradeNow failed:', e); }
   try { _bootManualTrade();} catch (e) { console.error('[v2] _bootManualTrade failed:', e); }
+  try { _bootImprovements();} catch (e) { console.error('[v2] _bootImprovements failed:', e); }
   try { _bootTradingModes(); } catch (e) { console.error('[v2] _bootTradingModes failed:', e); }
   try { _bootGlobalMode();   } catch (e) { console.error('[v2] _bootGlobalMode failed:', e); }
   // Global WS — real-time topbar + positions across all pages
@@ -5347,6 +5352,118 @@ function _cmdSetStatus(msg, type = 'info') {
   if (!el) return;
   el.textContent = msg;
   el.className = `cmd-status ${type}`;
+}
+
+// ============================================================
+// CENTRAL DE MELHORIAS CONTÍNUAS (Mekka council)
+// ============================================================
+let _imprData = [];
+let _imprDomainFilter = 'all';
+
+const _IMPR_DECISION_BADGE = {
+  RECOMMEND:                 { cls: 'ok',   label: '✅ Recomendado' },
+  RECOMMEND_WITH_MITIGATION: { cls: 'warn', label: '⚠️ Recomendado c/ mitigação' },
+  REJECT:                    { cls: 'bad',  label: '🚫 Rejeitado (Galactus devorou)' },
+  DEFER:                     { cls: 'muted',label: '⏸ Adiado' },
+};
+const _IMPR_VERDICT_EMOJI = { SURVIVES: '🟢', NEEDS_HARDENING: '🟡', DEVOURED: '🔴' };
+
+async function _imprLoad() {
+  const list = document.getElementById('impr-list');
+  const sum  = document.getElementById('impr-summary');
+  if (list) list.innerHTML = '<div class="muted-line">Carregando conselho…</div>';
+  try {
+    const res = await fetch('/api/improvements', { cache: 'no-store' });
+    const data = await res.json();
+    if (data.error) {
+      if (list) list.innerHTML = `<div class="trade-result-fail">❌ ${escapeHtml(data.error)}</div>`;
+      return;
+    }
+    _imprData = data.recommendations || [];
+    const s = data.summary || {};
+    if (sum) {
+      sum.innerHTML = `
+        <div class="impr-stat"><b>${s.total || 0}</b><span>recomendações</span></div>
+        <div class="impr-stat impr-stat-pending"><b>${s.pending || 0}</b><span>pendentes</span></div>
+        <div class="impr-stat impr-stat-ok"><b>${s.accepted || 0}</b><span>aceitas</span></div>
+        <div class="impr-stat impr-stat-bad"><b>${s.rejected || 0}</b><span>reprovadas</span></div>
+        <div class="impr-stat"><b>${s.trading_ops || 0}</b><span>trading/ops</span></div>
+        <div class="impr-stat"><b>${s.dev_squad || 0}</b><span>dev squads</span></div>
+      `;
+    }
+    _imprRender();
+  } catch (err) {
+    if (list) list.innerHTML = `<div class="trade-result-fail">❌ Erro: ${escapeHtml(String(err))}</div>`;
+  }
+}
+
+function _imprRender() {
+  const list = document.getElementById('impr-list');
+  if (!list) return;
+  const rows = _imprData.filter(r => _imprDomainFilter === 'all' || r.domain === _imprDomainFilter);
+  if (!rows.length) {
+    list.innerHTML = '<div class="muted-line">Nenhuma recomendação neste filtro. O conselho roda sobre trades fechados (Beast) + o inbox curado (data/improvement_inbox.json).</div>';
+    return;
+  }
+  list.innerHTML = rows.map(r => {
+    const dec = _IMPR_DECISION_BADGE[r.decision] || { cls: 'muted', label: r.decision };
+    const pm = r.premortem || {};
+    const mits = (pm.mitigations || []).slice(0, 4).map(m => `<li>${escapeHtml(m)}</li>`).join('');
+    const statusCls = r.status === 'accepted' ? 'is-accepted' : r.status === 'rejected' ? 'is-rejected' : 'is-pending';
+    return `
+      <div class="impr-card ${statusCls}" data-id="${escapeHtml(r.id)}">
+        <div class="impr-card-top">
+          <span class="impr-prio impr-prio-${escapeHtml(r.priority)}">${escapeHtml(r.priority)}</span>
+          <span class="impr-domain">${r.domain === 'trading-ops' ? '⚔️ Trading/Ops' : '🧑‍💻 Dev'}</span>
+          <span class="impr-area">${escapeHtml(r.area)}</span>
+          <span class="impr-decision impr-decision-${dec.cls}">${dec.label}</span>
+          ${r.status !== 'pending' ? `<span class="impr-status impr-status-${statusCls}">${r.status === 'accepted' ? '✔ Aceita' : '✘ Reprovada'}</span>` : ''}
+        </div>
+        <div class="impr-title">${escapeHtml(r.title)}</div>
+        <div class="impr-desc">${escapeHtml(r.description || '')}</div>
+        ${r.evidence ? `<div class="impr-evidence">📊 <b>Evidência:</b> ${escapeHtml(r.evidence)}</div>` : ''}
+        <div class="impr-premortem">
+          <span class="impr-pm-verdict">${_IMPR_VERDICT_EMOJI[pm.verdict] || ''} Galactus: <b>${escapeHtml(pm.verdict || '—')}</b> (fome ${pm.hunger != null ? pm.hunger : '—'}/100)</span>
+          ${mits ? `<details class="impr-mits"><summary>Mitigações (${(pm.mitigations || []).length})</summary><ul>${mits}</ul></details>` : ''}
+        </div>
+        <div class="impr-rationale">🧠 <b>Mekka:</b> ${escapeHtml(r.rationale || '')}</div>
+        <div class="impr-actions">
+          <button type="button" class="impr-btn impr-accept" onclick="_imprDecide('${escapeHtml(r.id)}','accepted')" ${r.status === 'accepted' ? 'disabled' : ''}>✔ Aceitar</button>
+          <button type="button" class="impr-btn impr-reject" onclick="_imprDecide('${escapeHtml(r.id)}','rejected')" ${r.status === 'rejected' ? 'disabled' : ''}>✘ Reprovar</button>
+          ${r.status !== 'pending' ? `<button type="button" class="impr-btn impr-reset" onclick="_imprDecide('${escapeHtml(r.id)}','pending')">↺ Reabrir</button>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function _imprDecide(id, status) {
+  try {
+    const res = await fetch('/api/improvements/decision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, status }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      const rec = _imprData.find(r => r.id === id);
+      if (rec) rec.status = status;
+      _imprRender();
+      _imprLoad();  // refresh summary counts
+    }
+  } catch (_) { /* silent */ }
+}
+
+function _bootImprovements() {
+  const refresh = document.getElementById('impr-refresh');
+  if (refresh) refresh.addEventListener('click', _imprLoad);
+  document.querySelectorAll('.impr-filter').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _imprDomainFilter = btn.dataset.domain || 'all';
+      document.querySelectorAll('.impr-filter').forEach(b => b.classList.toggle('active', b === btn));
+      _imprRender();
+    });
+  });
 }
 
 // ============================================================

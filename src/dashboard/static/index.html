@@ -48,6 +48,7 @@
         <button class="page-nav-btn page-nav-live" data-page="live">📡 Live</button>
         <button class="page-nav-btn page-nav-manual" data-page="manual">✋ Manual</button>
         <button class="page-nav-btn active" data-page="overview">🏠 Overview</button>
+        <button class="page-nav-btn page-nav-improvements" data-page="improvements">🛠️ Melhorias</button>
         <ul class="page-nav-sub">
           <li><a href="#sec-today-summary">📊 Resultado do Dia</a></li>
           <li><a href="#sec-office">⬡ Pixel 3D Office</a></li>
@@ -1017,6 +1018,35 @@
 
         <div class="manual-trade-verdict" id="mt-verdict"></div>
         <div class="manual-trade-result" id="mt-result"></div>
+      </section>
+
+      <!-- ── Central de Melhorias Contínuas (Mekka council) ──────────────
+           Mekka consolidates Beast proposals + curated inbox, premortem-ed
+           by Galactus, into ranked recommendations the operator approves
+           or rejects. -->
+      <section class="panel full improvements-panel" id="sec-improvements" data-page="improvements">
+        <div class="impr-header">
+          <h2>🛠️ Central de Melhorias Contínuas</h2>
+          <button type="button" class="impr-refresh-btn" id="impr-refresh">↻ Atualizar conselho</button>
+        </div>
+        <p class="muted-line">
+          Comandada por <strong>Mekka</strong>, que consolida as propostas do
+          <strong>Beast</strong> + contexto da <strong>Jean Grey</strong>, depois
+          de passarem pelo premortem do <strong>Galactus</strong> (que devora as
+          ideias frágeis). Aprove ou reprove cada recomendação abaixo.
+        </p>
+
+        <div class="impr-summary" id="impr-summary"></div>
+
+        <div class="impr-filters">
+          <button type="button" class="impr-filter active" data-domain="all">Todos</button>
+          <button type="button" class="impr-filter" data-domain="trading-ops">⚔️ Trading/Ops</button>
+          <button type="button" class="impr-filter" data-domain="dev-squad">🧑‍💻 Dev Squads</button>
+        </div>
+
+        <div class="impr-list" id="impr-list">
+          <div class="muted-line">Carregando conselho…</div>
+        </div>
       </section>
 
       <!-- ═══════════════════════════════════════════════════════════════

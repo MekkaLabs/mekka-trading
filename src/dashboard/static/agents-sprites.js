@@ -679,6 +679,40 @@ const AGENTS = [
                a:"#f5c542", A:"#d4a017", p:"#1f7a3f", P:"#0f4d24" },
     overlay: { sprite: "CAPE", palette: { A:"#d94c1a", a:"#f5c542" } },
   },
+  {
+    // Mekka — Continuous-Improvement Commander (2026-05-20). Future super-
+    // hero the system is named after: green tech-armor + glowing lime lens
+    // eyes (the brand logo). Leader/consolidator of the improvement council.
+    // Read-only. NOTE: keep in sync with office_v2/sprites.jsx.
+    id: "mekka",
+    name: "Mekka",
+    role: "Improvement Commander",
+    layer: "L4",
+    color: "#7cb342",
+    summary: "Commands the continuous-improvement council; consolidates Beast, Jean Grey & Galactus.",
+    task: "Consolidando o conselho — 3 recomendações pendentes",
+    palette: { k:"#0a1f0a", h:"#1a3a1a", H:"#0a1f0a", s:"#9ccc5a", S:"#6aa233",
+               e:"#aeffa0", m:"#1a3a1a", c:"#1f7a3f", C:"#0f4d24",
+               a:"#aeffa0", A:"#7cb342", p:"#1f7a3f", P:"#0f4d24" },
+    overlay: { sprite: "VISOR", palette: { A:"#1a3a1a", a:"#7cb342", e:"#aeffa0" } },
+  },
+  {
+    // Galactus — Premortem Specialist / Devourer of Ideas (2026-05-20).
+    // Cosmic purple armor + tall helmet-crown. Counterpoint to Beast & Jean:
+    // devours weak ideas in a premortem so only hardened ones reach Mekka.
+    // Read-only. NOTE: keep in sync with office_v2/sprites.jsx.
+    id: "galactus",
+    name: "Galactus",
+    role: "Premortem / Devourer",
+    layer: "L4",
+    color: "#7c3aed",
+    summary: "Premortems every proposal — 'assume it failed, why?' — devouring the weak ones.",
+    task: "Devorando propostas frágeis — 1 devorada, 1 endurecida",
+    palette: { k:"#150a28", h:"#3a1a5a", H:"#150a28", s:"#7c4ddb", S:"#4a2a8a",
+               e:"#e6ccff", m:"#2a1a3a", c:"#5b21b6", C:"#3b0764",
+               a:"#a78bfa", A:"#7c3aed", p:"#5b21b6", P:"#3b0764" },
+    overlay: { sprite: "HELMET", palette: { A:"#7c3aed", a:"#a78bfa", e:"#e6ccff" } },
+  },
 ];
 
 // Visor overlay — Cyclops style horizontal red band across eyes

@@ -22,6 +22,7 @@ window.MekkaI18n = {
       // ── Nav buttons (current page set) ──────────────────────
       'nav.live':        '📡 Live',
       'nav.manual':      '✋ Manual',
+      'nav.improvements':'🛠️ Melhorias',
       'nav.overview':    '🏠 Visão Geral',
       'nav.wallet':      '💼 Carteira',
       'nav.performance': '⚡ Performance',
@@ -139,6 +140,7 @@ window.MekkaI18n = {
 
       'nav.live':        '📡 Live',
       'nav.manual':      '✋ Manual',
+      'nav.improvements':'🛠️ Improvements',
       'nav.overview':    '🏠 Overview',
       'nav.wallet':      '💼 Wallet',
       'nav.performance': '⚡ Performance',
