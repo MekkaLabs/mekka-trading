@@ -426,6 +426,19 @@
         </section>
       </div>
 
+      <!-- Office companions: Layer Command Map + Agents Roster, lado a lado,
+           junto ao office na Overview (também usados na página Agentes). -->
+      <div class="overview-agents-row" id="overview-agents-row" data-page="overview agents">
+        <section class="panel full" id="sec-layers" data-page="overview agents">
+          <h2>Layer Command Map (L1-L4)</h2>
+          <div id="layer-map" class="layer-map"></div>
+        </section>
+        <section class="panel full" id="sec-agents" data-page="overview agents">
+          <h2>Agents Pixel Roster 3D</h2>
+          <div id="agents-roster" class="agents-roster"></div>
+        </section>
+      </div>
+
       <!-- Feature B — Central de Comandos do operador.
            Botões de ação rápida que REUTILIZAM os handlers existentes:
            análise manual (_tradeAnalyze), Modo Deus (force execute via
@@ -731,15 +744,9 @@
         <div class="cards" id="metrics"></div>
       </section>
 
-      <section class="panel full" id="sec-layers" data-page="agents">
-        <h2>Layer Command Map (L1-L4)</h2>
-        <div id="layer-map" class="layer-map"></div>
-      </section>
-
-      <section class="panel full" id="sec-agents" data-page="agents">
-        <h2>Agents Pixel Roster 3D</h2>
-        <div id="agents-roster" class="agents-roster"></div>
-      </section>
+      <!-- sec-layers + sec-agents foram movidos para #overview-agents-row
+           (logo após #overview-office-row) para aparecerem junto ao office na
+           Overview. Continuam na página Agentes via o mesmo wrapper. -->
 
       <!-- ── Trading Mode Settings ──────────────────────────────────────
            Movido para o grid Office+TradeMode da Overview (Feature A).

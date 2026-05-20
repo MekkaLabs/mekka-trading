@@ -3096,7 +3096,7 @@ const _PAGE_SECTIONS = {
   // sec-trading-settings now live together inside #overview-office-row
   // (a 2-col grid). Ordering here keeps the office/trade-mode row first,
   // followed by the operator command center, then the rest.
-  overview:    ['sec-today-summary', 'sec-office', 'sec-trading-settings', 'sec-command-center', 'sec-live-market', 'sec-metrics'],
+  overview:    ['sec-today-summary', 'sec-office', 'sec-trading-settings', 'sec-layers', 'sec-agents', 'sec-command-center', 'sec-live-market', 'sec-metrics'],
   wallet:      ['sec-killswitch', 'sec-pnl', 'sec-positions', 'sec-funding'],
   performance: ['sec-equity-curve', 'sec-trades-timeline', 'sec-replay-charts', 'sec-hero-sla'],
   agents:      ['sec-layers', 'sec-agents', 'sec-internals'],
@@ -3150,6 +3150,23 @@ function _mkSetPage(pageKey) {
     // When only the trade-mode panel is present (settings page), drop the
     // 2-col grid so it spans full width like before.
     _officeRow.classList.toggle('office-row-solo', wrapVisible && !ids.includes('sec-office'));
+  }
+
+  // Layer Command Map + Roster live together inside #overview-agents-row on
+  // the Overview. Like the office row, the wrapper isn't a tracked section, so
+  // toggle it based on whether the active page includes its children.
+  const _agentsRow = document.getElementById('overview-agents-row');
+  if (_agentsRow) {
+    const ids = _PAGE_SECTIONS[pageKey] || [];
+    const agentsRowVisible = ids.includes('sec-layers') || ids.includes('sec-agents');
+    _agentsRow.classList.toggle('page-section-hidden', !agentsRowVisible);
+  }
+
+  // Returning to the Overview: re-measure the office iframe (it may have been
+  // hidden while on another page, so its size wasn't tracked).
+  if (pageKey === 'overview') {
+    setTimeout(() => { try { _sizeOfficeFrame(); } catch (_) {} }, 60);
+    setTimeout(() => { try { _sizeOfficeFrame(); } catch (_) {} }, 600);
   }
 
   // Apply per-widget visibility prefs on top
