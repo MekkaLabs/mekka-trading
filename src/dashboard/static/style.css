@@ -600,20 +600,33 @@ input, select { padding: 7px 10px; }
 }
 
 .sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 16px 14px;
+  border-bottom: 1px solid var(--glass-border);
+  white-space: nowrap;
+}
+.brand-mark {
+  width: 40px;
+  height: auto;
+  flex-shrink: 0;
+  filter: drop-shadow(0 0 8px rgba(124,179,66,0.35));
+}
+.brand-leaf { fill: #7cb342; }
+.brand-wordmark {
   font-family: var(--font-sans);
-  font-size: 1.05rem;
+  font-size: 1.15rem;
   font-weight: 800;
-  letter-spacing: 0.10em;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
-  padding: 18px 16px 14px;
-  color: var(--text);
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
-  border-bottom: 1px solid var(--glass-border);
-  white-space: nowrap;
 }
+/* Light theme: deepen the leaf green slightly for contrast on white */
+body[data-theme="light"] .brand-leaf { fill: #6aa233; }
 
 .sidebar-mode {
   font-size: 0.64rem;
@@ -2007,8 +2020,10 @@ input, select { padding: 7px 10px; }
 
 @media (max-width: 680px) {
   .sidebar { width: 48px; overflow: hidden; }
-  .sidebar-brand { font-size: 0; }
-  .sidebar-brand::after { content: "M"; font-size: 1rem; -webkit-text-fill-color: var(--accent); }
+  /* Collapsed sidebar: keep just the logo mark, drop the wordmark. */
+  .sidebar-brand { padding: 12px 6px; justify-content: center; }
+  .brand-wordmark { display: none; }
+  .brand-mark { width: 30px; }
   .page-nav-btn { font-size: 0; padding: 10px; text-align: center; }
   .page-nav-sub { display: none !important; }
 }

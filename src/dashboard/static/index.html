@@ -31,7 +31,19 @@
   <body>
     <div class="bg-grid"></div>
     <aside class="sidebar">
-      <div class="sidebar-brand">MEKKA OPS</div>
+      <!-- Brand lockup (g, 2026-05-20): the "MEKKA OPS" wordmark was
+           replaced by the Mekka logo — two lime-green lens/leaf forms —
+           recreated as inline SVG so it scales crisply and themes with
+           light/dark. Kept a subtle "MEKKA" wordmark for identity. -->
+      <div class="sidebar-brand" role="img" aria-label="Mekka">
+        <svg class="brand-mark" viewBox="0 0 120 64" aria-hidden="true" focusable="false">
+          <path class="brand-leaf" d="M6,32 C16,12 48,12 58,32 C48,52 16,52 6,32 Z"
+                transform="rotate(-18 32 32)"/>
+          <path class="brand-leaf" d="M62,32 C72,12 104,12 114,32 C104,52 72,52 62,32 Z"
+                transform="rotate(18 88 32)"/>
+        </svg>
+        <span class="brand-wordmark">MEKKA</span>
+      </div>
       <nav class="sidebar-nav">
         <button class="page-nav-btn page-nav-live" data-page="live">📡 Live</button>
         <button class="page-nav-btn page-nav-manual" data-page="manual">✋ Manual</button>
