@@ -3424,7 +3424,12 @@ async function _mkLoadEnvBadge() {
 
 // ── Widget Customizer ────────────────────────────────────────
 const _WIDGET_LABELS = {
+  'sec-today-summary':  '📊 Resultado do Dia',
   'sec-office':         '⬡ Pixel 3D Office',
+  'sec-layers':         '🗺 Layer Command Map',
+  'sec-agents':         '🤖 Agents Roster',
+  'sec-neural-graph':   '🧠 Conexões Neurais',
+  'sec-command-center': '🎛️ Central de Comandos',
   'sec-live-market':    '📈 Market Live',
   'sec-metrics':        '🎯 Mission Metrics',
   'sec-killswitch':     '🔴 Kill Switch',
@@ -3434,8 +3439,6 @@ const _WIDGET_LABELS = {
   'sec-trades-timeline':'⏱ Trades Timeline',
   'sec-replay-charts':  '🔁 Replay Charts',
   'sec-hero-sla':       '🦸 Hero SLA',
-  'sec-layers':         '🗺 Layer Command Map',
-  'sec-agents':         '🤖 Agents Roster',
   'sec-internals':      '⚙️ Dashboard Internals',
   'sec-signals':        '🔮 Vision Signals',
   'sec-trades':         '⚡ Iron Man Executions',
@@ -3456,6 +3459,15 @@ const _WIDGET_LABELS = {
 // will force them visible.
 const _ALWAYS_VISIBLE_SECTIONS = new Set(['sec-trading-settings']);
 const _WIDGET_PREFS_KEY = 'mekka_widget_prefs_v1';
+
+// Friendly category names for the Settings customizer (keyed by page).
+const _PAGE_LABELS = {
+  overview: 'Visão Geral', live: 'Live', manual: 'Manual', wallet: 'Carteira',
+  performance: 'Performance', trades: 'Trades', risk: 'Risco', agents: 'Agentes',
+  memory: 'Memória', improvements: 'Melhorias', logs: 'Logs', analytics: 'Analytics',
+  backtest: 'Backtest', reports: 'Relatórios', leaderboard: 'Leaderboard',
+  settings: 'Configurações', _other: 'Outros',
+};
 
 /** Load widget prefs from localStorage. */
 function _mkLoadWidgetPrefs() {
@@ -3516,38 +3528,144 @@ function _mkApplyWidgetPrefs(activePage) {
 }
 
 /** Render widget customizer checkboxes in #widget-customizer. */
+function _mkCurrentPage() {
+  try { return localStorage.getItem('mekka_current_page') || 'overview'; } catch (_) { return 'overview'; }
+}
+
 function _mkRenderWidgetCustomizer() {
   const container = document.getElementById('widget-customizer');
   if (!container) return;
-  const prefs = _mkLoadWidgetPrefs();
-  container.innerHTML = '';
 
-  Object.entries(_WIDGET_LABELS).forEach(([id, label]) => {
-    const checked = prefs[id] !== false;
-    const item = document.createElement('div');
-    item.className = `widget-item${!checked ? ' hidden-widget' : ''}`;
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.id = `widget-cb-${id}`;
-    cb.checked = checked;
-    const lbl = document.createElement('label');
-    lbl.htmlFor = `widget-cb-${id}`;
-    lbl.textContent = label;
-    item.appendChild(cb);
-    item.appendChild(lbl);
-    cb.addEventListener('change', () => {
-      const p = _mkLoadWidgetPrefs();
-      p[id] = cb.checked;
-      _mkSaveWidgetPrefs(p);
-      item.classList.toggle('hidden-widget', !cb.checked);
-      // Apply immediately if the section is currently visible
-      const el = document.getElementById(id);
-      if (el && !el.classList.contains('page-section-hidden')) {
-        el.classList.toggle('page-section-hidden', !cb.checked);
-      }
-    });
-    container.appendChild(item);
+  // id -> category page (first page that lists it)
+  const idToPage = {};
+  Object.entries(_PAGE_SECTIONS).forEach(([page, ids]) => {
+    ids.forEach((id) => { if (!(id in idToPage)) idToPage[id] = page; });
   });
+
+  // Group widgets by category page
+  const groups = {};
+  Object.entries(_WIDGET_LABELS).forEach(([id, label]) => {
+    const page = idToPage[id] || '_other';
+    (groups[page] = groups[page] || []).push({ id, label });
+  });
+  const total = Object.keys(_WIDGET_LABELS).length;
+
+  container.innerHTML = `
+    <div class="widget-toolbar">
+      <input type="search" class="widget-search" id="widget-search" placeholder="🔍 Buscar painel…" aria-label="Buscar painel">
+      <div class="widget-presets">
+        <button type="button" class="widget-preset-btn" data-preset="all">Mostrar tudo</button>
+        <button type="button" class="widget-preset-btn" data-preset="none">Ocultar tudo</button>
+        <button type="button" class="widget-preset-btn" data-preset="reset">Restaurar padrão</button>
+      </div>
+      <span class="widget-counter" id="widget-counter"></span>
+    </div>
+    <div class="widget-groups" id="widget-groups"></div>
+  `;
+  const groupsEl = container.querySelector('#widget-groups');
+  const counterEl = container.querySelector('#widget-counter');
+
+  const updateCounter = () => {
+    const p = _mkLoadWidgetPrefs();
+    const vis = Object.keys(_WIDGET_LABELS).filter((id) => p[id] !== false).length;
+    counterEl.textContent = `${vis} de ${total} painéis visíveis`;
+  };
+
+  const pageOrder = ['overview', 'live', 'manual', 'wallet', 'performance', 'trades',
+    'risk', 'agents', 'memory', 'improvements', 'logs', 'analytics', 'backtest',
+    'reports', 'leaderboard', 'settings', '_other'];
+  const orderedPages = pageOrder.filter((p) => groups[p])
+    .concat(Object.keys(groups).filter((p) => !pageOrder.includes(p)));
+
+  orderedPages.forEach((page) => {
+    const items = groups[page];
+    const groupEl = document.createElement('div');
+    groupEl.className = 'widget-group';
+    groupEl.dataset.group = page;
+    const title = _PAGE_LABELS[page] || page;
+    groupEl.innerHTML = `
+      <div class="widget-group-hdr">
+        <h3>${escapeHtml(title)}</h3>
+        <button type="button" class="widget-group-toggle" data-group="${page}">alternar todos</button>
+      </div>
+      <div class="widget-group-grid"></div>`;
+    const grid = groupEl.querySelector('.widget-group-grid');
+
+    items.forEach(({ id, label }) => {
+      const p = _mkLoadWidgetPrefs();
+      const checked = p[id] !== false;
+      const always = _ALWAYS_VISIBLE_SECTIONS.has(id);
+      const item = document.createElement('label');
+      item.className = `widget-item${!checked ? ' hidden-widget' : ''}`;
+      item.dataset.label = label.toLowerCase();
+      item.innerHTML = `
+        <input type="checkbox" ${checked ? 'checked' : ''} ${always ? 'disabled' : ''}>
+        <span>${escapeHtml(label)}${always ? ' <em class="widget-locked">(sempre visível)</em>' : ''}</span>`;
+      const cb = item.querySelector('input');
+      if (!always) {
+        cb.addEventListener('change', () => {
+          const pp = _mkLoadWidgetPrefs();
+          pp[id] = cb.checked;
+          _mkSaveWidgetPrefs(pp);
+          item.classList.toggle('hidden-widget', !cb.checked);
+          _mkApplyWidgetPrefs(_mkCurrentPage());
+          updateCounter();
+        });
+      }
+      grid.appendChild(item);
+    });
+    groupsEl.appendChild(groupEl);
+  });
+
+  // Toggle-all per group
+  groupsEl.querySelectorAll('.widget-group-toggle').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const page = btn.dataset.group;
+      const ids = (groups[page] || []).map((x) => x.id)
+        .filter((id) => !_ALWAYS_VISIBLE_SECTIONS.has(id));
+      const p = _mkLoadWidgetPrefs();
+      const anyVisible = ids.some((id) => p[id] !== false);
+      ids.forEach((id) => { p[id] = !anyVisible; });
+      _mkSaveWidgetPrefs(p);
+      _mkApplyWidgetPrefs(_mkCurrentPage());
+      _mkRenderWidgetCustomizer();
+    });
+  });
+
+  // Presets
+  container.querySelectorAll('.widget-preset-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const preset = btn.dataset.preset;
+      let p = {};
+      if (preset === 'all') {
+        Object.keys(_WIDGET_LABELS).forEach((id) => { p[id] = true; });
+      } else if (preset === 'none') {
+        Object.keys(_WIDGET_LABELS).forEach((id) => {
+          if (!_ALWAYS_VISIBLE_SECTIONS.has(id)) p[id] = false;
+        });
+      } // 'reset' → empty {} = everything visible by default
+      _mkSaveWidgetPrefs(p);
+      _mkApplyWidgetPrefs(_mkCurrentPage());
+      _mkRenderWidgetCustomizer();
+    });
+  });
+
+  // Search filter
+  const search = container.querySelector('#widget-search');
+  search.addEventListener('input', () => {
+    const q = search.value.trim().toLowerCase();
+    groupsEl.querySelectorAll('.widget-group').forEach((g) => {
+      let anyShown = false;
+      g.querySelectorAll('.widget-item').forEach((it) => {
+        const match = !q || (it.dataset.label || '').includes(q);
+        it.style.display = match ? '' : 'none';
+        if (match) anyShown = true;
+      });
+      g.style.display = anyShown ? '' : 'none';
+    });
+  });
+
+  updateCounter();
 }
 
 // ── TradeNow state ────────────────────────────────────────────
