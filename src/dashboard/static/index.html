@@ -110,7 +110,19 @@
     <div class="content-shell">
       <header class="topbar">
         <div>
-          <h1>Mekka Trading Command Center</h1>
+          <h1>
+            Mekka Trading Command Center
+            <!--
+              Environment badge — populated at boot from /api/env.
+              Initial state is intentionally pessimistic ("???") so a stale
+              page never silently implies a safe environment. The class
+              env-badge-testnet / env-badge-mainnet is applied by
+              _mkLoadEnvBadge in app.js.
+            -->
+            <span id="env-badge" class="env-badge env-badge-unknown" title="Exchange / network">
+              ??? · ???
+            </span>
+          </h1>
           <p>Nick Fury Operations • Wall Street Marvel Office</p>
         </div>
         <div class="topbar-actions">
@@ -602,9 +614,34 @@
         <div id="agents-roster" class="agents-roster"></div>
       </section>
 
-      <!-- ── Trading Mode Settings ────────────────────────────────────── -->
-      <section class="panel full" id="sec-trading-settings" data-page="settings">
+      <!-- ── Trading Mode Settings ──────────────────────────────────────
+           data-page="overview settings": the panel surfaces on BOTH pages
+           so the operator never has to dig into Settings to find it. The
+           `_PAGE_SECTIONS` map in app.js mirrors this dual membership.
+      -->
+      <section class="panel full" id="sec-trading-settings" data-page="overview settings">
         <h2>⚡ Modos de Trading</h2>
+
+        <!-- Modo Global: 3 presets do /api/mode (runtime_mode.py).
+             Renderizado dinamicamente para que mudanças no enum no
+             backend (conservative/balanced/aggressive) apareçam aqui
+             sem editar HTML. -->
+        <div class="global-mode-row">
+          <div class="global-mode-label">
+            <strong>Modo Global</strong>
+            <span class="muted-line">Define o preset base do sistema (size, leverage, ativos).</span>
+          </div>
+          <div class="global-mode-buttons" id="global-mode-buttons">
+            <!-- buttons rendered by _bootGlobalMode in app.js -->
+          </div>
+        </div>
+
+        <p class="muted-line global-mode-hint">
+          Os dois toggles abaixo são <strong>overrides</strong> aplicados sobre o modo global.
+          <em>Super Agressivo</em> força size mínimo 5% e leverage 10x.
+          <em>Altcoins</em> expande o universo de ativos.
+        </p>
+
         <div class="trading-modes-grid">
           <!-- Super Agressivo -->
           <div class="trading-mode-card">

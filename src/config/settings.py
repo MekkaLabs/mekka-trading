@@ -77,11 +77,17 @@ class Settings(BaseSettings):
     # --------------------------------------------------------------------------
     # Hyperliquid
     # --------------------------------------------------------------------------
+    # Credentials are optional at the field level so the system can boot with
+    # ACTIVE_EXCHANGE=bybit (or binance) without supplying HL keys. The
+    # `validate_active_exchange_credentials` model_validator below enforces
+    # presence conditionally based on the active exchange.
     hyperliquid_private_key: str = Field(
-        ..., description="EVM private key for signing Hyperliquid orders"
+        default="",
+        description="EVM private key for signing Hyperliquid orders (required when ACTIVE_EXCHANGE=hyperliquid)",
     )
     hyperliquid_wallet_address: str = Field(
-        ..., description="EVM wallet address (0x...)"
+        default="",
+        description="EVM wallet address 0x... (required when ACTIVE_EXCHANGE=hyperliquid)",
     )
     hyperliquid_network: Literal["testnet", "mainnet"] = Field(
         default="testnet",
@@ -107,6 +113,15 @@ class Settings(BaseSettings):
         default="",
         description="Bybit API secret (required when ACTIVE_EXCHANGE=bybit)",
     )
+    bybit_testnet: bool = Field(
+        default=True,
+        alias="BYBIT_TESTNET",
+        description=(
+            "When True, Bybit CCXT clients call set_sandbox_mode(True) and route to "
+            "testnet endpoints (api-testnet.bybit.com / stream-testnet.bybit.com). "
+            "Default True so accidental key reuse never hits mainnet."
+        ),
+    )
     binance_api_key: str = Field(
         default="",
         description="Binance API key (required when ACTIVE_EXCHANGE=binance)",
@@ -114,6 +129,14 @@ class Settings(BaseSettings):
     binance_api_secret: str = Field(
         default="",
         description="Binance API secret (required when ACTIVE_EXCHANGE=binance)",
+    )
+    binance_testnet: bool = Field(
+        default=True,
+        alias="BINANCE_TESTNET",
+        description=(
+            "When True, Binance CCXT clients call set_sandbox_mode(True) and route to "
+            "testnet endpoints. Default True to match BYBIT_TESTNET safety posture."
+        ),
     )
 
     # --------------------------------------------------------------------------
@@ -1241,6 +1264,55 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def validate_active_exchange_credentials(self) -> "Settings":
+        """
+        Enforce credentials based on ACTIVE_EXCHANGE.
+
+        Each exchange requires its own credentials only when it is the active
+        one. This allows boot with ACTIVE_EXCHANGE=bybit without supplying HL
+        keys (and vice-versa). Paper mode still requires credentials because
+        Superman (market data) and IronMan still build CCXT/HL clients to
+        fetch live prices even when execution is simulated.
+        """
+        ex = self.active_exchange
+        if ex == "hyperliquid":
+            missing = [
+                k for k, v in {
+                    "HYPERLIQUID_PRIVATE_KEY": self.hyperliquid_private_key,
+                    "HYPERLIQUID_WALLET_ADDRESS": self.hyperliquid_wallet_address,
+                }.items() if not v
+            ]
+            if missing:
+                raise ValueError(
+                    f"ACTIVE_EXCHANGE=hyperliquid requires: {', '.join(missing)}. "
+                    "Either set them in .env or change ACTIVE_EXCHANGE."
+                )
+        elif ex == "bybit":
+            missing = [
+                k for k, v in {
+                    "BYBIT_API_KEY": self.bybit_api_key,
+                    "BYBIT_API_SECRET": self.bybit_api_secret,
+                }.items() if not v
+            ]
+            if missing:
+                raise ValueError(
+                    f"ACTIVE_EXCHANGE=bybit requires: {', '.join(missing)}. "
+                    "Generate testnet keys at https://testnet.bybit.com and add to .env."
+                )
+        elif ex == "binance":
+            missing = [
+                k for k, v in {
+                    "BINANCE_API_KEY": self.binance_api_key,
+                    "BINANCE_API_SECRET": self.binance_api_secret,
+                }.items() if not v
+            ]
+            if missing:
+                raise ValueError(
+                    f"ACTIVE_EXCHANGE=binance requires: {', '.join(missing)}."
+                )
+        return self
+
     @property
     def is_live(self) -> bool:
         """True only when both paper_trading=False AND live_trading_confirmed=True."""
@@ -1301,13 +1373,25 @@ class Settings(BaseSettings):
 
     def summary(self) -> str:
         """Return a printable configuration summary (no secrets)."""
+        # Network label depends on the active exchange so operators always
+        # see what they are actually pointed at (e.g. Bybit testnet vs HL mainnet).
+        if self.active_exchange == "hyperliquid":
+            net = self.hyperliquid_network.upper()
+        elif self.active_exchange == "bybit":
+            net = "TESTNET" if self.bybit_testnet else "MAINNET"
+        elif self.active_exchange == "binance":
+            net = "TESTNET" if self.binance_testnet else "MAINNET"
+        else:  # pragma: no cover — Literal narrows this out
+            net = "UNKNOWN"
+
         lines = [
             "=" * 60,
             "  Mekka Trading — Configuration Summary",
             "=" * 60,
             f"  Mode          : {self.mode_label}",
             f"  Live confirmed: {'YES ⚠️' if self.live_trading_confirmed else 'no'}",
-            f"  Network       : {self.hyperliquid_network.upper()}",
+            f"  Exchange      : {self.active_exchange.upper()}",
+            f"  Network       : {net}",
             f"  Assets        : {', '.join(self.trading_assets)}",
             f"  Max Position  : {self.max_position_size_pct * 100:.1f}% of equity",
             f"  Max Leverage  : {self.max_leverage}x",

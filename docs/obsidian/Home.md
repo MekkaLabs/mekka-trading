@@ -10,10 +10,9 @@ updated: 2026-05-19
 # 🧠 Mekka Trading — Segundo Cérebro
 
 > **Projeto:** `mekka-trading`
-> **Repositório:** https://github.com/labsmekka/mekka-trading
-> **Cópia espelhada no vault Obsidian:** `~/Documents/Obsidian Vault/mekka-trading/`
+> **Repositório:** https://github.com/MekkaLabs/mekka-trading
 
-Sistema de Trading Autônomo orquestrado por IA, baseado em AIOX Core + Hyperliquid (multi-exchange).
+Sistema de Trading Autônomo orquestrado por IA, baseado em AIOX Core + multi-exchange (Hyperliquid / Bybit / Binance via CCXT).
 Este é o vault de conhecimento do projeto: arquitetura, decisões, agentes, runbooks e aprendizados.
 
 ---
@@ -22,13 +21,20 @@ Este é o vault de conhecimento do projeto: arquitetura, decisões, agentes, run
 
 | Item | Status |
 |---|---|
-| **Última story entregue** | `251 — Cycle Checkpoint` |
-| **Milestone atual** | `40 — Agent Communication Upgrade (244–251)` |
-| **Mudanças do dia** | `Milestone 40 entregue (Flash→Vision, DebateVerdict→Vision, Batman gate 3r, Beast, DecisionMemory, Vision structured output, CycleCheckpoint) + commit “chore: sync local changes”` |
+| **Última story entregue** | `251 — Cycle Checkpoint` (codex / milestone 40) |
+| **Milestone atual** | `40 — Agent Communication Upgrade (244–251)` + `22 — Bybit Testnet Readiness` (integrado nesta sessão) |
+| **Mudanças do dia** | M40 entregue pelo codex (Flash→Vision, DebateVerdict, Batman gate 3r, **Beast**, DecisionMemory, Vision structured output, CycleCheckpoint) + M22 Bybit Testnet (sandbox routing, MarketRegistry, env badge, clock skew, stress_inject) |
 | **Modo padrão** | `PAPER_TRADING=True` |
-| **Exchanges suportadas** | Hyperliquid (primary), Bybit, Binance (via CCXT) |
-| **Dashboard** | `http://localhost:8787` com WebSocket em tempo real |
-| **Agentes ativos** | NickFury, Batman, Wolverine, IronMan, Vision (+ VisionCritic), Deadpool, ProfessorX, Superman, DoctorStrange, BlackPanther, Thor, Aquaman, Spider-Man, Flash, PortfolioManager |
+| **Exchange recomendada para validação** | **Bybit testnet** (via CCXT, `set_sandbox_mode(True)`) |
+| **Exchanges suportadas** | Hyperliquid (testnet/mainnet), Bybit (testnet/mainnet), Binance (placeholder) |
+| **Dashboard** | `http://localhost:8787` com WebSocket em tempo real + env badge multi-exchange |
+| **Agentes ativos (16)** | Nick Fury, Superman, Vision (+ VisionCritic), Batman, Iron Man, Cyclops, Wolverine, Doctor Strange, Professor X, Flash, Aquaman, Spider-Man, Black Panther, Thor, Deadpool, Portfolio Manager |
+
+### Marcos recentes
+
+- **Stories 126–140**: LangGraph durability, MoA Vision, Adaptive Routing, EventBus, Memory Consolidation, Degraded Mode.
+- **Stories 244–251 (codex M40)**: Agent Communication Upgrade — Beast joins the roster, Vision gains structured output, Flash→Vision direct link, Batman gate 3r.
+- **Sessão 2026-05-19**: prontidão para Bybit testnet — sandbox routing, exchange-agnostic price feed, env badge, clock skew check, painel Trading Mode no Overview. Veja [[2026-05-19]] e [[ADR-003 - Bybit Testnet Readiness]].
 
 ---
 
@@ -99,7 +105,13 @@ LIMIT 10
 
 ## 🔗 Recursos do Projeto
 
+<<<<<<< HEAD
 - Repositório: https://github.com/labsmekka/mekka-trading
 - Stories entregues: 001–251
+=======
+- Repositório: https://github.com/MekkaLabs/mekka-trading
+- Stories entregues: 001–140 (61 stories totais — veja [[Stories do Projeto]])
+>>>>>>> origin/claude/quirky-ritchie-5352c4
 - Squads baseline: `alpha-risk-command`, `hyperliquid-mock-ops`, `market-intel-lab`
-- Projeto ativo: [[10 - Projects/Projeto - Mekka Trading|Projeto — Mekka Trading]]
+- Projeto ativo: [[Projeto - Mekka Trading]]
+- Runbook para subir Bybit testnet: [[Runbook - Bybit Testnet Setup]]

@@ -2823,7 +2823,14 @@ if (pnlWindowSelect) {
 
 // ── Page→section mapping ─────────────────────────────────────
 const _PAGE_SECTIONS = {
-  overview:    ['sec-today-summary', 'sec-office', 'sec-live-market', 'sec-metrics'],
+  // Two additions on Overview vs the pre-merge baseline:
+  //   - sec-today-summary    (codex M40) — condensed daily P&L + cycle status
+  //   - sec-trading-settings (M22)       — mode preset + override toggles
+  //     surfaced here too so the operator never has to dig into Settings just
+  //     to change the active trading mode. The panel's HTML carries
+  //     `data-page="overview settings"` to mirror this membership — keep
+  //     these two lists in sync if you change either.
+  overview:    ['sec-today-summary', 'sec-office', 'sec-live-market', 'sec-metrics', 'sec-trading-settings'],
   wallet:      ['sec-killswitch', 'sec-pnl', 'sec-positions', 'sec-funding'],
   performance: ['sec-equity-curve', 'sec-trades-timeline', 'sec-replay-charts', 'sec-hero-sla'],
   agents:      ['sec-layers', 'sec-agents', 'sec-internals'],
@@ -2969,6 +2976,58 @@ function _mkBootTopBar() {
   _mkLoadTopBar();
   if (_ftbTimer) clearInterval(_ftbTimer);
   _ftbTimer = setInterval(_mkLoadTopBar, 30000);
+  // The env badge is loaded once at boot and then refreshed lazily every
+  // 60s. Changes are rare (operator edits .env and restarts) but a stale
+  // badge is dangerous on a mainnet → testnet downgrade so we still poll.
+  _mkLoadEnvBadge();
+  setInterval(_mkLoadEnvBadge, 60000);
+}
+
+// ── Environment badge ────────────────────────────────────────
+/**
+ * Populate the #env-badge with the active exchange + network. Pulls
+ * /api/env and reflects the result on the existing span. Three colour
+ * classes are mutually exclusive: paper (cyan), testnet (orange),
+ * mainnet (red, pulsing). On any error we keep the "unknown" state
+ * rather than silently rendering a misleading safe label.
+ */
+async function _mkLoadEnvBadge() {
+  const el = document.getElementById('env-badge');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/env').then(r => r.json());
+    if (!res || !res.exchange) throw new Error('bad payload');
+    const ex = String(res.exchange).toUpperCase();
+    const net = String(res.network || 'unknown').toUpperCase();
+    const mode = String(res.mode || 'unknown');
+    // Label content: include both exchange and network so an operator
+    // never has to remember which one is "current". Paper override is
+    // shown explicitly so the operator knows the mainnet colour does
+    // NOT mean live orders.
+    let label;
+    if (mode === 'paper') label = `${ex} · PAPER`;
+    else                  label = `${ex} · ${net}`;
+    el.textContent = label;
+    el.title = `Exchange: ${ex}\nNetwork: ${net}\nPaper trading: ${res.paper_trading}\nLive confirmed: ${res.live_confirmed}`;
+    // Reset class list before reapplying — order doesn't matter, only
+    // exactly one of the four states should be present.
+    el.classList.remove(
+      'env-badge-unknown',
+      'env-badge-paper',
+      'env-badge-testnet',
+      'env-badge-mainnet',
+    );
+    el.classList.add(`env-badge-${mode}`);
+  } catch (_e) {
+    // Pessimistic fallback: stay on "unknown". A grey badge is the right
+    // signal when we cannot prove which network we are talking to.
+    el.textContent = '??? · ???';
+    el.title = 'Environment unknown — /api/env unreachable';
+    el.classList.remove(
+      'env-badge-paper', 'env-badge-testnet', 'env-badge-mainnet',
+    );
+    el.classList.add('env-badge-unknown');
+  }
 }
 
 // ── Widget Customizer ────────────────────────────────────────
@@ -4281,6 +4340,90 @@ async function _bootTradingModes() {
   }
 }
 
+// ── Global Mode (preset selector that drives /api/mode) ──────────────
+/**
+ * Render the three preset buttons (conservative/balanced/aggressive)
+ * inside #global-mode-buttons, wire each click to POST /api/mode, and
+ * keep the active button highlighted by polling /api/mode on a minimal
+ * interval. This is the bridge between the dashboard v1 toggles
+ * (super_aggressive / altcoins) and the office_v2 preset system: both
+ * mechanisms now coexist on the same panel so the operator can see
+ * what's active without bouncing between two UIs.
+ *
+ * Server contract (from src/config/runtime_mode.py):
+ *   GET /api/mode  → { mode: "balanced", modes: [{id,label,description,active}, ...] }
+ *   POST /api/mode { mode: "aggressive" } → 200 with new params
+ */
+async function _bootGlobalMode() {
+  const container = document.getElementById('global-mode-buttons');
+  if (!container) return;
+
+  function render(modes, active) {
+    container.innerHTML = '';
+    (modes || []).forEach(m => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `global-mode-btn ${m.id === active ? 'is-active' : ''}`;
+      btn.dataset.modeId = m.id;
+      btn.title = m.description || '';
+      btn.innerHTML = `
+        <span class="gmb-label">${m.label || m.id}</span>
+        <span class="gmb-desc">${m.description || ''}</span>
+      `;
+      btn.addEventListener('click', () => _setGlobalMode(m.id));
+      container.appendChild(btn);
+    });
+  }
+
+  async function loadAndRender() {
+    try {
+      const res = await fetch('/api/mode', { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      // /api/mode payload shape uses either `modes` (full list with
+      // labels/descriptions/active flag) or just `mode` (string). Be
+      // forgiving of both so a server rolling back the runtime_mode
+      // change doesn't break the UI.
+      const list = Array.isArray(data.modes) && data.modes.length
+        ? data.modes
+        : ['conservative', 'balanced', 'aggressive'].map(id => ({ id, label: id, description: '' }));
+      render(list, data.mode);
+    } catch (_e) {
+      // On error, still render the three buttons so the user has SOME
+      // way to drive the mode. Without an active marker.
+      const fallback = ['conservative', 'balanced', 'aggressive']
+        .map(id => ({ id, label: id, description: '' }));
+      render(fallback, null);
+    }
+  }
+
+  async function _setGlobalMode(modeId) {
+    const saveStatus = document.getElementById('mode-save-status');
+    if (saveStatus) { saveStatus.textContent = `Mudando para ${modeId}…`; saveStatus.style.opacity = '1'; }
+    try {
+      const res = await fetch('/api/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: modeId }),
+        credentials: 'include',
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      if (saveStatus) {
+        saveStatus.textContent = `✅ Modo global: ${modeId}`;
+        setTimeout(() => { if (saveStatus) saveStatus.style.opacity = '0'; }, 2500);
+      }
+      await loadAndRender();
+    } catch (e) {
+      if (saveStatus) { saveStatus.textContent = `❌ Falha: ${e.message}`; saveStatus.style.opacity = '1'; }
+    }
+  }
+
+  await loadAndRender();
+  // Refresh every 30s so a CLI/Telegram-driven mode change reflects in
+  // the UI without a page reload.
+  setInterval(loadAndRender, 30000);
+}
+
 // ── Global Live WebSocket — sempre conectado (topbar + posições + live page) ──
 let _gWs = null;
 let _gWsOn = false;
@@ -4444,6 +4587,7 @@ function _mkBootDashboardV2() {
   try { _mkBootTopBar();  } catch (e) { console.error('[v2] _mkBootTopBar failed:', e); }
   try { _mkBootTradeNow();} catch (e) { console.error('[v2] _mkBootTradeNow failed:', e); }
   try { _bootTradingModes(); } catch (e) { console.error('[v2] _bootTradingModes failed:', e); }
+  try { _bootGlobalMode();   } catch (e) { console.error('[v2] _bootGlobalMode failed:', e); }
   // Global WS — real-time topbar + positions across all pages
   try { _bootGlobalWs(); } catch (e) { console.error('[v2] _bootGlobalWs failed:', e); }
 }

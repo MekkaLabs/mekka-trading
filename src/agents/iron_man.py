@@ -46,6 +46,7 @@ from src.config.settings import settings
 from src.models.execution import ExecutionResult, ExecutionStatus
 from src.models.risk import RiskApproval, RiskVerdict
 from src.models.signal import TradeAction, TradingSignal
+from src.services.market_registry import to_ccxt, to_mekka
 
 
 class IronMan(BaseAgent[ExecutionResult]):
@@ -493,11 +494,31 @@ class IronMan(BaseAgent[ExecutionResult]):
                 cfg["secret"] = settings.binance_api_secret
 
             exchange = getattr(ccxt, exchange_id)(cfg)
+
+            # Route to testnet/sandbox BEFORE load_markets so the symbol list
+            # comes from the right environment. Without this, Bybit testnet
+            # keys would 401 against the mainnet endpoint (or — worse — live
+            # keys would hit production). Default is True in settings so the
+            # safe path is also the path of least surprise. The whole block
+            # is wrapped in try/except (codex) so a failure during sandbox
+            # routing or load_markets does not leak the underlying aiohttp
+            # session — the half-initialised exchange is closed cleanly.
             try:
-                if exchange_id in ("bybit", "binance") and not settings.is_mainnet:
-                    set_sandbox = getattr(exchange, "set_sandbox_mode", None)
-                    if callable(set_sandbox):
-                        set_sandbox(True)
+                try:
+                    if exchange_id == "bybit" and settings.bybit_testnet:
+                        exchange.set_sandbox_mode(True)
+                        self._log.warning("[IronMan/bybit] SANDBOX (testnet) mode ENABLED")
+                    elif exchange_id == "binance" and settings.binance_testnet:
+                        exchange.set_sandbox_mode(True)
+                        self._log.warning("[IronMan/binance] SANDBOX (testnet) mode ENABLED")
+                except Exception as _sbx_exc:
+                    # set_sandbox_mode is best-effort: log and continue. CCXT
+                    # raises for exchanges that don't support it, but bybit
+                    # and binance both do.
+                    self._log.error(
+                        f"[IronMan/{exchange_id}] set_sandbox_mode failed: {_sbx_exc}"
+                    )
+
                 await exchange.load_markets()
                 self._ccxt_exchange = exchange
                 self._log.info(f"[IronMan] Connected to {exchange_id} via CCXT")
@@ -505,6 +526,55 @@ class IronMan(BaseAgent[ExecutionResult]):
             except Exception:
                 await exchange.close()
                 raise
+
+    async def _check_clock_skew(
+        self,
+        exchange: Any,
+        exchange_id: str,
+        max_skew_ms: int = 5000,
+    ) -> tuple[bool, int, str]:
+        """Compare the system clock to the exchange server clock.
+
+        Bybit V5 rejects orders whose recv_window-relative timestamp drifts
+        more than ~5 seconds from server time (error code 10002). The
+        symptom is opaque from CCXT's side ("invalid request") and the
+        operator usually loses minutes debugging keys before noticing the
+        machine clock is off. This check runs at most once per CCXT order
+        and emits a clear human-readable rejection instead.
+
+        Returns (ok, skew_ms, message). ``ok`` is True when the absolute
+        skew is below ``max_skew_ms``. A network failure in fetch_time
+        does NOT count as a fail — we degrade open (returning ok=True
+        with skew_ms=0 and a "could not measure" message) because we
+        would rather risk a 10002 from Bybit than block trading on a
+        transient connectivity blip.
+        """
+        import time
+        try:
+            # fetch_time returns milliseconds since epoch on every CCXT
+            # exchange that supports it (bybit, binance both do).
+            server_ms = int(await exchange.fetch_time())
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(
+                "[IronMan/%s] clock-skew probe failed (%s) — degrading open",
+                exchange_id, exc,
+            )
+            return True, 0, f"could not measure ({type(exc).__name__})"
+
+        local_ms = int(time.time() * 1000)
+        skew_ms = local_ms - server_ms
+        if abs(skew_ms) > max_skew_ms:
+            return (
+                False,
+                skew_ms,
+                (
+                    f"local clock is {skew_ms:+d}ms vs {exchange_id} server "
+                    f"(limit ±{max_skew_ms}ms). Bybit will reject orders with "
+                    f"code 10002. Fix: run `sudo sntp -sS time.apple.com` (mac) "
+                    f"or `sudo timedatectl set-ntp true` (linux)."
+                ),
+            )
+        return True, skew_ms, "ok"
 
     async def _place_ccxt_order(
         self,
@@ -521,10 +591,40 @@ class IronMan(BaseAgent[ExecutionResult]):
         stop orders after the entry fills.
         """
         exchange = await self._get_ccxt_exchange(exchange_id)
-        symbol = signal.symbol
+        # Normalise the incoming symbol before composing the CCXT format.
+        # signal.symbol *should* be bare (``BTC``), but defensive normalisation
+        # via MarketRegistry means any legacy format (``BTC-USD``, ``BTCUSDT``)
+        # still routes correctly.
+        symbol = to_mekka(signal.symbol)
         is_buy = signal.action.value.upper() == "LONG"
-        ccxt_symbol = f"{symbol}/USDT:USDT"
+        ccxt_symbol = to_ccxt(symbol, exchange_id)  # type: ignore[arg-type]
         ccxt_side = "buy" if is_buy else "sell"
+
+        # Clock-skew pre-flight — Bybit rejects ordered with code 10002 when
+        # the local clock drifts more than ~5s from server time, and the
+        # CCXT error surface for that case is unhelpful. Catch it here so
+        # the operator gets an actionable message instead of a mystery
+        # "invalid request".
+        ok, skew_ms, msg = await self._check_clock_skew(exchange, exchange_id)
+        if not ok:
+            self._log.error(
+                "[IronMan/%s] aborting order: clock skew %+dms (%s)",
+                exchange_id, skew_ms, msg,
+            )
+            return ExecutionResult(
+                symbol=symbol,
+                status=ExecutionStatus.REJECTED,
+                is_paper=False,
+                side="long" if is_buy else "short",
+                error=f"Clock skew {skew_ms:+d}ms: {msg}",
+            )
+        elif abs(skew_ms) > 1000:
+            # Below the hard limit but worth surfacing — operators usually
+            # want to fix NTP before drift grows further.
+            self._log.warning(
+                "[IronMan/%s] clock skew %+dms (within tolerance, but consider syncing NTP)",
+                exchange_id, skew_ms,
+            )
 
         # Set leverage
         try:
@@ -771,7 +871,9 @@ class IronMan(BaseAgent[ExecutionResult]):
     ) -> dict:
         """CCXT (Bybit/Binance): cancel open reduce-only orders, place new bracket."""
         exchange = await self._get_ccxt_exchange(exchange_id)
-        ccxt_symbol = f"{symbol}/USDT:USDT"
+        # Same defensive normalisation as the entry path — keeps the two
+        # places in sync if the caller eventually passes a non-bare symbol.
+        ccxt_symbol = to_ccxt(to_mekka(symbol), exchange_id)  # type: ignore[arg-type]
         is_buy = side.lower() == "long"
         sl_side = "sell" if is_buy else "buy"
 

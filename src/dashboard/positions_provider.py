@@ -2,14 +2,24 @@
 src/dashboard/positions_provider.py
 ===================================
 Read-only adapter that pulls open positions for the dashboard
-``/api/positions`` endpoint. In live mode it delegates to PortfolioManager,
-so the active exchange source stays consistent across the system.
+``/api/positions`` endpoint. In live mode (paper_trading=False) it
+delegates to PortfolioManager so the active-exchange source stays
+consistent across the system — PortfolioManager already owns the
+right CCXT client lifecycle (including sandbox routing for Bybit
+testnet) and we do not want a parallel client racing it. In paper
+mode it serves trades from the local DB.
 
 Why a separate module:
-  - keeps `server.py` free of `hyperliquid` imports
-  - lets us unit-test the mapping logic with a fake `info` object
+  - keeps `server.py` free of exchange SDK imports
+  - lets us unit-test the mapping logic with fake response objects
   - lets the runtime (Iron Man) keep its own SDK lifecycle without
     fighting the dashboard for the same instance
+
+Exchange dispatch (Phase 2):
+  - settings.paper_trading=True       → paper trades from the local DB
+  - settings.active_exchange="bybit"   → CCXT fetch_positions (with sandbox routing)
+  - settings.active_exchange="binance" → CCXT fetch_positions (with sandbox routing)
+  - settings.active_exchange="hyperliquid" → native HL SDK info.user_state
 
 Output contract (stable):
   {
@@ -22,7 +32,7 @@ Output contract (stable):
        }, ...
     ],
     "count": int,
-    "source": "hyperliquid"|"stub",
+    "source": "hyperliquid"|"bybit"|"binance"|"stub",
     "supported": bool,
     "message": str|None,
   }
@@ -34,6 +44,7 @@ import logging
 from typing import Any
 
 from src.config.settings import settings
+from src.services.market_registry import to_mekka
 
 
 logger = logging.getLogger("mekka.dashboard.positions")
@@ -354,6 +365,129 @@ async def get_paper_equity_summary(
     }
 
 
+def map_ccxt_positions(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Map a list of CCXT unified ``fetch_positions()`` rows to our shape.
+
+    CCXT unified position fields used here:
+      - ``symbol``         e.g. ``BTC/USDT:USDT``  → split back to ``BTC``
+      - ``contracts``      position size in base currency
+      - ``side``           ``"long"`` / ``"short"``
+      - ``entryPrice``     average entry
+      - ``markPrice``      current mark
+      - ``unrealizedPnl``  USDT-quoted PnL (already includes side)
+      - ``leverage``       isolated/cross leverage
+      - ``liquidationPrice`` may be None for cross-margin
+
+    Public for unit testing — call sites pass a fake list of dicts.
+    """
+    out: list[dict[str, Any]] = []
+    for row in raw or []:
+        size = _to_float(row.get("contracts"))
+        if size == 0:
+            continue
+        # CCXT symbol → bare Mekka symbol. Delegating to MarketRegistry.to_mekka
+        # gives us the union of every reasonable input format (perp, spot,
+        # dash, glued) for free, and keeps the contract identical to the
+        # rest of the system.
+        coin = to_mekka(row.get("symbol") or "")
+        side_raw = (row.get("side") or "").lower()
+        side = "LONG" if side_raw == "long" else "SHORT"
+        out.append({
+            "symbol": coin,
+            "side": side,
+            "size": abs(size),
+            "entry_price": _to_float(row.get("entryPrice")),
+            "mark_price": _to_float(row.get("markPrice")),
+            "pnl_usd": _to_float(row.get("unrealizedPnl")),
+            "leverage": _to_int(row.get("leverage")),
+            "liq_price": _to_float(row.get("liquidationPrice")) or None,
+            "is_paper": False,
+        })
+    return out
+
+
+async def _fetch_ccxt_positions(exchange_id: str) -> dict[str, Any]:
+    """Fetch live positions from a CCXT-backed exchange (Bybit / Binance).
+
+    The IronMan agent already builds its own CCXT client with
+    sandbox-routing applied; we deliberately build a *separate* lightweight
+    instance here because:
+
+      - the dashboard runs in a different lifecycle (started/stopped via
+        aiohttp on_shutdown) and we do not want to share an SDK handle
+        across two task graphs.
+      - read-only access keeps blast radius small if the dashboard process
+        is compromised — even if someone hijacks the read client they
+        cannot place orders.
+
+    Returns the same wire shape as the Hyperliquid path so the frontend
+    needs no change.
+    """
+    if exchange_id == "bybit" and not settings.bybit_api_key:
+        return _stub_response("BYBIT_API_KEY not set.")
+    if exchange_id == "binance" and not settings.binance_api_key:
+        return _stub_response("BINANCE_API_KEY not set.")
+
+    try:
+        import ccxt.async_support as ccxt  # noqa: WPS433
+    except ImportError:
+        return _stub_response("ccxt not installed (pip install ccxt).")
+
+    cfg: dict[str, Any] = {"enableRateLimit": True, "options": {"defaultType": "swap"}}
+    if exchange_id == "bybit":
+        cfg["apiKey"] = settings.bybit_api_key
+        cfg["secret"] = settings.bybit_api_secret
+    elif exchange_id == "binance":
+        cfg["apiKey"] = settings.binance_api_key
+        cfg["secret"] = settings.binance_api_secret
+
+    exchange = getattr(ccxt, exchange_id)(cfg)
+    try:
+        # Apply testnet routing BEFORE any network call so the credentials
+        # match the endpoint. Without this, testnet keys 401 against
+        # mainnet (or — worse — live keys hit production).
+        try:
+            if exchange_id == "bybit" and settings.bybit_testnet:
+                exchange.set_sandbox_mode(True)
+            elif exchange_id == "binance" and settings.binance_testnet:
+                exchange.set_sandbox_mode(True)
+        except Exception as sbx_exc:
+            logger.error("[positions/%s] set_sandbox_mode failed: %s", exchange_id, sbx_exc)
+
+        try:
+            raw = await asyncio.wait_for(exchange.fetch_positions(), timeout=5.0)
+        except asyncio.TimeoutError:
+            return _stub_response(f"{exchange_id} timed out.")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("%s fetch_positions failed: %s", exchange_id, exc)
+            return _stub_response(f"{exchange_id} error: {type(exc).__name__}")
+
+        items = map_ccxt_positions(raw or [])
+        if not items:
+            return {
+                "items": [],
+                "count": 0,
+                "source": exchange_id,
+                "supported": True,
+                "message": "No open positions.",
+            }
+        return {
+            "items": items,
+            "count": len(items),
+            "source": exchange_id,
+            "supported": True,
+            "message": None,
+        }
+    finally:
+        # Always close the ephemeral client to release the aiohttp session.
+        # If close() itself raises we swallow it — we already have the data
+        # we wanted to return.
+        try:
+            await exchange.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 async def fetch_positions(
     mark_prices: dict[str, float] | None = None,
 ) -> dict[str, Any]:
@@ -362,10 +496,19 @@ async def fetch_positions(
 
     [Story 099] ``mark_prices`` is forwarded to ``_fetch_paper_positions``
     so estimated unrealised PnL can be shown in paper mode.
+
+    [Phase 2] Dispatch by ``settings.active_exchange`` so the dashboard
+    works against Bybit/Binance, not just Hyperliquid.
     """
     if settings.paper_trading:
         return await _fetch_paper_positions(mark_prices=mark_prices)
 
+    # In live mode, delegate to PortfolioManager regardless of exchange
+    # (codex). PortfolioManager already implements per-exchange dispatch
+    # (CCXT for Bybit/Binance, native SDK for Hyperliquid) and reuses a
+    # long-lived client with the correct sandbox routing. Building a
+    # second ephemeral client here would race PortfolioManager's session
+    # and could double-count rate-limit budget on Bybit testnet.
     try:
         from src.agents.portfolio_manager import PortfolioManager  # noqa: WPS433
 
