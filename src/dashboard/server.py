@@ -5835,6 +5835,19 @@ class MekkaDashboardServer:
                             "verdict": approval.verdict.value, "reasons": approval.reasons,
                         },
                     )
+                    # Security visibility: alert the operator on Telegram that a
+                    # Batman override (Modo Deus) was used.
+                    try:
+                        from src.services.telegram_alerter import TelegramAlerter as _TA
+                        asyncio.create_task(_TA().alert(
+                            event="MANUAL_TRADE_FORCE_EXECUTE", severity="WARNING", agent="Dashboard",
+                            symbol=signal.symbol,
+                            message=(f"🔱 *MODO DEUS* — override do Batman ({approval.verdict.value}) "
+                                     f"em {signal.symbol} {signal.action.value}. "
+                                     f"Execução forçada (paper/testnet)."),
+                        ))
+                    except Exception:  # noqa: BLE001
+                        pass
                     # Build an EXECUTABLE approval so IronMan actually places the
                     # order. Merely "falling through" kept Batman's REJECTED
                     # verdict, and IronMan independently SKIPs anything that
