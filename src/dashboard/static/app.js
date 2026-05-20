@@ -5230,6 +5230,31 @@ async function loadMemory() {
         }).join('');
       }
     }
+    // ── Enriquecimento (item #10): memória de trabalho + saúde do vault ──
+    // Aditivo e best-effort — nunca quebra o painel principal se um endpoint
+    // falhar. Dá ao operador uma visão de memória mais completa que só a
+    // memória episódica (que fica vazia até haver SL/TP fechados).
+    if (chips) {
+      try {
+        const [wmRes, jgRes] = await Promise.allSettled([
+          fetch('/api/working-memory', { cache: 'no-store' }),
+          fetch('/api/jean/health-report', { cache: 'no-store' }),
+        ]);
+        if (wmRes.status === 'fulfilled' && wmRes.value.ok) {
+          const wm = await wmRes.value.json();
+          chips.insertAdjacentHTML('beforeend',
+            `<span class="mem-chip mem-chip-wm" title="Memória de trabalho: registros recentes mantidos por símbolo para o contexto imediato dos agentes.">🧮 Mem. trabalho <strong>${wm.total_records ?? 0}</strong> · ${wm.symbols_tracked ?? 0} símb.</span>`);
+        }
+        if (jgRes.status === 'fulfilled' && jgRes.value.ok) {
+          const jg = await jgRes.value.json();
+          const broken = (jg.broken_links || []).length;
+          const orphans = (jg.orphans || []).length;
+          const healthy = jg.is_healthy !== false && broken === 0;
+          chips.insertAdjacentHTML('beforeend',
+            `<span class="mem-chip mem-chip-vault ${healthy ? '' : 'mem-chip-warn'}" title="Saúde do vault (segundo cérebro), auditada pela Jean Grey: ${jg.total_notes ?? 0} notas, ${broken} links quebrados, ${orphans} órfãs.">🧠 Vault ${healthy ? 'OK' : '⚠'} · ${jg.total_notes ?? 0} notas</span>`);
+        }
+      } catch (_) { /* best-effort */ }
+    }
   } catch (err) {
     if (grid) grid.innerHTML = `<p class="mem-empty">Erro ao carregar memória: ${escapeHtml(err.message)}</p>`;
   }
