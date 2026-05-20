@@ -295,6 +295,63 @@ class JeanGrey(BaseAgent[VaultHealthReport]):
             }
         return notes
 
+    # -- neural graph ----------------------------------------------------
+
+    def build_graph(self) -> dict:
+        """Return the vault's link graph for the "second brain" visualization.
+
+        ``{nodes: [{id, title, folder, degree}], links: [{source, target}],
+           total_notes, total_links, scanned_at}``. Nodes are notes; links are
+           resolved wikilinks (target title → note path). Fail-silent: returns
+           empty graph on any error. CPU-bound — call via asyncio.to_thread.
+        """
+        empty = {"nodes": [], "links": [], "total_notes": 0, "total_links": 0,
+                 "scanned_at": datetime.now(timezone.utc).isoformat()}
+        if not self.vault_dir.exists():
+            return empty
+        try:
+            notes = self._scan_vault()
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"[JeanGrey] graph scan failed: {exc}")
+            return empty
+
+        by_title: dict[str, str] = {}
+        for rel, n in notes.items():
+            by_title.setdefault(n["title_norm"], rel)
+
+        degree: dict[str, int] = {rel: 0 for rel in notes}
+        links: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for rel, n in notes.items():
+            for tgt in n["links"]:
+                trel = by_title.get(tgt)
+                if not trel or trel == rel:
+                    continue
+                key = (rel, trel)
+                if key in seen:
+                    continue
+                seen.add(key)
+                links.append({"source": rel, "target": trel})
+                degree[rel] += 1
+                degree[trel] += 1
+
+        nodes = []
+        for rel, n in notes.items():
+            folder = rel.split("/")[0] if "/" in rel else "(raiz)"
+            nodes.append({
+                "id": rel,
+                "title": n["title"],
+                "folder": folder,
+                "degree": degree.get(rel, 0),
+            })
+        return {
+            "nodes": nodes,
+            "links": links,
+            "total_notes": len(nodes),
+            "total_links": len(links),
+            "scanned_at": datetime.now(timezone.utc).isoformat(),
+        }
+
     @staticmethod
     def _normalize_link(raw: str) -> str:
         """Normalize a wikilink target or note title for comparison.

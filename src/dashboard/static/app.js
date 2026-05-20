@@ -544,6 +544,94 @@ function _sizeOfficeFrame(rawHeight) {
   }
 }
 
+// ── Neural graph (second brain / vault connections) ─────────────────────────
+let _neuralGraph = null;       // ForceGraph instance
+let _neuralBooted = false;
+let _neuralLibLoading = null;  // Promise while the lib loads
+
+function _loadForceGraphLib() {
+  if (typeof window.ForceGraph === 'function') return Promise.resolve(true);
+  if (_neuralLibLoading) return _neuralLibLoading;
+  _neuralLibLoading = new Promise((resolve) => {
+    const urls = [
+      'https://unpkg.com/force-graph',
+      'https://cdn.jsdelivr.net/npm/force-graph',
+    ];
+    let i = 0;
+    const tryNext = () => {
+      if (typeof window.ForceGraph === 'function') return resolve(true);
+      if (i >= urls.length) return resolve(false);
+      const s = document.createElement('script');
+      s.src = urls[i++];
+      s.onload = () => resolve(typeof window.ForceGraph === 'function');
+      s.onerror = tryNext;
+      document.head.appendChild(s);
+    };
+    tryNext();
+  });
+  return _neuralLibLoading;
+}
+
+async function _bootNeuralGraph() {
+  const el = document.getElementById('neural-graph');
+  if (!el) return;
+  const meta = document.getElementById('neural-meta');
+  const ok = await _loadForceGraphLib();
+  if (!ok) {
+    el.innerHTML = '<p class="muted-line" style="padding:18px">Não foi possível carregar a biblioteca do grafo (offline?).</p>';
+    return;
+  }
+  let data;
+  try {
+    const res = await fetch('/api/jean/graph', { cache: 'no-store' });
+    data = await res.json();
+  } catch (_) {
+    el.innerHTML = '<p class="muted-line" style="padding:18px">Falha ao carregar o grafo do vault.</p>';
+    return;
+  }
+  const nodes = data.nodes || [];
+  const links = data.links || [];
+  if (meta) meta.textContent = `${data.total_notes ?? nodes.length} notas · ${data.total_links ?? links.length} conexões`;
+  if (!nodes.length) {
+    el.innerHTML = '<p class="muted-line" style="padding:18px">Vault vazio ou indisponível.</p>';
+    return;
+  }
+  const width = el.clientWidth || 900;
+  const height = el.clientHeight || 460;
+  try {
+    _neuralGraph = window.ForceGraph()(el)
+      .width(width).height(height)
+      .backgroundColor('#070d1a')
+      .graphData({ nodes, links })
+      .nodeId('id')
+      .nodeLabel((n) => `${n.title} · ${n.degree} conexões`)
+      .nodeAutoColorBy('folder')
+      .nodeRelSize(3)
+      .nodeVal((n) => 1 + (n.degree || 0))
+      .linkColor(() => 'rgba(120,160,220,0.18)')
+      .linkWidth(0.5)
+      .linkDirectionalParticles(0)
+      .cooldownTicks(120);
+    _neuralGraph.onEngineStop(() => { try { _neuralGraph.zoomToFit(400, 30); } catch (_) {} });
+    _neuralBooted = true;
+  } catch (e) {
+    console.error('[neural] render failed', e);
+    el.innerHTML = '<p class="muted-line" style="padding:18px">Erro ao renderizar o grafo.</p>';
+  }
+}
+
+function _ensureNeuralGraphBooted() {
+  if (_neuralBooted) {
+    // Re-fit on revisit + refresh size
+    const el = document.getElementById('neural-graph');
+    if (_neuralGraph && el) {
+      try { _neuralGraph.width(el.clientWidth || 900); _neuralGraph.zoomToFit(400, 30); } catch (_) {}
+    }
+    return;
+  }
+  _bootNeuralGraph().catch((e) => console.error('[neural] boot error', e));
+}
+
 function _initOfficeAutoResize() {
   // (1) postMessage path
   window.addEventListener('message', (e) => {
@@ -3096,7 +3184,7 @@ const _PAGE_SECTIONS = {
   // sec-trading-settings now live together inside #overview-office-row
   // (a 2-col grid). Ordering here keeps the office/trade-mode row first,
   // followed by the operator command center, then the rest.
-  overview:    ['sec-today-summary', 'sec-office', 'sec-trading-settings', 'sec-layers', 'sec-agents', 'sec-command-center', 'sec-live-market', 'sec-metrics'],
+  overview:    ['sec-today-summary', 'sec-office', 'sec-trading-settings', 'sec-layers', 'sec-agents', 'sec-neural-graph', 'sec-command-center', 'sec-live-market', 'sec-metrics'],
   wallet:      ['sec-killswitch', 'sec-pnl', 'sec-positions', 'sec-funding'],
   performance: ['sec-equity-curve', 'sec-trades-timeline', 'sec-replay-charts', 'sec-hero-sla'],
   agents:      ['sec-layers', 'sec-agents', 'sec-internals'],
@@ -3167,6 +3255,7 @@ function _mkSetPage(pageKey) {
   if (pageKey === 'overview') {
     setTimeout(() => { try { _sizeOfficeFrame(); } catch (_) {} }, 60);
     setTimeout(() => { try { _sizeOfficeFrame(); } catch (_) {} }, 600);
+    setTimeout(() => { try { _ensureNeuralGraphBooted(); } catch (_) {} }, 120);
   }
 
   // Apply per-widget visibility prefs on top
@@ -5198,6 +5287,12 @@ function _mkBootDashboardV2() {
   try { _bootGlobalWs(); } catch (e) { console.error('[v2] _bootGlobalWs failed:', e); }
   // Office iframe auto-resize (no internal scrollbar)
   try { _initOfficeAutoResize(); } catch (e) { console.error('[v2] _initOfficeAutoResize failed:', e); }
+  // Neural graph (second brain) — boot if Overview is the landing page
+  try {
+    let _p = 'overview';
+    try { _p = localStorage.getItem('mekka_current_page') || 'overview'; } catch (_) {}
+    if (_p === 'overview') _ensureNeuralGraphBooted();
+  } catch (e) { console.error('[v2] neural graph boot failed:', e); }
   // Item e — (re)apply help tooltips so panels added after the initial pass
   // (manual trade, melhorias, command center, etc.) also get a "?" dot.
   try { enhanceTitlesWithHelp(); } catch (e) { console.error('[v2] enhanceTitlesWithHelp failed:', e); }

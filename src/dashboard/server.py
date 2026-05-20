@@ -418,6 +418,7 @@ class MekkaDashboardServer:
         self._app.router.add_post("/api/trade/manual", self._handle_trade_manual)
         self._app.router.add_post("/api/trade/manual-analyze", self._handle_trade_manual_analyze)
         self._app.router.add_get("/api/jean/health-report", self._handle_jean_health_report)
+        self._app.router.add_get("/api/jean/graph", self._handle_jean_graph)
         self._app.router.add_get("/api/improvements", self._handle_improvements_get)
         self._app.router.add_post("/api/improvements/decision", self._handle_improvements_decision)
         self._app.router.add_get("/api/improvements/pr-status", self._handle_improvements_pr_status)
@@ -5969,6 +5970,22 @@ class MekkaDashboardServer:
             return web.json_response(
                 {"error": f"Falha ao gerar relatório do vault: {exc}"},
                 status=200,
+            )
+
+    async def _handle_jean_graph(self, _: web.Request) -> web.Response:
+        """GET /api/jean/graph — link graph of the vault (second brain) for the
+        neural-connections visualization. {nodes, links, total_notes,
+        total_links}. CPU-bound scan runs off the event loop. Read-only.
+        """
+        try:
+            import asyncio as _asyncio
+            from src.agents.jean_grey import JeanGrey
+            graph = await _asyncio.to_thread(JeanGrey().build_graph)
+            return web.json_response(graph, status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("jean graph failed: %s", exc, exc_info=True)
+            return web.json_response(
+                {"nodes": [], "links": [], "error": str(exc)}, status=200,
             )
 
     async def _handle_improvements_get(self, _: web.Request) -> web.Response:
