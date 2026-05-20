@@ -245,23 +245,23 @@ function App() {
               <span>Agents leave their desks for coffee, the wall TV, or the whiteboard. Click anyone for detail.</span>
             </div>
           </div>
+        </div>
 
-          <div className="ticker">
-            <div className="ticker-hdr">
-              <span className="ticker-dot"></span>
-              <span>HERO AUDIT STREAM</span>
-              <span className="ticker-spacer"></span>
-              <span className="ticker-meta">{feedEvents.length} events · 5s window</span>
-            </div>
-            <div className="ticker-body">
-              {feedEvents.map((e, i) => (
-                <div key={i} className="ticker-row">
-                  <span className="t-time">{e.t}</span>
-                  <span className="t-who">{e.who}</span>
-                  <span className="t-msg">{e.msg}</span>
-                </div>
-              ))}
-            </div>
+        <div className="ticker">
+          <div className="ticker-hdr">
+            <span className="ticker-dot"></span>
+            <span>HERO AUDIT STREAM</span>
+            <span className="ticker-spacer"></span>
+            <span className="ticker-meta">{feedEvents.length} events · 5s window</span>
+          </div>
+          <div className="ticker-body">
+            {feedEvents.map((e, i) => (
+              <div key={i} className="ticker-row">
+                <span className="t-time">{e.t}</span>
+                <span className="t-who">{e.who}</span>
+                <span className="t-msg">{e.msg}</span>
+              </div>
+            ))}
           </div>
         </div>
 

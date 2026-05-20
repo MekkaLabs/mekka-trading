@@ -517,6 +517,26 @@ function remountOfficeV2Panel() {
   mountOfficeV2Panel();
 }
 
+// Office iframe auto-resize: the embedded office (/office-v2/) posts its full
+// content height; we size #office-v2-frame to match so the office shows ALL
+// its content (scene + Hero Audit Stream + side panels) with NO internal
+// scrollbar. Same-origin only; ignored while the Overview/office is hidden.
+function _initOfficeAutoResize() {
+  window.addEventListener('message', (e) => {
+    if (e.origin !== window.location.origin) return;
+    const d = e.data;
+    if (!d || d.type !== 'mekka-office-height' || !Number.isFinite(d.height)) return;
+    const frame = document.getElementById('office-v2-frame');
+    if (!frame) return;
+    // Don't apply while the office section is hidden (a 0-size frame would
+    // report a collapsed height and fight the layout when shown again).
+    const sec = document.getElementById('sec-office');
+    if (sec && sec.classList.contains('page-section-hidden')) return;
+    const h = Math.max(420, Math.min(Math.round(d.height), Math.round(window.innerHeight * 1.6)));
+    frame.style.height = h + 'px';
+  });
+}
+
 function applyPrefs() {
   const p = loadPrefs();
   if (marketSymbol && p.marketSymbol) marketSymbol.value = p.marketSymbol;
@@ -5114,6 +5134,8 @@ function _mkBootDashboardV2() {
   try { _bootSystemPower(); } catch (e) { console.error('[v2] _bootSystemPower failed:', e); }
   // Global WS — real-time topbar + positions across all pages
   try { _bootGlobalWs(); } catch (e) { console.error('[v2] _bootGlobalWs failed:', e); }
+  // Office iframe auto-resize (no internal scrollbar)
+  try { _initOfficeAutoResize(); } catch (e) { console.error('[v2] _initOfficeAutoResize failed:', e); }
   // Item e — (re)apply help tooltips so panels added after the initial pass
   // (manual trade, melhorias, command center, etc.) also get a "?" dot.
   try { enhanceTitlesWithHelp(); } catch (e) { console.error('[v2] enhanceTitlesWithHelp failed:', e); }

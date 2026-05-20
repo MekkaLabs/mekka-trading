@@ -1310,9 +1310,10 @@ body[data-theme="light"] .brand-leaf { fill: #6aa233; }
 #office-v2-frame {
   display: block;
   width: 100%;
-  height: calc(100vh - 120px);
-  min-height: 700px;
-  max-height: 1100px;
+  /* Height is driven at runtime by the iframe auto-resize (postMessage from
+     the office → _initOfficeAutoResize in app.js), so the office shows ALL its
+     content with no internal scrollbar. min-height is just a boot fallback. */
+  min-height: 420px;
   border: none;
   background: var(--bg);
 }
@@ -1334,21 +1335,10 @@ body[data-theme="light"] .brand-leaf { fill: #6aa233; }
 .overview-office-row.office-row-solo {
   grid-template-columns: 1fr;
 }
-/* Inside the side-by-side row the office is height-constrained so it
-   stays balanced next to the trade-mode panel. Solo mode (settings)
-   falls back to the global frame sizing above. */
-.overview-office-row:not(.office-row-solo) #office-v2-frame {
-  height: 600px;
-  min-height: 0;
-  max-height: 70vh;
-}
 .overview-office-row > .panel { margin: 0; }
 
 @media (max-width: 1100px) {
   .overview-office-row { grid-template-columns: 1fr; }
-  .overview-office-row:not(.office-row-solo) #office-v2-frame {
-    height: 480px;
-  }
 }
 
 /* ============================================================
@@ -2222,7 +2212,7 @@ body[data-theme="light"] .brand-leaf { fill: #6aa233; }
   .orderbook-grid    { grid-template-columns: 1fr; }
   .metrics, .scene, .panel:not(.full) { grid-column: 1 / -1; }
   #office-v2-root { min-height: 340px; }
-  #office-v2-frame { height: 620px; min-height: 620px; }
+  /* iframe height is auto-driven by postMessage — don't pin it here */
   .filters, .layer-map, .risk-heatmap { grid-template-columns: 1fr; }
   .hero-sla    { grid-template-columns: 1fr; }
   .manual-grid { grid-template-columns: 1fr; }

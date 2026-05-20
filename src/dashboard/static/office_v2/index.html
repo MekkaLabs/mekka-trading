@@ -75,9 +75,24 @@
   .pill-muted { color: var(--text-dim); }
   @keyframes pulse { 0%,100% {opacity: 1;} 50% {opacity: 0.35;} }
 
-  /* ============ MAIN LAYOUT — office top, panels bottom ============ */
+  /* ============ MAIN LAYOUT — scene on top, audit + side below ============ */
   .main {
-    display: flex; flex-direction: column; gap: 20px; align-items: stretch;
+    display: grid;
+    gap: 20px;
+    grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+    grid-template-areas:
+      "scene scene"
+      "ticker side";
+    align-items: start;
+  }
+  .scene-col { grid-area: scene; min-width: 0; }
+  .main > .ticker { grid-area: ticker; margin-top: 0; }
+  .main > .side  { grid-area: side; }
+  @media (max-width: 900px) {
+    .main {
+      grid-template-columns: 1fr;
+      grid-template-areas: "scene" "ticker" "side";
+    }
   }
 
   /* ============ SCENE ============ */
@@ -227,7 +242,12 @@
   .ticker-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 1.6s infinite; }
   .ticker-spacer { flex: 1; }
   .ticker-meta { color: var(--text-dim); }
-  .ticker-body { max-height: 220px; overflow: auto; }
+  .ticker-body { max-height: 340px; overflow: auto; }
+  /* When embedded in the dashboard, the office's own pixel roster is hidden —
+     the dashboard's "Agents Pixel Roster 3D" is the canonical roster shown
+     next to the office, avoiding a duplicate. Standalone keeps it. */
+  body.embedded .side { grid-template-columns: 1fr; }
+  body.embedded .side > .roster { display: none; }
   .ticker-row {
     display: grid; grid-template-columns: 90px 130px 1fr;
     gap: 12px; padding: 8px 16px;
@@ -498,7 +518,11 @@
 
     var zw = availW / SCENE_NATURAL_W;
     var zh = availH / SCENE_NATURAL_H;
-    var z = Math.min(zw, zh, 1); // never upscale beyond natural size
+    // When embedded (iframe) the parent auto-resizes us to our content height,
+    // so fit by WIDTH only (height-fit would be circular with the auto-resize).
+    // Standalone full-screen keeps the width+height fit.
+    var embedded = document.body.classList.contains('embedded');
+    var z = embedded ? Math.min(zw, 1) : Math.min(zw, zh, 1);
 
     wrap.style.zoom = z >= 1 ? '' : z;
     return true;
@@ -532,6 +556,52 @@
   window.addEventListener('resize', function () {
     requestAnimationFrame(applyZoom);
   });
+})();
+</script>
+<script>
+/* ── Embed auto-resize ───────────────────────────────────────────────────
+   When the office is shown inside the dashboard iframe (#office-v2-frame),
+   we post our full content height to the parent so it can size the iframe to
+   fit — no internal scrollbar, all content visible. Gated on being framed,
+   so the standalone /office-v2/ page is unaffected. Same-origin only. */
+(function () {
+  if (window.parent === window) return; // standalone — nothing to do
+  document.body.classList.add('embedded');
+
+  var lastH = 0;
+  var raf = 0;
+
+  function measure() {
+    var doc = document.documentElement;
+    return Math.ceil(Math.max(
+      doc.scrollHeight, doc.getBoundingClientRect().height,
+      document.body ? document.body.scrollHeight : 0
+    ));
+  }
+
+  function postHeight() {
+    raf = 0;
+    var h = measure();
+    if (!h || Math.abs(h - lastH) <= 2) return;
+    lastH = h;
+    try { window.parent.postMessage({ type: 'mekka-office-height', height: h }, location.origin); }
+    catch (e) { /* ignore */ }
+  }
+
+  function schedule() {
+    if (raf) return;
+    raf = requestAnimationFrame(postHeight);
+  }
+
+  try { new ResizeObserver(schedule).observe(document.body); } catch (e) {}
+  try {
+    var root = document.getElementById('root');
+    if (root) new MutationObserver(schedule).observe(root, { childList: true, subtree: true });
+  } catch (e) {}
+  window.addEventListener('resize', schedule);
+  window.addEventListener('load', schedule);
+  // Babel renders async — nudge a few times after boot.
+  [200, 500, 1000, 2000, 3500].forEach(function (ms) { setTimeout(schedule, ms); });
 })();
 </script>
 </body>
