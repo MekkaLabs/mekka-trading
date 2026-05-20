@@ -228,6 +228,7 @@ const HELP_TIPS = {
   '🧠 Debate Multiagente': 'Responsável: Professor X. Síntese de perspectivas divergentes dos agentes de análise.',
   '🧠 Episodic Memory — O que os Agentes Aprenderam': 'Responsável: Jean Grey / DecisionMemory. Histórico de trades resolvidos que ajusta decisões futuras.',
   '🧪 Histórico de Backtests': 'Responsável: motor de backtest. Backtests anteriores para comparação.',
+  '🧠 Conexões Neurais — Segundo Cérebro': 'Responsável: Jean Grey. Grafo do "segundo cérebro" (vault): cada nó é uma nota e as linhas são os links entre elas. Cor = pasta, tamanho = nº de conexões.',
 };
 
 const SPRITE_PATTERN = [
