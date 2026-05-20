@@ -1,7 +1,7 @@
 # 🤝 Mekka Trading — Handoff para o próximo chat
 
 > **Data**: 2026-05-20 (sessão 4 — longa)
-> **Branch**: `main` — **35 commits ahead** de `origin/main`, nada pushed (push é do @devops)
+> **Branch**: `main` — **38 commits ahead** de `origin/main`, nada pushed (push é do @devops)
 > **Estado**: ✅ rodando em **Bybit testnet LIVE mode**, dashboard saudável
 > **Próximo chat**: cole este arquivo como contexto inicial.
 
@@ -78,7 +78,10 @@ TELEGRAM_INBOUND_ENABLED=false  ⚠️ ver gotcha #1
 - **i18n EN completo (d)**: hoje só nav+topbar traduzem (`applyLanguage`); resto é PT hardcoded. Baixo valor (operador usa PT).
 - **Verificação visual** de tudo da sessão (preview estava quebrado).
 - **Consumidor do improvement-queue**: sessão Claude Code (manual/headless) que lê `docs/improvement-queue/`, roda o SDC do AIOS e registra o PR via `pr_tracker.set_pr` → painel mostra o PR p/ aprovar.
-- **Fase 3**: Iceman (on-chain real, Black Panther é stub); cybersec (token em POSTs, MEKKA_DASHBOARD_SECRET); refactor `server.py` (~6k linhas) → routers por domínio.
+- **Fase 3 — status atualizado nesta sessão:**
+  - ✅ **Black Panther já é on-chain REAL** (não é stub): busca funding/OI/whale-flow da Hyperliquid (`metaAndAssetCtxs` + trades). Verificado (funding≈0.00013, OI real). Um "Iceman" com DeFi on-chain profundo exigiria provider externo pago (Arkham/Nansen) — fora de escopo sem API key.
+  - ✅ **Cybersec**: `_auth_middleware` já exige auth em todos os POSTs quando `MEKKA_DASHBOARD_TOKEN` ou `MEKKA_DASHBOARD_PASSWORD` está setado (hoje vazio = dev aberto → **setar `MEKKA_DASHBOARD_TOKEN` no `.env` para ativar**). Alertas Telegram de kill switch e Modo Deus adicionados.
+  - ⏳ **Refactor `server.py` (~6k linhas) → routers por domínio**: ÚNICO item grande restante. Risco alto num sistema live — recomendado fazer via SDC dedicado (@architect→@dev→@qa) com testes, NÃO ad-hoc. Já é a 1ª recomendação do conselho de melhorias.
 
 ---
 
