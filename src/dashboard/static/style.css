@@ -2384,6 +2384,17 @@ body[data-theme="light"] .brand-leaf { fill: #6aa233; }
 /* Feed */
 .memory-feed-wrap { display: flex; flex-direction: column; gap: .5rem; }
 .memory-feed-title { margin: 0; font-size: .85rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.memory-wm-wrap { display: flex; flex-direction: column; gap: .5rem; margin: 12px 0; }
+.memory-wm { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.mem-wm-card {
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-md, 8px);
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+.mem-wm-sym { font-weight: 700; font-family: var(--font-mono); }
+.mem-wm-count { color: var(--accent); font-size: .85rem; margin-top: 2px; }
+.mem-wm-last { color: var(--muted); font-size: .72rem; margin-top: 2px; }
 .memory-feed {
   display: flex; flex-direction: column; gap: .3rem;
   max-height: 280px; overflow-y: auto;

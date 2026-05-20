@@ -5434,9 +5434,56 @@ async function loadMemory() {
         }
       } catch (_) { /* best-effort */ }
     }
+
+    // Working memory — what the agents are saving right now (sliding window).
+    await _loadWorkingMemory();
+    _memLastLoad = Date.now();
   } catch (err) {
     if (grid) grid.innerHTML = `<p class="mem-empty">Erro ao carregar memória: ${escapeHtml(err.message)}</p>`;
   }
+}
+
+let _memLastLoad = 0;
+let _memLiveTimer = null;
+
+async function _loadWorkingMemory() {
+  const wm = document.getElementById('memory-wm');
+  if (!wm) return;
+  try {
+    const res = await fetch('/api/working-memory', { cache: 'no-store' });
+    const d = await res.json();
+    const per = d.per_symbol || {};
+    const symbols = Object.keys(per);
+    if (!symbols.length) {
+      wm.innerHTML = `<p class="mem-empty">Nenhum ciclo registrado ainda — a memória de trabalho guarda os últimos ${d.max_per_symbol ?? 10} ciclos por símbolo assim que o sistema rodar (Vision → Batman → IronMan).</p>`;
+      return;
+    }
+    wm.innerHTML = symbols.map((sym) => {
+      const info = per[sym] || {};
+      const count = info.count ?? info.records ?? (Array.isArray(info) ? info.length : 0);
+      const last = info.last_cycle || info.latest || info.updated_at || '';
+      return `<div class="mem-wm-card">
+        <div class="mem-wm-sym">${escapeHtml(sym)}</div>
+        <div class="mem-wm-count">${count} ciclos</div>
+        ${last ? `<div class="mem-wm-last">último: ${escapeHtml(String(last)).slice(0,19)}</div>` : ''}
+      </div>`;
+    }).join('');
+  } catch (_) {
+    wm.innerHTML = '<p class="mem-empty">Memória de trabalho indisponível.</p>';
+  }
+}
+
+// Live "atualizado há Xs" indicator + faster auto-refresh feel.
+function _bootMemoryLive() {
+  if (_memLiveTimer) clearInterval(_memLiveTimer);
+  _memLiveTimer = setInterval(() => {
+    const meta = document.getElementById('memory-meta');
+    const sec = document.getElementById('sec-memory');
+    if (!meta || !sec || sec.classList.contains('page-section-hidden')) return;
+    if (!_memLastLoad) return;
+    const secs = Math.round((Date.now() - _memLastLoad) / 1000);
+    meta.textContent = `🟢 ao vivo · atualizado há ${secs}s`;
+  }, 1000);
 }
 
 // ============================================================
@@ -5647,13 +5694,14 @@ let _memoryTimer = null;  // C1 fix: salvar referência para poder cancelar
 
 function bootMemory() {
   loadMemory();
+  _bootMemoryLive();
   _memoryTimer = _clearTimer(_memoryTimer);
   if (!document.hidden) {
-    // C1 fix: salvar retorno de setInterval para limpar no visibilitychange
+    // Real-time feel: refresh the memory view every 12s while it's visible.
     _memoryTimer = setInterval(() => {
       const sec = document.getElementById('sec-memory');
       if (sec && !sec.classList.contains('page-section-hidden')) loadMemory();
-    }, 60_000);
+    }, 12_000);
   }
 }
 
