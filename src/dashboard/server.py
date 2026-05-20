@@ -1463,6 +1463,15 @@ class MekkaDashboardServer:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("killswitch audit log failed: %s", exc)
+        try:
+            from src.services.telegram_alerter import TelegramAlerter as _TA
+            asyncio.create_task(_TA().alert(
+                event="KILL_SWITCH_ENGAGED", severity="CRITICAL", agent="Batman",
+                message=f"🔴 Kill switch ENGAJADO pelo dashboard. Motivo: {reason or 'manual'}. "
+                        f"Toda nova execução está bloqueada.",
+            ))
+        except Exception:  # noqa: BLE001
+            pass
         self._metrics["killswitch_engaged_total"] += 1
         # Invalidate the broadcast cache so the next /ws frame reflects the
         # new state immediately (instead of after the 1.5s TTL).
@@ -1496,6 +1505,15 @@ class MekkaDashboardServer:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("killswitch audit log failed: %s", exc)
+        try:
+            from src.services.telegram_alerter import TelegramAlerter as _TA
+            asyncio.create_task(_TA().alert(
+                event="KILL_SWITCH_RELEASED", severity="WARNING", agent="Batman",
+                message=f"🟢 Kill switch LIBERADO pelo dashboard por {operator or 'operador'}. "
+                        f"Execuções normalizadas.",
+            ))
+        except Exception:  # noqa: BLE001
+            pass
         self._metrics["killswitch_released_total"] += 1
         self._payload_cache.clear()
         return web.json_response({"active": False, "had_file": existed}, status=200)
