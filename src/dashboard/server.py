@@ -5998,6 +5998,22 @@ class MekkaDashboardServer:
         try:
             from src.agents.mekka import Mekka
             report = await Mekka().run(period_days=7)
+            # Push NEW pending proposals to Telegram once (operator can approve
+            # there with /aprovar — synced with this dashboard). In-memory dedup.
+            try:
+                if not hasattr(self, "_impr_notified"):
+                    self._impr_notified = set()
+                pend = [r for r in (getattr(report, "recommendations", []) or [])
+                        if getattr(r, "status", "pending") == "pending"]
+                fresh = [r for r in pend if getattr(r, "id", None) and r.id not in self._impr_notified]
+                if fresh:
+                    from src.services.telegram_alerter import TelegramAlerter as _TA
+                    alerter = _TA()
+                    for r in fresh[:5]:
+                        self._impr_notified.add(r.id)
+                        asyncio.create_task(alerter.improvement_proposed(r))
+            except Exception as _push_exc:  # noqa: BLE001
+                logger.debug("improvement Telegram push skipped: %s", _push_exc)
             return web.json_response(report.to_dict(), status=200)
         except Exception as exc:  # noqa: BLE001
             logger.error("improvements council failed: %s", exc, exc_info=True)

@@ -737,6 +737,57 @@ class TelegramAlerter:
             self._log.warning(f"drawdown_alert failed (suppressed): {exc}")
             return False
 
+    async def improvement_proposed(self, rec: object) -> bool:
+        """Send one pending improvement-council proposal to Telegram so the
+        operator can approve/reject it from there (/aprovar <id>). Mirrors the
+        dashboard's Central de Melhorias. Accepts a CouncilRecommendation or a
+        dict. Never throws.
+        """
+        if not settings.telegram_enabled:
+            return False
+
+        def _g(obj, key, default=""):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        rid = _g(rec, "id") or _g(rec, "rec_id") or "?"
+        title = _g(rec, "title", "(sem título)")
+        area = _g(rec, "area", "")
+        domain = _g(rec, "domain", "")
+        priority = _g(rec, "priority", "")
+        impact = str(_g(rec, "impact", "")).upper()
+        pm = _g(rec, "premortem", {}) or {}
+        verdict = _g(pm, "verdict", "") or _g(rec, "premortem_verdict", "")
+        hunger = _g(pm, "hunger", "") or _g(rec, "premortem_hunger", "")
+        rationale = _g(rec, "rationale", "")
+
+        lines = [
+            "🛠️ *Conselho de Melhorias — nova proposta*",
+            "",
+            f"*{title}*",
+            f"ID: `{rid}`",
+        ]
+        meta = " · ".join([x for x in [domain, area, priority, impact] if x])
+        if meta:
+            lines.append(meta)
+        if verdict:
+            lines.append(f"Galactus: {verdict}" + (f" (fome {hunger})" if hunger != "" else ""))
+        if rationale:
+            lines.append("")
+            lines.append(str(rationale)[:280])
+        lines += [
+            "",
+            f"Aprovar: `/aprovar {rid}`   ·   Reprovar: `/reprovar {rid}`",
+            "(ou decida na Central de Melhorias do dashboard)",
+        ]
+        text = "\n".join(lines)
+        try:
+            return await self._post(text, parse_mode="Markdown")
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"improvement_proposed failed (suppressed): {exc}")
+            return False
+
     # ------------------------------------------------------------------
     # HTTP
     # ------------------------------------------------------------------
