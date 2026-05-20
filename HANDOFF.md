@@ -1,140 +1,115 @@
 # 🤝 Mekka Trading — Handoff para próximo chat
 
-> **Data**: 2026-05-20 (sessão 2)
-> **Branch**: `main` @ `dca7131` — **10 commits ahead de `origin/main`** (`b3376fe`), nada pushed
-> **Estado**: ✅ rodando em **Bybit testnet LIVE mode** com Vision (Anthropic Claude) ativo
+> **Data**: 2026-05-20 (sessão 3 — modo automático noturno)
+> **Branch**: `main` @ `cdb8cb9` — **19 commits ahead de `origin/main`**, nada pushed (push é do @devops)
+> **Estado**: ✅ rodando em **Bybit testnet LIVE mode** (PID 70405, dashboard http://localhost:8787)
 > **Próximo chat**: cole este arquivo como contexto inicial.
 
 ---
 
-## 1. Como o sistema está rodando agora
+## 1. Como subir / health check
 
-- **PID 37556** rodando `run.py --dashboard`
-- Working dir: `/Users/gustavovicente/Documents/Mekka-Trading`
-- Python: `.venv313/bin/python` (3.13) · Dashboard: http://localhost:8787 · Log: `/tmp/mekka_dashboard.log`
-
-### `.env` ativo
 ```bash
-ACTIVE_EXCHANGE=bybit
-BYBIT_TESTNET=true            # is_mainnet=False
-PAPER_TRADING=false
-LIVE_TRADING_CONFIRMED=true
-TRADING_ASSETS=BTC
-MAX_POSITION_SIZE_PCT=0.005   # 0.5%  ⚠️ ver gotcha #2
-MAX_LEVERAGE=2
-ANTHROPIC_API_KEY=<presente>  # OPENAI_API_KEY vazio (fallback usa Anthropic)
-```
-
-### ⚠️ Subir o servidor SEMPRE com env limpa
-O shell tem `ANTHROPIC_API_KEY=""`/`OPENAI_API_KEY=""` vazios (Claude Desktop) que sobrepõem o `.env`:
-```bash
+# SEMPRE com env limpa (o shell tem ANTHROPIC/OPENAI vazios que sobrepõem o .env)
+lsof -ti tcp:8787 | xargs kill -9 2>/dev/null
 env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY \
   nohup .venv313/bin/python run.py --dashboard > /tmp/mekka_dashboard.log 2>&1 &
-# aguardar ~25s (boot roda 1 ciclo completo de agentes), depois:
-curl -s http://localhost:8787/api/env
+# aguardar ~25s (o boot roda 1 ciclo completo de agentes que segura o event loop)
+curl -s http://localhost:8787/api/system/status
+curl -s http://localhost:8787/api/improvements/pr-status
 ```
 
+`.env` ativo: `ACTIVE_EXCHANGE=bybit`, `BYBIT_TESTNET=true`, `PAPER_TRADING=false`, `LIVE_TRADING_CONFIRMED=true`, `TRADING_ASSETS=BTC`, `MAX_POSITION_SIZE_PCT=0.005`, `MAX_LEVERAGE=2`, **`MAX_TOTAL_NOTIONAL_USD=100`** (cap de risco — ver gotcha #2).
+
 ---
 
-## 2. ✅ O que foi entregue nesta sessão (10 commits)
+## 2. ✅ Entregue nesta sessão (commits após `dca7131`)
 
 ```
-dca7131 feat(dashboard): "Modo Deus" — god-mode execute (item c)
-b794f84 feat(dashboard): Central de Melhorias + Mekka/Galactus sprites
-1a0d1cd feat(agents): Mekka (commander) + Galactus (premortem)
-edc4274 feat(dashboard): ícone Mekka (SVG) no header (item g)
-668fa2d docs(obsidian): vault cleanup — folder index notes + fixes
-fd92469 fix(agents): Jean Grey vault-scan accuracy (NFC + exemptions)
-96815c2 chore(git): untrack runtime artifacts + fix .gitignore globs
-a4febf7 feat(agents): Jean Grey — Memory Master MVP (P2.1)
-3a2e5d1 feat(dashboard): painel de trading manual (P1.1)
-53c70cc fix(dashboard): bugs visuais P0 (nav/theme/prefs/chart/sprites/i18n)
+cdb8cb9 feat(dashboard): item e — help tooltips em todos os painéis (+responsável)
+0ea9a89 feat(office): zoom da cena width+height aware (rumo ao no-scroll)
+19754b1 fix(charts): gráficos Live/market em branco — shim lightweight-charts v4/v5
+fa157bb fix(manual-trade): orientação acionável quando Batman bloqueia o trade
+3de043e fix(improvements): botão Aceitar travava — enfileira do rec, sem re-rodar conselho
+4924386 feat(dashboard): system on/off/reboot + roster do office + pipeline melhorias→PR
 ```
 
-### 🏛️ Time de Melhoria Contínua (4 agentes) — NOVO, funcional
-Fluxo: **Beast** propõe → **Jean Grey** contextualiza → **Galactus** premortem (devora ideias frágeis) → **Mekka** consolida → **operador aprova/reprova** em `/Melhorias`.
-- `src/agents/mekka.py` — comandante/consolidador. `GET /api/improvements`, `POST /api/improvements/decision`. Decisões em `data/improvement_decisions.json` (gitignored).
-- `src/agents/galactus.py` — premortem, verdict SURVIVES/NEEDS_HARDENING/DEVOURED + hunger 0-100 + failure modes.
-- `src/agents/jean_grey.py` — memória/vault health (`GET /api/jean/health-report`).
-- Inbox curado de propostas (qualquer domínio): `data/improvement_inbox.json` (lista de `{title, description, impact, area, evidence}`).
-- Atua em 2 domínios: **trading-ops** (risk/execution/signals/latency) e **dev-squad** (backend/frontend/dashboard/design).
-- Sprites: Mekka (verde tech + olhos-lente do logo), Galactus (roxo cósmico + crown). Em `agents-sprites.js` e `office_v2/sprites.jsx`.
+### Power on/off/reboot (control plane sempre vivo)
+- `src/runtime_controller.py` — `RuntimeController` controla o loop do Nick Fury. `stop()` cancela o loop → **para trading e gasto de tokens (sem chamadas LLM)**. Dashboard nunca desliga.
+- `run.py` — `--dashboard` cria o controller, `start()`, e roda o dashboard com ele injetado; `--dashboard-only` não auto-inicia.
+- `server.py` — `GET /api/system/status`, `POST /api/system/{start,stop,reboot}` (stop/reboot exigem `{"confirm":"STOP"/"REBOOT"}`).
+- Topbar: pill **SISTEMA LIGADO/DESLIGADO** + botões Ligar/Desligar/Reboot (poll 5s, com retry resiliente ao boot). **Verificado na UI.**
 
-### Outras entregas
-- **P0 (53c70cc)**: nav Live primeiro, tema claro v1, reset de prefs, live chart boot robusto, sprites unificados, i18n v1.
-- **P1.1 (3a2e5d1)**: painel de trading manual com "pedir parecer dos robôs" (Batman) → `/api/trade/manual-analyze` + execução via Batman→IronMan. ⚠️ removeu o bypass do stub antigo `/api/trade/manual`.
-- **(g)**: "MEKKA OPS" → logo SVG (dois formatos verde-lima) + wordmark.
-- **(c) Modo Deus**: Force Execute rotulado como "🔱 Modo Deus" (proeminente). Backend mantém **hard-block em mainnet** (só paper/testnet); kill switch nunca ignorável.
-- **Vault cleanup (668fa2d/fd92469)**: Jean Grey com NFC (acentos macOS), exempt de templates/pastas/dedup estrutural, 10 notas-índice de pasta criadas. Vault `is_healthy=True` (0 broken, 0 dups, 9 órfãs advisory).
+### Office (item h)
+- 4 estações novas em L4 (`scene.jsx`): **mekka, galactus, beast, jeangrey** (Conselho de Melhoria). 24 agentes, 24 estações, sem sprites empilhados no centro. **Verificado.**
 
----
+### Overview (itens a + b)
+- `.overview-office-row` grid `2fr/1fr` → office + Trade Mode lado a lado (empilha ≤1100px).
+- Central de Comandos (`.cmd-center-panel`) reusando handlers (trade manual, Modo Deus, kill switch, modo).
 
-## 3. 🎯 BACKLOG RESTANTE (priorizado)
+### Melhorias → dev → PR (itens d/#5/#6)
+- Aceitar grava `docs/improvement-queue/IMP-<id>.md` (brief com premortem do Galactus + critérios). `src/services/improvement_queue.py`.
+- `src/services/pr_tracker.py` + `GET /api/improvements/pr-status` + `POST /api/improvements/approve-pr` (`{rec_id, pr_number, confirm:"APPROVE", merge?}`). **Merge real só com `merge:true`** — por padrão só registra a aprovação (segurança; merge é ação do @devops).
+- Painel `/Melhorias` mostra ciclo Fila→Em dev→PR aberto→Mergeado + botão Aprovar PR.
 
-### 🔴 Itens visuais pedidos pelo operador (ainda abertos)
-
-| Item | Descrição | Arquivos / notas |
-|---|---|---|
-| **h** | Todos os heróis rodando no office da Overview | `office_v2/scene.jsx` tem **20 estações** mas roster tem **~24 agentes** (com Beast/Jean/Mekka/Galactus). Reorganizar STATIONS p/ caber todos. Office usa `USE_BUNDLE=false` → edita `.jsx` direto (sem rebuild). |
-| **a** | Trade Mode no bloco vazio ao lado do office | Overview: `sec-office` (iframe) + `sec-trading-settings`. Reposicionar em grid lado-a-lado. `_PAGE_SECTIONS.overview` em `app.js:~2962`. |
-| **b** | Central de comandos do operador na Overview | Nova seção na Overview com atalhos: trade manual, executar, kill switch, modo. Reusar handlers existentes. |
-| **e** | Tooltip "?" em TODOS os blocos (explicação leiga + responsável) | Existe `HELP_TIPS` + `enhanceTitlesWithHelp()` em `app.js:~424`. Hoje cobre poucos `h2`. Expandir o dicionário p/ todos os ~30 painéis, incluindo "responsável" (qual herói). |
-| **f** | Overhaul UX da página de Configurações | `sec-settings` (widget customizer) + `sec-filters`. Hoje só checkboxes crus. Agrupar por categoria, busca, presets, preview. |
-| **d** | Modo claro round 2 + i18n completa | Tema claro tem Layer 7 (`body[data-theme="light"]`) mas faltam regras p/ componentes novos (manual, melhorias, office). i18n: muitas strings ainda hardcoded fora do dict. |
-
-### 🟣 Improvement Council — próximo passo: aprovação via Telegram
-> Pedido do operador: as propostas/recomendações do conselho também podem ser
-> **enviadas ao Telegram para serem aprovadas/reprovadas** (espelhar a UX da
-> Central de Melhorias no Telegram).
-
-**Infra existente (já mapeada):**
-- `src/services/telegram_alerter.py` — **outbound**. `_post(text, parse_mode)` envia via Bot API `sendMessage`. Há padrão de alertas (`alert`, `trade_opened`, `wolverine_*`, `drawdown_alert`).
-- `src/services/telegram_inbound.py` — **inbound** via **long-polling** (`getUpdates`, NÃO webhook). `TelegramInboundPoller` despacha comandos de texto (`/status`, `/pause`, `/mode`, etc.). Controlado por `TELEGRAM_INBOUND_ENABLED` + `telegram_inbound_poll_interval_seconds`.
-- Já existe aprovação de trades via Telegram (Story 074, `TELEGRAM_TRADE_APPROVAL_ENABLED`).
-
-**Plano sugerido:**
-1. **Outbound** — método `improvement_proposed(rec)` no `TelegramAlerter` que envia cada recomendação pendente do Mekka (título, domínio, decisão, veredito do Galactus + hunger, mitigações, rationale). Disparar quando `Mekka.run()` produz recomendações `pending` (ou via `/melhorias` no Telegram).
-2. **Aprovação** — duas opções:
-   - **(a) Comandos de texto** (mais simples, casa com o inbound atual): `/melhorias` lista pendentes com IDs curtos; `/aprovar <id>` e `/reprovar <id>` chamam `Mekka().record_decision(id, status)`. Adicionar handlers no `telegram_inbound.py`.
-   - **(b) Inline buttons** (`reply_markup` + `callback_query`): UX melhor, mas o poller atual só trata `message`/text — precisaria estender `_poll_once` para `callback_query`. Mais trabalho.
-   - **Recomendado:** começar com (a), evoluir para (b).
-3. **Sync** — `record_decision` já persiste em `data/improvement_decisions.json`, então aprovar no Telegram reflete na página `/Melhorias` e vice-versa (mesma fonte). 
-4. **Dedup/segurança** — respeitar `chat_id` autorizado (como o inbound já faz) e a janela de dedup de alertas (gotcha #8 da sessão 1).
-
-**Arquivos**: `telegram_alerter.py` (outbound), `telegram_inbound.py` (comandos), `mekka.py` (`record_decision` já existe), settings de Telegram.
-
-### 🔵 Fase 3 — Saúde do código (item i, j)
-- **i**: revisar todo o código p/ lixo/otimização/segurança (usar squads). Candidatos: `server.py` (~5k linhas), `nick_fury.py` (~2.2k).
-- **j**:
-  - **P2.2 Iceman** — agente on-chain real (whale tracking, DeFi flows). Black Panther hoje é stub.
-  - **P3.1 Cybersec** — token obrigatório em POSTs, MEKKA_DASHBOARD_SECRET, audit HMAC, Telegram alert no Modo Deus.
-  - **Refactor `server.py`** → routers por domínio (já é a 1ª recomendação dev-squad no `/Melhorias`!).
-- **P3.6 ADRs retroativos**: Force Execute/Modo Deus, CycleCheckpoint, Beast, DecisionMemory, Mekka/Galactus council.
+### Bugs corrigidos
+- **Aceitar travava** (`3de043e`): backend rodava `Mekka().run()` (~10s) a cada accept; agora o frontend manda o `rec` e o backend enfileira direto (0.05s). **Testado.**
+- **Executar trade** (`fa157bb`): não era bug — Batman rejeita pelo cap `$100` do operador (2% × lev 2 = $400 notional). Funciona via **Modo Deus** no testnet. Adicionado guia acionável + destaque do Modo Deus quando bloqueado.
+- **Gráfico Live em branco** (`19754b1`): o bundle vendorizado é **lightweight-charts v5** (sem `addCandlestickSeries`); código usava API v4. Shim `_lwcAddCandle/_lwcAddHistogram/_lwcAddLine` usa `addSeries(Type,opts)` na v5. **Verificado: shim cria as 3 séries.** (afeta Live e market chart)
+- **Tooltips (item e)** (`cdb8cb9`): `HELP_TIPS` 18→43 painéis, cada um com o herói **responsável**; `enhanceTitlesWithHelp()` roda também no fim do boot.
+- **Fixes anteriores no commit `4924386`**: `_hl_prices`→`_mark_prices` (AttributeError no painel live) e TDZ `_tsSummaryTimer` (quebrava o widget "Resumo de Hoje" no boot).
 
 ---
 
-## 4. ⚠️ Gotchas conhecidos
+## 3. 🎯 BACKLOG RESTANTE
 
-1. **Automação do Codex fazia auto-commit** ("Sync local changes" / "Capture remaining local changes") — varria código + lixo de runtime. **RESOLVIDO**: `.gitignore` corrigido (`data/*.db`, `data/*.json`, `memory/audit-log/*.ndjson`/`.head`) + 397 arquivos untracked em `96815c2`. **Se a automação reativar**: ela não consegue mais re-trackear runtime, mas ainda pode fazer commits genéricos de código real → desligar de vez. Branch `backup-pre-cleanup-45b3022` guarda o estado pré-cleanup.
-2. **Janela apertada de notional**: `MAX_POSITION_SIZE_PCT=0.005` + cap absoluto $100 vs mínimo Bybit 0.001 BTC (~$76). Trades manuais pequenos podem dar `ERROR: amount must be greater than 0.001`. Para FILLED real, ajustar `.env` (decisão do operador).
-3. **`PAPER_TRADING=false`** ativo. Em testnet é seguro. Modo Deus respeita hard-block de mainnet.
-4. **Office v2**: `USE_BUNDLE=false` → carrega `.jsx` via Babel em runtime. Editar sprites.jsx/scene.jsx reflete direto (sem `npm run build:office-v2`). Para produção, rebuildar o bundle.
-5. **Nada foi pushed** (10 commits ahead). Push é tarefa do `@devops`.
+### #10 — Memória ainda "ruim" (UX)
+- O painel **funciona** (`/api/memory/stats`, `/api/working-memory`, `/api/jean/health-report` respondem), mas está quase vazio no testnet (poucos trades resolvidos), o que dá sensação de "ruim".
+- **Plano**: enriquecer a página de Memória com 3 blocos claros e explicados: (1) **Memória Episódica** (já existe — win-rate por símbolo/ação + vetos do Batman), (2) **Memória de Trabalho** (`/api/working-memory` — hoje não exibida na página), (3) **Saúde do Vault / Jean Grey** (`/api/jean/health-report` — broken links, órfãs, dups). Melhorar o empty-state explicando o que cada memória é e quando se forma. Arquivos: `app.js` (`loadMemory`/`bootMemory` ~5095), `index.html` (`sec-memory`), `style.css`.
+
+### #11 — Office completo sem scroll na Visão Geral (PARCIAL)
+- **Feito**: zoom da cena agora width+height aware (`office_v2/index.html`, commit `0ea9a89`).
+- **Falta (fix completo)**: o iframe embute a **página inteira** do office (header + cena + roster + audit stream), por isso ainda pode rolar. Solução recomendada: **modo embed** — `/office-v2/?embed=1` que renderiza **só a cena** (esconde roster/audit/header extra via classe no `<body>` do office, controlada por query param em `office_v2/app.jsx`), e o dashboard passa a usar `src="/office-v2/?embed=1"` no `#office-v2-frame`. Ajustar `.overview-office-row #office-v2-frame` (CSS) com `aspect-ratio` da cena. **Precisa de iteração visual.** Brief: `docs/improvement-queue/IMP-office-full-noscroll.md`.
+
+### #12 — Backlog visual restante
+- **f — UX da página de Configurações** (`sec-settings` widget customizer + `sec-filters`): hoje só checkboxes crus. Agrupar por categoria, busca, presets, preview.
+- **d — Tema claro round 2 + i18n completa**: tema claro tem `body[data-theme="light"]` mas faltam regras p/ componentes novos (manual, melhorias, office, command center, sys-power). i18n: muitas strings ainda hardcoded fora do dicionário.
+
+### 🟣 Improvement Council → Telegram (do handoff anterior, ainda aberto)
+- Enviar propostas do Mekka ao Telegram para aprovar/reprovar (`telegram_alerter.py` outbound + `telegram_inbound.py` comandos `/melhorias`,`/aprovar`,`/reprovar`).
+
+### 🔵 Consumidor do pipeline de melhorias (fecha o ciclo #6)
+- Falta o **consumidor**: sessão do Claude Code (manual/headless `claude -p`/cron) que lê `docs/improvement-queue/`, roda o SDC do AIOS (@sm→@po→@dev→@qa→@devops) e registra o PR via `pr_tracker.set_pr(...)`. Aí o painel mostra o PR pronto para aprovação. **Nunca auto-merge em main; nunca tocar `settings.py`/kill switch.**
 
 ---
 
-## 5. 🛠️ Health check rápido
-```bash
-lsof -nP -iTCP:8787 -sTCP:LISTEN          # processo
-curl -s http://localhost:8787/api/env      # exchange/network/mode
-curl -s http://localhost:8787/api/improvements | python3 -m json.tool   # conselho Mekka
-curl -s http://localhost:8787/api/jean/health-report | python3 -m json.tool  # vault health
+## 4. ⚠️ Gotchas
+
+1. **Preview MCP instável neste ambiente**: o `Claude_Preview` cai a cada eval/navegação (largura travada ~474px, derruba conexão no resize). Verificações visuais ficaram limitadas — itens #11/#12/#10 precisam de checagem visual no navegador real do operador (hard refresh **Cmd+Shift+R** para pegar app.js/CSS novos).
+2. **Cap de notional $100** (`MAX_TOTAL_NOTIONAL_USD` no `.env`) vs default 2% → Batman rejeita trades normais. É **decisão de risco do operador** (não alterado). Para executar: reduzir tamanho/lev OU usar **Modo Deus** (testnet). Janela viável é apertada (mín. Bybit 0.001 BTC ~$77 vs cap $100).
+3. **lightweight-charts é v5** no vendor — qualquer código novo de chart deve usar os helpers `_lwcAddCandle/_lwcAddHistogram/_lwcAddLine` (não `addCandlestickSeries`).
+4. **`PAPER_TRADING=false`** em testnet (seguro). Modo Deus tem hard-block em mainnet; kill switch nunca é ignorável.
+5. **Office dev mode** (`USE_BUNDLE=false`): edita `.jsx`/index.html e reflete no reload, sem rebuild. Para produção, `npm run build:office-v2`.
+6. **Servidor**: mudanças em `.py` exigem restart; mudanças em estáticos (`app.js`/css/office) refletem no reload do navegador.
+7. **18 commits ahead** de origin, nada pushed.
+
+---
+
+## 5. 🛠️ Endpoints novos desta sessão
+```
+GET  /api/system/status            # {state,running,uptime_seconds,cycles,paper_trading,mode,last_error}
+POST /api/system/start
+POST /api/system/stop              # body {"confirm":"STOP"}
+POST /api/system/reboot            # body {"confirm":"REBOOT"}
+GET  /api/improvements/pr-status   # {rec_id:{dev_state,pr:{...}}}
+POST /api/improvements/approve-pr  # body {rec_id,pr_number,confirm:"APPROVE",merge?}
+POST /api/improvements/decision    # body {id,status,rec?}  ← agora aceita rec p/ enfileirar
 ```
 
 ---
 
 ## 6. 📝 Mensagem inicial sugerida para o próximo chat
-> Continuando o Mekka Trading no `main` @ `dca7131` (Bybit testnet LIVE). Leia `HANDOFF.md`. O time de melhoria contínua (Mekka + Galactus + Beast + Jean Grey) está pronto e a Central de Melhorias funciona em `/Melhorias`. Quero atacar os itens visuais restantes: **h** (heróis no office), **a** (trade mode ao lado do office), **b** (comandos na overview), **e** (tooltips "?" em todos os blocos), **f** (UX de configurações), **d** (modo claro + i18n). Depois Fase 3 (Iceman, cybersec, refactor server.py).
+> Continuando o Mekka Trading no `main` @ `cdb8cb9` (Bybit testnet LIVE). Leia `HANDOFF.md`. Bugs de aceitar/trade/gráfico-live já corrigidos. Quero terminar: **#11** office sem scroll (modo embed `?embed=1` mostrando só a cena), **#10** enriquecer a página de Memória (episódica + trabalho + vault), e **#12** UX de Configurações (f) + tema claro/i18n (d). O preview do ambiente está instável — valide visualmente no navegador. Mantenha commits entre cada implementação; nunca toque nos safety gates.
 
 ---
 **Fim do handoff.** Cada item restante tem arquivos e caminho identificados.
