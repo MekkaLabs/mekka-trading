@@ -5981,27 +5981,20 @@ class MekkaDashboardServer:
                 {"ok": False, "reason": "Parâmetros inválidos (id + status accepted|rejected|pending)."},
                 status=400,
             )
+        # The frontend sends the full recommendation object it already rendered
+        # (body.rec) so we can enqueue the dev brief WITHOUT re-running the
+        # (expensive) Mekka council on every accept — that was making the
+        # accept button hang/fail under load.
+        rec_payload = body.get("rec") if isinstance(body.get("rec"), dict) else None
         try:
             from src.agents.mekka import Mekka
-            mekka = Mekka()
-            # On accept, fetch the full recommendation so the brief can be
-            # enqueued for the dev-squad (docs/improvement-queue/IMP-<id>.md).
-            rec_dict: dict | None = None
             queued_path: str | None = None
-            if status == "accepted":
-                try:
-                    report = await mekka.run(period_days=7)
-                    for r in getattr(report, "recommendations", []) or []:
-                        rd = r.to_dict() if hasattr(r, "to_dict") else dict(r)
-                        if rec_id in (rd.get("id"), rd.get("rec_id")):
-                            rec_dict = rd
-                            break
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("could not load rec for enqueue: %s", exc)
-            ok = mekka.record_decision(rec_id, status, rec=rec_dict)
-            if status == "accepted" and rec_dict is not None:
+            ok = Mekka().record_decision(rec_id, status)
+            if status == "accepted" and rec_payload is not None:
                 from src.services import improvement_queue
-                queued_path = improvement_queue.enqueue_brief(rec_dict) or None
+                # ensure the id is present for the brief filename
+                rec_payload.setdefault("id", rec_id)
+                queued_path = improvement_queue.enqueue_brief(rec_payload) or None
             await MekkaRepository.log_event(
                 agent="Dashboard",
                 event="IMPROVEMENT_DECISION",

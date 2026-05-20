@@ -5792,20 +5792,26 @@ async function _imprApprovePr(recId, prNumber) {
 }
 
 async function _imprDecide(id, status) {
+  const rec = _imprData.find(r => r.id === id) || null;
   try {
     const res = await fetch('/api/improvements/decision', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, status }),
+      // Send the full rec so the backend can enqueue the dev brief without
+      // re-running the council (fast + reliable).
+      body: JSON.stringify({ id, status, rec }),
     });
     const data = await res.json();
     if (data.ok) {
-      const rec = _imprData.find(r => r.id === id);
       if (rec) rec.status = status;
       _imprRender();
       _imprLoad();  // refresh summary counts
+    } else {
+      alert('❌ Não foi possível registrar a decisão: ' + (data.reason || 'erro desconhecido'));
     }
-  } catch (_) { /* silent */ }
+  } catch (e) {
+    alert('❌ Falha de conexão ao registrar a decisão.');
+  }
 }
 
 function _bootImprovements() {
