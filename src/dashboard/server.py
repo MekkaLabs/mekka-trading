@@ -408,6 +408,7 @@ class MekkaDashboardServer:
         self._app.router.add_post("/api/trade/execute", self._handle_trade_execute)
         self._app.router.add_post("/api/trade/manual", self._handle_trade_manual)
         self._app.router.add_post("/api/trade/manual-analyze", self._handle_trade_manual_analyze)
+        self._app.router.add_get("/api/jean/health-report", self._handle_jean_health_report)
         self._app.router.add_get("/api/prefs", self._handle_prefs_get)
         self._app.router.add_post("/api/prefs", self._handle_prefs_set)
         self._app.router.add_post("/api/auth/login", self._handle_auth_login)
@@ -5876,6 +5877,23 @@ class MekkaDashboardServer:
                 "is_paper": _s.paper_trading,
                 "executed_at": executed_at,
             }, status=200)
+
+    async def _handle_jean_health_report(self, _: web.Request) -> web.Response:
+        """GET /api/jean/health-report — run Jean Grey's vault health scan.
+
+        Returns broken wikilinks, orphan notes and duplicate candidates so
+        the operator can keep the second brain tidy. Read-only (P2.1).
+        """
+        try:
+            from src.agents.jean_grey import JeanGrey
+            report = await JeanGrey().run(mode="health")
+            return web.json_response(report.to_dict(), status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("jean health-report failed: %s", exc, exc_info=True)
+            return web.json_response(
+                {"error": f"Falha ao gerar relatório do vault: {exc}"},
+                status=200,
+            )
 
     def _prune_snapshot_dir(self) -> None:
         """Keep only the most recent ``SNAPSHOT_RETENTION_MINUTES`` snapshots

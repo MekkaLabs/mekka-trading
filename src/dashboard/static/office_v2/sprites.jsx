@@ -655,6 +655,23 @@ const AGENTS = [
                a:"#38bdf8", A:"#0284c7", p:"#1c1c1c", P:"#000000" },
     overlay: { sprite: "VISOR", palette: { A:"#1c1c1c", a:"#1c1c1c", e:"#1c1c1c" } },
   },
+  {
+    // Jean Grey — Memory Master (P2.1, HANDOFF 2026-05-20). Phoenix red
+    // hair + green Marvel suit, fiery telekinetic aura (cape overlay).
+    // Read-only: curates the vault + long-term memory, never trades.
+    // NOTE: keep in sync with /static/agents-sprites.js (roster copy).
+    id: "jeangrey",
+    name: "JeanGrey",
+    role: "Memory Master",
+    layer: "L4",
+    color: "#f5c542",
+    summary: "Keeper of the second brain — vault health + long-term recall for every agent.",
+    task: "Scanning the vault — 3 broken links, 2 dup candidates flagged",
+    palette: { k:"#2a0a0a", h:"#e2571c", H:"#a33410", s:"#f0c8a0", S:"#c89870",
+               e:"#1a7a3a", m:"#7a3a2a", c:"#1f7a3f", C:"#0f4d24",
+               a:"#f5c542", A:"#d4a017", p:"#1f7a3f", P:"#0f4d24" },
+    overlay: { sprite: "CAPE", palette: { A:"#d94c1a", a:"#f5c542" } },
+  },
 ];
 
 // Visor overlay — Cyclops style horizontal red band across eyes
