@@ -471,6 +471,7 @@
    ── */
 (function () {
   var SCENE_NATURAL_W = 560 * 3; // 1680 — must match React SCENE_W × scale
+  var SCENE_NATURAL_H = 300 * 3; // 900  — must match React SCENE_H × scale
 
   function getAvailableWidth() {
     // Office now takes full width — no side panel to subtract.
@@ -485,15 +486,21 @@
     if (!wrap) return false;
     if (wrap.offsetWidth < 100) return false; // not rendered yet
 
-    var sceneW = SCENE_NATURAL_W; // always 1440, regardless of zoom
     var availW = getAvailableWidth();
     if (!availW) return false;
 
-    if (sceneW <= availW) {
-      wrap.style.zoom = ''; // fits — no scaling needed
-    } else {
-      wrap.style.zoom = availW / sceneW;
-    }
+    // Fit by BOTH width and height so the whole scene is visible without a
+    // scrollbar even inside a height-constrained embed (e.g. the Overview
+    // office/Trade-Mode row). availH = viewport minus the scene's top offset
+    // (the header) minus a small footer allowance.
+    var top = wrap.getBoundingClientRect().top;
+    var availH = Math.max(160, (window.innerHeight || 800) - top - 24);
+
+    var zw = availW / SCENE_NATURAL_W;
+    var zh = availH / SCENE_NATURAL_H;
+    var z = Math.min(zw, zh, 1); // never upscale beyond natural size
+
+    wrap.style.zoom = z >= 1 ? '' : z;
     return true;
   }
 
