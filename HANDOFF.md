@@ -82,6 +82,27 @@ Fluxo: **Beast** propõe → **Jean Grey** contextualiza → **Galactus** premor
 | **f** | Overhaul UX da página de Configurações | `sec-settings` (widget customizer) + `sec-filters`. Hoje só checkboxes crus. Agrupar por categoria, busca, presets, preview. |
 | **d** | Modo claro round 2 + i18n completa | Tema claro tem Layer 7 (`body[data-theme="light"]`) mas faltam regras p/ componentes novos (manual, melhorias, office). i18n: muitas strings ainda hardcoded fora do dict. |
 
+### 🟣 Improvement Council — próximo passo: aprovação via Telegram
+> Pedido do operador: as propostas/recomendações do conselho também podem ser
+> **enviadas ao Telegram para serem aprovadas/reprovadas** (espelhar a UX da
+> Central de Melhorias no Telegram).
+
+**Infra existente (já mapeada):**
+- `src/services/telegram_alerter.py` — **outbound**. `_post(text, parse_mode)` envia via Bot API `sendMessage`. Há padrão de alertas (`alert`, `trade_opened`, `wolverine_*`, `drawdown_alert`).
+- `src/services/telegram_inbound.py` — **inbound** via **long-polling** (`getUpdates`, NÃO webhook). `TelegramInboundPoller` despacha comandos de texto (`/status`, `/pause`, `/mode`, etc.). Controlado por `TELEGRAM_INBOUND_ENABLED` + `telegram_inbound_poll_interval_seconds`.
+- Já existe aprovação de trades via Telegram (Story 074, `TELEGRAM_TRADE_APPROVAL_ENABLED`).
+
+**Plano sugerido:**
+1. **Outbound** — método `improvement_proposed(rec)` no `TelegramAlerter` que envia cada recomendação pendente do Mekka (título, domínio, decisão, veredito do Galactus + hunger, mitigações, rationale). Disparar quando `Mekka.run()` produz recomendações `pending` (ou via `/melhorias` no Telegram).
+2. **Aprovação** — duas opções:
+   - **(a) Comandos de texto** (mais simples, casa com o inbound atual): `/melhorias` lista pendentes com IDs curtos; `/aprovar <id>` e `/reprovar <id>` chamam `Mekka().record_decision(id, status)`. Adicionar handlers no `telegram_inbound.py`.
+   - **(b) Inline buttons** (`reply_markup` + `callback_query`): UX melhor, mas o poller atual só trata `message`/text — precisaria estender `_poll_once` para `callback_query`. Mais trabalho.
+   - **Recomendado:** começar com (a), evoluir para (b).
+3. **Sync** — `record_decision` já persiste em `data/improvement_decisions.json`, então aprovar no Telegram reflete na página `/Melhorias` e vice-versa (mesma fonte). 
+4. **Dedup/segurança** — respeitar `chat_id` autorizado (como o inbound já faz) e a janela de dedup de alertas (gotcha #8 da sessão 1).
+
+**Arquivos**: `telegram_alerter.py` (outbound), `telegram_inbound.py` (comandos), `mekka.py` (`record_decision` já existe), settings de Telegram.
+
 ### 🔵 Fase 3 — Saúde do código (item i, j)
 - **i**: revisar todo o código p/ lixo/otimização/segurança (usar squads). Candidatos: `server.py` (~5k linhas), `nick_fury.py` (~2.2k).
 - **j**:
