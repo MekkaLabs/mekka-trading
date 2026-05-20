@@ -5901,11 +5901,23 @@ async function _mtAnalyze() {
           ${b.adjusted_leverage != null ? `<span>Lev. ajustada (Batman)</span><b>${b.adjusted_leverage}x</b>` : ''}
         </div>
         ${reasons ? `<ul class="mt-verdict-reasons">${reasons}</ul>` : ''}
-        ${data.kill_switch_active ? '<p class="trade-result-fail">🚨 Kill switch ATIVO — execução será bloqueada.</p>' : ''}
+        ${!b.is_executable && !data.kill_switch_active ? `
+          <div class="mt-verdict-hint">
+            <strong>Como executar mesmo assim:</strong>
+            <ul>
+              <li>Reduza o <b>Tamanho %</b> (e/ou a alavancagem) para caber nos limites de risco do Batman, ou</li>
+              <li>Ative o <b>🔱 Modo Deus</b> abaixo para forçar a ordem — permitido apenas em <b>paper/testnet</b> (nunca em mainnet).</li>
+            </ul>
+          </div>` : ''}
+        ${data.kill_switch_active ? '<p class="trade-result-fail">🚨 Kill switch ATIVO — execução será bloqueada. Libere o kill switch antes de operar.</p>' : ''}
       </div>
     `);
-    _mtLastAnalyzeOk = true;
-    if (execBtn) execBtn.disabled = false;
+    // Nudge the Modo Deus toggle when the trade is blocked (but not by kill switch).
+    const _forceWrap = document.getElementById('mt-force-execute')?.closest('label, .mt-force-wrap');
+    if (_forceWrap) _forceWrap.classList.toggle('mt-force-highlight', !b.is_executable && !data.kill_switch_active);
+    // A kill-switch block can never be forced — keep execute disabled in that case.
+    _mtLastAnalyzeOk = !data.kill_switch_active;
+    if (execBtn) execBtn.disabled = !!data.kill_switch_active;
   } catch (err) {
     _mtSetVerdict(`<p class="trade-result-fail">❌ Erro ao consultar: ${escapeHtml(String(err))}</p>`);
   } finally {

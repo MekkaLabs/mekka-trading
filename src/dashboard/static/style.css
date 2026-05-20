@@ -4269,6 +4269,28 @@ body[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: rgba(2,13
   font-size: 0.82rem;
   color: var(--text-2);
 }
+.mt-verdict-hint {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--r-md, 8px);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border: 1px solid var(--warn-border, var(--warn));
+  font-size: 0.82rem;
+  color: var(--text-1);
+}
+.mt-verdict-hint ul { margin: 6px 0 0 18px; }
+.mt-verdict-hint li { margin: 3px 0; }
+/* Pulse the Modo Deus toggle when a trade is blocked but forceable. */
+.mt-force-highlight {
+  outline: 2px solid var(--warn);
+  outline-offset: 2px;
+  border-radius: var(--r-md, 8px);
+  animation: mtForcePulse 1.4s ease-in-out infinite;
+}
+@keyframes mtForcePulse {
+  0%, 100% { outline-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+  50%      { outline-color: var(--warn); }
+}
 .page-nav-manual { color: var(--warn); }
 
 /* ===================================================================
