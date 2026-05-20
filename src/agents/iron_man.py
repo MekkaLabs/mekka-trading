@@ -471,7 +471,11 @@ class IronMan(BaseAgent[ExecutionResult]):
 
             cfg: dict = {
                 "enableRateLimit": True,
-                "options": {"defaultType": "swap"},
+                "options": {
+                    "defaultType": "swap",
+                    "recvWindow": 10_000,
+                    "adjustForTimeDifference": True,
+                },
             }
             if exchange_id == "bybit":
                 if not settings.bybit_api_key:
@@ -489,10 +493,18 @@ class IronMan(BaseAgent[ExecutionResult]):
                 cfg["secret"] = settings.binance_api_secret
 
             exchange = getattr(ccxt, exchange_id)(cfg)
-            await exchange.load_markets()
-            self._ccxt_exchange = exchange
-            self._log.info(f"[IronMan] Connected to {exchange_id} via CCXT")
-            return exchange
+            try:
+                if exchange_id in ("bybit", "binance") and not settings.is_mainnet:
+                    set_sandbox = getattr(exchange, "set_sandbox_mode", None)
+                    if callable(set_sandbox):
+                        set_sandbox(True)
+                await exchange.load_markets()
+                self._ccxt_exchange = exchange
+                self._log.info(f"[IronMan] Connected to {exchange_id} via CCXT")
+                return exchange
+            except Exception:
+                await exchange.close()
+                raise
 
     async def _place_ccxt_order(
         self,

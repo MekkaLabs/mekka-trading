@@ -20,6 +20,8 @@ class EquitySource(str, Enum):
     """Where the equity figure originated."""
 
     HYPERLIQUID = "HYPERLIQUID"           # live read from clearinghouseState
+    BYBIT = "BYBIT"                       # live read from Bybit via CCXT
+    BINANCE = "BINANCE"                   # live read from Binance via CCXT
     PAPER_FALLBACK = "PAPER_FALLBACK"     # synthetic, taken from settings.paper_equity_usd
     OVERRIDE = "OVERRIDE"                  # caller-supplied (CLI flag, test fixture)
 
@@ -37,14 +39,14 @@ class PositionSummary(BaseModel):
 
 class EquitySnapshot(BaseModel):
     """
-    Output produced by Portfolio Manager after polling Hyperliquid for
-    the operator's account state — or after falling back to a synthetic
+    Output produced by Portfolio Manager after polling the active exchange
+    for the operator's account state — or after falling back to a synthetic
     paper-trading equity figure.
 
     Attributes
     ----------
     timestamp                : When the snapshot was taken (UTC)
-    source                   : HYPERLIQUID / PAPER_FALLBACK / OVERRIDE
+    source                   : HYPERLIQUID / BYBIT / BINANCE / PAPER_FALLBACK / OVERRIDE
     is_paper                 : True when the snapshot is paper-only data
     equity_usd               : Total equity in USD (account value)
     available_balance_usd    : Free margin in USD (equity - margin_used)

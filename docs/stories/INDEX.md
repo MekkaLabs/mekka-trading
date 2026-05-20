@@ -4,7 +4,7 @@
 arquitetural. Stories abaixo são lidas em ordem numérica dentro de cada
 bloco.
 
-Última story entregue: **223** (BacktestRunner + CLI — orquestra o pipeline completo SignalLoader→Simulator→EquityCurve→MetricsEngine + relatório Markdown + `python -m src.backtest run`).
+Última story entregue: **251** (Cycle Checkpoint — persistência e retomada de `MarketAnalysis` (ProfessorX) + `TradingSignal` (Vision) por `cycle_id`, evitando recomputar etapas após crash/restart).
 Stories 047–124 entregues e registradas no CHANGELOG.md (versões 0.2.0–0.8.0).
 
 ---
@@ -361,6 +361,27 @@ POST /api/debate/run + GET /api/debate/history.
 - [241 — ConsensusWeighter: agrega votos ponderados confiança × round_multiplier, detecta dissidentes](story-241-consensus-weighter.md)
 - [242 — DebateVerdictLogger: persiste DebateVerdict no audit_log + fetch_recent para histórico](story-242-debate-verdict-logger.md)
 - [243 — Integração ProfessorX: settings.debate_enabled + MarketAnalysis.debate_verdict + POST /api/debate/run + GET /api/debate/history](story-243-debate-integration.md)
+
+## Milestone 40 — Agent Communication Upgrade (Stories 244-251)
+
+Fechamento do loop “sinais auxiliares → comportamento do Vision → enforcement do Batman” e
+upgrade de confiabilidade do pipeline (structured output + checkpoints), adicionando:
+
+- Integração explícita Flash→Vision (guidance comportamental) e debate_verdict→Vision.
+- Gate soft do Batman para divergência de momentum (redução automática de size).
+- Novo agente **Beast** (read-only) para auditoria contínua e recomendações de melhoria.
+- **DecisionMemory** e **CycleCheckpoint** persistindo artefatos de decisão no audit log.
+- **Vision structured output** (Pydantic-first) com fallback seguro para o path clássico.
+
+Última story entregue: **251** (Cycle Checkpoint).
+
+- [244 — Flash → Vision Integration](story-244-flash-vision-integration.md)
+- [245 — Debate Verdict → Vision Integration](story-245-debate-verdict-vision.md)
+- [247 — Batman Gate 3r: Flash Momentum Divergence](story-247-batman-gate-3r-flash-divergence.md)
+- [248 — Beast: Continuous System Improvement Agent](story-248-beast-agent.md)
+- [249 — Decision Memory](story-249-decision-memory.md)
+- [250 — Vision Structured Output](story-250-vision-structured-output.md)
+- [251 — Cycle Checkpoint](story-251-cycle-checkpoint.md)
 
 ## Milestone 34 — Monitoring & Alerting: DrawdownMonitor, PositionConcentrationAlerter, IntradayPnLTracker, FundingRateMonitor, AlertThrottleManager
 

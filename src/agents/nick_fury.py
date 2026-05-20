@@ -1179,7 +1179,7 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 signal = _signal251_cached
             elif _budget_skipped:
                 # Story 189 — CycleBudgetGuard: força HOLD sem LLM call
-                from src.models.signal import TradingSignal, TradeAction  # noqa: WPS433
+                from src.models.signal import TradingSignal  # noqa: WPS433
                 signal = TradingSignal(
                     action=TradeAction.HOLD,
                     confidence=0.0,

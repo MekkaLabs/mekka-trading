@@ -919,7 +919,9 @@ async function loadMarketDiagnostics() {
 function renderMetrics(overview) {
   currentOverview = overview;
   const cards = [
-    ['Mode', overview.mode],
+    ['Runtime', overview.mode],
+    ['Trading Mode', overview.trading_mode || '-'],
+    ['Exchange', overview.active_exchange || '-'],
     ['Network', overview.network],
     ['Signals (total)', overview.total_signals],
     ['Trades (total)', overview.total_trades],
@@ -2949,6 +2951,11 @@ async function _mkLoadTopBar() {
         ? `⚠️ ${activeBreakers}/${totalBreakers}`
         : `🟢 ${totalBreakers > 0 ? 'OK' : 'standby'}`;
       set('ftb-agents-val', agentLabel, activeBreakers > 0 ? 'negative' : '');
+
+      const tradingMode = String(ovRes.trading_mode || '—').toUpperCase();
+      const exchange = String(ovRes.active_exchange || '').toUpperCase();
+      const modeLabel = exchange ? `${tradingMode} · ${exchange}` : tradingMode;
+      set('ftb-mode-val', modeLabel);
     }
   } catch (_) {}
 

@@ -1,9 +1,9 @@
 """
 src/dashboard/positions_provider.py
 ===================================
-Read-only adapter that pulls open Hyperliquid positions for the dashboard
-``/api/positions`` endpoint. The caller decides whether to ask for live
-data (via the configured wallet) or to keep returning the stub shape.
+Read-only adapter that pulls open positions for the dashboard
+``/api/positions`` endpoint. In live mode it delegates to PortfolioManager,
+so the active exchange source stays consistent across the system.
 
 Why a separate module:
   - keeps `server.py` free of `hyperliquid` imports
@@ -30,7 +30,6 @@ Output contract (stable):
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -367,52 +366,40 @@ async def fetch_positions(
     if settings.paper_trading:
         return await _fetch_paper_positions(mark_prices=mark_prices)
 
-    address = (settings.hyperliquid_wallet_address or "").strip()
-    if not address:
-        return _stub_response("HYPERLIQUID_WALLET_ADDRESS not set.")
-
     try:
-        from hyperliquid.info import Info  # noqa: WPS433
-        from hyperliquid.utils import constants  # noqa: WPS433
-    except ImportError:
-        return _stub_response("hyperliquid SDK not installed.")
+        from src.agents.portfolio_manager import PortfolioManager  # noqa: WPS433
 
-    base_url = (
-        constants.MAINNET_API_URL
-        if settings.is_mainnet
-        else constants.TESTNET_API_URL
-    )
-
-    def _do_fetch() -> dict[str, Any]:
-        # Info()'s sync HTTP client is fine in a thread; reusing a single
-        # Info per call is cheap enough and avoids carrying state across
-        # the dashboard process.
-        info = Info(base_url, skip_ws=True)
-        return info.user_state(address) or {}
-
-    try:
-        user_state = await asyncio.wait_for(
-            asyncio.to_thread(_do_fetch), timeout=4.0
-        )
-    except asyncio.TimeoutError:
-        return _stub_response("Hyperliquid timed out.")
+        snapshot = await PortfolioManager().run()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("hyperliquid user_state failed: %s", exc)
-        return _stub_response(f"Hyperliquid error: {type(exc).__name__}")
+        logger.warning("portfolio snapshot failed: %s", exc)
+        return _stub_response(f"Portfolio snapshot error: {type(exc).__name__}")
 
-    items = map_user_state_to_positions(user_state)
+    items = [
+        {
+            "symbol": p.symbol,
+            "side": p.side.upper(),
+            "size": p.size,
+            "entry_price": p.entry_price,
+            "mark_price": p.entry_price,
+            "pnl_usd": p.unrealized_pnl_usd,
+            "leverage": p.leverage,
+            "liq_price": None,
+            "is_paper": snapshot.is_paper,
+        }
+        for p in snapshot.positions
+    ]
     if not items:
         return {
             "items": [],
             "count": 0,
-            "source": "hyperliquid",
+            "source": snapshot.source.value.lower(),
             "supported": True,
             "message": "No open positions.",
         }
     return {
         "items": items,
         "count": len(items),
-        "source": "hyperliquid",
+        "source": snapshot.source.value.lower(),
         "supported": True,
-        "message": None,
+        "message": snapshot.error,
     }

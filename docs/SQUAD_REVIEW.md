@@ -1,9 +1,15 @@
 # Mekka Trading — Squad Review Completo
-**Data:** 2026-05-12  
+**Data:** 2026-05-19  
 **Revisor:** Squad Interno (NickFury Coordinator + Batman Risk Gate + Deadpool Analytics)  
-**Versão:** Post-Story 044 · Pipeline: Foundation → Operator Control  
+**Versão:** Post-Story 251 · Pipeline: Foundation → Milestone 40 (Agent Communication Upgrade)  
 
 ---
+
+## Atualização (semanal) — 2026-05-19
+
+- Entregue **Monitoring & Alerting (Stories 213–218)** + **Backtesting Engine (Stories 219–223)**.
+- Entregue **Milestone 40 (Stories 244–251)**: Flash→Vision guidance, DebateVerdict→Vision, Batman gate 3r (redução de size em divergência), Beast (read-only), DecisionMemory, Vision structured output (Pydantic-first) e CycleCheckpoint.
+- Novo ADR: `docs/adr/ADR-003-llm-structured-output-first.md` (structured output first com fallback clássico).
 
 ## Índice
 1. [Visão Geral da Arquitetura](#1-visão-geral)

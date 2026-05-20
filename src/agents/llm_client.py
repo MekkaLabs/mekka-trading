@@ -135,7 +135,13 @@ class LLMClient:
             await self._openai_client.close()
             self._openai_client = None
         if self._anthropic_client is not None:
-            await self._anthropic_client.aclose()
+            close_fn = getattr(self._anthropic_client, "aclose", None)
+            if close_fn is None:
+                close_fn = getattr(self._anthropic_client, "close", None)
+            if close_fn is not None:
+                maybe_awaitable = close_fn()
+                if hasattr(maybe_awaitable, "__await__"):
+                    await maybe_awaitable
             self._anthropic_client = None
 
     # ── Public API ────────────────────────────────────────────────────────────

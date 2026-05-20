@@ -4,10 +4,10 @@ type: project
 status: ativo
 due: 2026-12-31
 owner: Gustavo
-sprint_focus: "Stories 126-136 (LangGraph, memory intelligence, adaptive routing, event bus)"
+sprint_focus: "Milestone 40 (Stories 244–251): Flash/Debate→Vision, Batman gate 3r, Beast, DecisionMemory, Vision structured output, CycleCheckpoint"
 tags: [project, mekka-trading]
 created: 2026-05-07
-updated: 2026-05-16
+updated: 2026-05-19
 ---
 
 # Projeto — Mekka Trading
@@ -16,12 +16,12 @@ updated: 2026-05-16
 
 Construir um sistema autônomo de trading paper-first, modular, observável e com governança de risco rígida. Multi-exchange (Hyperliquid, Bybit, Binance).
 
-## Estado Atual — 2026-05-16
+## Estado Atual — 2026-05-19
 
-- **Última story entregue:** `Story 136 — MekkaEventBus (pub/sub in-process)`
-- **Total stories entregues:** **136 stories** ✅
-- **Milestone:** `21 — Memory Intelligence + Adaptive Routing + Observability (Stories 132–136)`
-- **Mudanças do dia:** sem novas stories (apenas refresh de dashboard snapshot)
+- **Última story entregue:** `Story 251 — Cycle Checkpoint`
+- **Total stories entregues:** **251 stories** ✅
+- **Milestone:** `40 — Agent Communication Upgrade (Stories 244–251)`
+- **Mudanças do dia:** Milestone 40 entregue (Flash→Vision, DebateVerdict→Vision, Batman gate 3r, Beast, DecisionMemory, Vision structured output, CycleCheckpoint) + commit “chore: sync local changes”
 - **Modo padrão:** `PAPER_TRADING=True`
 - **Dashboard:** `http://localhost:8787` (WebSocket tempo real em todas as páginas)
 - **Gate absoluto:** Batman (gates 3a–3q) + Kill Switch
@@ -146,13 +146,10 @@ Construir um sistema autônomo de trading paper-first, modular, observável e co
 
 ## Roadmap Próximo (Stories 113+)
 
-- [x] Stories 113–136 — Milestones 26–29 ✅ (ver `docs/stories/INDEX.md`)
-- [ ] Story 137 — Teste do Milhão (checklist pré-capital real)
-- [ ] Story 138 — Circuit Breaker Matrix (RateWindowBreaker, StalePriceDetector, SpreadBreaker)
-- [ ] Story 139 — Degradation Matrix + chaos tests
-- [ ] Story 140 — DEGRADED_MODE formal (state machine NORMAL↔DEGRADED)
-- [ ] Story 141 — MarketSnapshot snapshot_id (SHA-256 no MarketAnalysis)
-- [ ] Story 142 — LLM cost metrics via EventBus
+- [x] Stories 113–223 — Milestones 26–35 ✅ (ver `docs/stories/INDEX.md`)
+- [x] Stories 244–251 — Milestone 40 ✅ (Agent Communication Upgrade)
+- [ ] Milestone 36 — Dashboard de Backtesting (Stories 224–228): endpoint JSON, painel, scheduler, comparison, Telegram report
+- [ ] Milestone 37 — Live Performance Tracking (Stories 229–233): performance real vs backtest + alertas de divergência
 
 ## Configurações-Chave (.env)
 

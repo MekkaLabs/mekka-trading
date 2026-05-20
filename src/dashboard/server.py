@@ -3282,13 +3282,17 @@ class MekkaDashboardServer:
             if cached:
                 return cached[1]
             raise
+        from src.config.runtime_mode import get_mode  # noqa: WPS433
+
         payload = {
             "overview": {
                 **overview,
                 "mode": settings.mode_label,
+                "trading_mode": get_mode(),
                 "paper_trading": settings.paper_trading,
                 "network": settings.hyperliquid_network,
                 "assets": settings.trading_assets,
+                "active_exchange": settings.active_exchange,
             }
         }
         if not include_tables:
@@ -5611,5 +5615,4 @@ def _build_global_alerts(
             }
         )
     return alerts
-
 

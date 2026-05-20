@@ -15,22 +15,35 @@ def pytest_configure(config):
 
     # Provide stub values for required fields — paper_trading=true means
     # these are never used for real orders, just needed for validation.
-    os.environ.setdefault("OPENAI_API_KEY", "sk-test-00000000000000000000000000000000")
-    os.environ.setdefault("HYPERLIQUID_PRIVATE_KEY", "0" * 64)
-    os.environ.setdefault("HYPERLIQUID_WALLET_ADDRESS", "0x0000000000000000000000000000000000000000")
-    os.environ.setdefault("HYPERLIQUID_NETWORK", "testnet")
-    os.environ.setdefault("PAPER_TRADING", "true")
-    os.environ.setdefault("CRYPTOPANIC_API_KEY", "")
+    os.environ["OPENAI_API_KEY"] = "sk-test-00000000000000000000000000000000"
+    os.environ["HYPERLIQUID_PRIVATE_KEY"] = "0" * 64
+    os.environ["HYPERLIQUID_WALLET_ADDRESS"] = "0x0000000000000000000000000000000000000000"
+    os.environ["HYPERLIQUID_NETWORK"] = "testnet"
+    os.environ["ACTIVE_EXCHANGE"] = "hyperliquid"
+    os.environ["PAPER_TRADING"] = "true"
+    os.environ["LIVE_TRADING_CONFIRMED"] = "false"
+    os.environ["MAX_POSITION_SIZE_PCT"] = "0.02"
+    os.environ["MAX_LEVERAGE"] = "5"
+    os.environ["MAX_DAILY_DRAWDOWN_PCT"] = "0.10"
+    os.environ["MAX_OPEN_POSITIONS"] = "3"
+    os.environ["MAX_TRADES_PER_DAY"] = "10"
+    os.environ["MAX_TOTAL_CAPITAL_PCT"] = "0.10"
+    os.environ["MAX_TOTAL_NOTIONAL_USD"] = "1000000"
+    os.environ["BYBIT_API_KEY"] = ""
+    os.environ["BYBIT_API_SECRET"] = ""
+    os.environ["BINANCE_API_KEY"] = ""
+    os.environ["BINANCE_API_SECRET"] = ""
+    os.environ["CRYPTOPANIC_API_KEY"] = ""
     # Force Telegram disabled by default so the suite never leaks into a
     # real bot when developers leave placeholder `.env` values in place
     # (TELEGRAM_BOT_TOKEN=your-telegram-bot-token-here is truthy and would
     # otherwise enable the alerter — see test_alert_disabled_returns_false).
     # Tests that need it on use monkeypatch to flip the flag for their scope.
-    os.environ.setdefault("TELEGRAM_BOT_TOKEN", "")
-    os.environ.setdefault("TELEGRAM_CHAT_ID", "")
+    os.environ["TELEGRAM_BOT_TOKEN"] = ""
+    os.environ["TELEGRAM_CHAT_ID"] = ""
     # Origin allowlist for the dashboard WS — kept empty in tests so the
     # extra-origins test exercises the in-memory monkeypatch path only.
-    os.environ.setdefault("DASHBOARD_ALLOWED_ORIGINS", "")
+    os.environ["DASHBOARD_ALLOWED_ORIGINS"] = ""
 
 
 @pytest.fixture(autouse=True)

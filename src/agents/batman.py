@@ -202,7 +202,6 @@ class Batman(BaseAgent[RiskApproval]):
                 reasons=reasons,
                 breached_limits=breached,
             )
-
         # ---------------------------------------------------------------
         # 3. Trade-count and concurrency breakers
         # ---------------------------------------------------------------
@@ -1378,7 +1377,11 @@ class Batman(BaseAgent[RiskApproval]):
         )
 
         self._log.info(
-            "[Batman] verdict=%s score=%.1f symbol=%s breached=%s",
+            "[Batman] verdict={} score={:.1f} symbol={} breached={}",
             verdict.value, _signal_quality_score, symbol, breached or "none",
         )
         return approval
+
+
+# Backward-compatible alias kept for older tests and call sites.
+BatmanAgent = Batman

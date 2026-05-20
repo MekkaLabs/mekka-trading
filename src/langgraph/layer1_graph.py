@@ -46,7 +46,13 @@ from typing import TYPE_CHECKING, Annotated, Any, Optional
 from loguru import logger
 from typing_extensions import TypedDict
 
-from langgraph.graph import END, START, StateGraph
+try:
+    from langgraph.graph import END, START, StateGraph
+    _LANGGRAPH_AVAILABLE = True
+except ImportError:
+    END = START = None  # type: ignore[assignment]
+    StateGraph = Any  # type: ignore[assignment]
+    _LANGGRAPH_AVAILABLE = False
 
 if TYPE_CHECKING:
     from src.agents.professor_x import ProfessorX
@@ -190,6 +196,10 @@ def build_layer1_graph(professor: "ProfessorX") -> StateGraph:
         builder (StateGraph não compilado). O chamador é responsável por compilar:
             graph = build_layer1_graph(professor).compile(checkpointer=saver)
     """
+    if not _LANGGRAPH_AVAILABLE:
+        raise RuntimeError(
+            "LangGraph is not installed. Install 'langgraph' to use the Layer 1 subgraph."
+        )
 
     # ------------------------------------------------------------------ #
     # Nó 1 — Superman (serial, obrigatório)                               #

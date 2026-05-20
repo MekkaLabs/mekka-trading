@@ -150,7 +150,14 @@ class Superman(BaseAgent[MarketData]):
         """Return CCXT constructor kwargs for a given exchange id."""
         import ccxt.async_support as ccxt  # noqa: WPS433
 
-        base_cfg: dict = {"enableRateLimit": True, "options": {"defaultType": "swap"}}
+        base_cfg: dict = {
+            "enableRateLimit": True,
+            "options": {
+                "defaultType": "swap",
+                "recvWindow": 10_000,
+                "adjustForTimeDifference": True,
+            },
+        }
 
         if ex_id == "hyperliquid":
             base_cfg["options"]["sandboxMode"] = not settings.is_mainnet
@@ -186,16 +193,24 @@ class Superman(BaseAgent[MarketData]):
             try:
                 cfg = self._build_ccxt_config(ex_id)
                 exchange = getattr(ccxt, ex_id)(cfg)
-                await exchange.load_markets()
-                self._exchange = exchange
-                self._exchange_id = ex_id
-                if ex_id == primary:
-                    self._log.info(f"[Superman] Connected to {ex_id} via CCXT (primary)")
-                else:
-                    self._log.warning(
-                        f"[Superman] Primary '{primary}' failed — connected to {ex_id} (fallback)"
-                    )
-                return exchange
+                try:
+                    if ex_id in ("bybit", "binance") and not settings.is_mainnet:
+                        set_sandbox = getattr(exchange, "set_sandbox_mode", None)
+                        if callable(set_sandbox):
+                            set_sandbox(True)
+                    await exchange.load_markets()
+                    self._exchange = exchange
+                    self._exchange_id = ex_id
+                    if ex_id == primary:
+                        self._log.info(f"[Superman] Connected to {ex_id} via CCXT (primary)")
+                    else:
+                        self._log.warning(
+                            f"[Superman] Primary '{primary}' failed — connected to {ex_id} (fallback)"
+                        )
+                    return exchange
+                except Exception:
+                    await exchange.close()
+                    raise
             except Exception as exc:
                 self._log.warning(f"[Superman] {ex_id} CCXT unavailable: {exc}")
                 continue
