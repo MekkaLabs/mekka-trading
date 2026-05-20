@@ -29,6 +29,7 @@ Design rules (mirrors Beast):
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -54,6 +55,33 @@ _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 # Notes that are expected to have no/many backlinks and should never be
 # flagged as orphans (indexes, maps-of-content, home, readme, daily notes).
 _ORPHAN_EXEMPT_PATTERNS = ("moc", "index", "home", "readme", "_")
+
+# Source folders whose wikilinks are intentional placeholders (templates
+# ship with sample links like [[Agente X]]). Broken-link reporting skips
+# notes whose vault-relative path starts with any of these.
+_PLACEHOLDER_SOURCE_PREFIXES = ("70 - templates",)
+
+# Link targets that are obvious placeholders/template tokens, never real
+# notes. Matched after normalization (lower-case). Anything containing a
+# mustache token ({{…}}) or made only of dots/ellipsis is also treated as
+# a placeholder.
+_PLACEHOLDER_TARGETS = {
+    "adr-nnn - ...", "adr-nnn", "adr-yyy", "agente x", "squad y",
+    "...", "…", "{{date}}", "{{title}}",
+}
+
+def _is_placeholder_target(target: str) -> bool:
+    """True when a normalized link target is a template placeholder."""
+    if not target:
+        return True
+    if target in _PLACEHOLDER_TARGETS:
+        return True
+    if "{{" in target or "}}" in target:
+        return True
+    # all dots / ellipsis (e.g. "...", "…", "....")
+    if set(target) <= {".", "…", " "}:
+        return True
+    return False
 
 # Duplicate detection thresholds.
 _TITLE_SIM_THRESHOLD = 0.82
@@ -105,12 +133,14 @@ class VaultHealthReport:
     total_notes: int
     total_links: int
     broken_links: list[BrokenLink] = field(default_factory=list)
+    folder_links: list[BrokenLink] = field(default_factory=list)
     orphans: list[OrphanNote] = field(default_factory=list)
     duplicates: list[DuplicateCandidate] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     @property
     def is_healthy(self) -> bool:
+        # Folder links are informational (navigation aids), not defects.
         return not self.broken_links and not self.duplicates
 
     def to_dict(self) -> dict:
@@ -123,6 +153,10 @@ class VaultHealthReport:
             "broken_links": [
                 {"source": b.source_note, "target": b.target, "raw": b.raw}
                 for b in self.broken_links
+            ],
+            "folder_links": [
+                {"source": b.source_note, "target": b.target, "raw": b.raw}
+                for b in self.folder_links
             ],
             "orphans": [{"note": o.note, "title": o.title} for o in self.orphans],
             "duplicates": [
@@ -139,6 +173,7 @@ class VaultHealthReport:
             f"🔥 *Jean Grey — Vault Health* ({status})",
             f"📓 {self.total_notes} notas · {self.total_links} links",
             f"🔗 {len(self.broken_links)} links quebrados",
+            f"📁 {len(self.folder_links)} links de pasta (navegação)",
             f"🧩 {len(self.duplicates)} possíveis duplicatas",
             f"🌫 {len(self.orphans)} notas órfãs",
         ]
@@ -208,7 +243,7 @@ class JeanGrey(BaseAgent[VaultHealthReport]):
 
         # Each sub-analysis is independently guarded.
         try:
-            report.broken_links = self._find_broken_links(notes)
+            report.broken_links, report.folder_links = self._find_broken_links(notes)
         except Exception as exc:  # noqa: BLE001
             self._log.warning(f"[JeanGrey] broken-link scan failed: {exc}")
             report.errors.append(f"broken_links: {exc}")
@@ -265,26 +300,65 @@ class JeanGrey(BaseAgent[VaultHealthReport]):
         """Normalize a wikilink target or note title for comparison.
 
         Strips alias (``|``), heading (``#``) and any folder prefix, then
-        lower-cases. ``[[20 - Areas/Iron Man|Tony]]`` → ``iron man``.
+        applies Unicode NFC + lower-case. ``[[20 - Areas/Iron Man|Tony]]``
+        → ``iron man``.
+
+        The NFC step is critical on macOS: the filesystem returns note
+        names in NFD (decomposed: "operações") while wikilinks
+        typed in a note are NFC (composed: "operações"). Without
+        normalization the two byte sequences differ and every accented
+        note title looks like a broken link (the dogfooding bug that this
+        scan surfaced on 2026-05-20).
         """
         target = raw.split("|", 1)[0]      # drop alias
         target = target.split("#", 1)[0]   # drop heading anchor
         target = target.strip().rstrip("/")
         if "/" in target:
             target = target.rsplit("/", 1)[-1]
-        return target.strip().lower()
+        return unicodedata.normalize("NFC", target.strip()).lower()
 
-    def _find_broken_links(self, notes: dict[str, dict]) -> list[BrokenLink]:
-        # Build the set of resolvable note titles (normalized).
+    def _find_broken_links(
+        self, notes: dict[str, dict]
+    ) -> tuple[list[BrokenLink], list[BrokenLink]]:
+        """Return ``(broken_links, folder_links)``.
+
+        - Placeholder links (template sample tokens, ``{{…}}``, ``...``) and
+          links inside ``70 - Templates/`` are skipped entirely.
+        - Links whose target matches an existing folder name are classified
+          as *folder links* (navigation aids), not defects.
+        - Everything else that doesn't resolve to a note title is *broken*.
+        """
         known = {n["title_norm"] for n in notes.values()}
+        folder_names = self._collect_folder_names()
         broken: list[BrokenLink] = []
+        folders: list[BrokenLink] = []
         for rel, n in notes.items():
+            rel_norm = unicodedata.normalize("NFC", rel).lower()
+            from_template = any(
+                rel_norm.startswith(p) for p in _PLACEHOLDER_SOURCE_PREFIXES
+            )
             for tgt in n["links"]:
-                if tgt and tgt not in known:
-                    broken.append(BrokenLink(source_note=rel, target=tgt, raw=tgt))
-        # Stable, useful ordering: by source note then target.
+                if not tgt or tgt in known:
+                    continue
+                if from_template or _is_placeholder_target(tgt):
+                    continue  # intentional placeholder — not a defect
+                if tgt in folder_names:
+                    folders.append(BrokenLink(source_note=rel, target=tgt, raw=tgt))
+                    continue
+                broken.append(BrokenLink(source_note=rel, target=tgt, raw=tgt))
         broken.sort(key=lambda b: (b.source_note, b.target))
-        return broken
+        folders.sort(key=lambda b: (b.source_note, b.target))
+        return broken, folders
+
+    def _collect_folder_names(self) -> set[str]:
+        """Normalized names of every folder in the vault (for folder-link
+        classification). Both the bare folder name and its numeric-prefixed
+        form resolve, e.g. ``20 - Areas`` and ``decisoes tecnicas``."""
+        names: set[str] = set()
+        for p in self.vault_dir.rglob("*"):
+            if p.is_dir():
+                names.add(unicodedata.normalize("NFC", p.name).strip().lower())
+        return names
 
     def _find_orphans(self, notes: dict[str, dict]) -> list[OrphanNote]:
         # A note is referenced if any other note links to its title.
@@ -294,6 +368,12 @@ class JeanGrey(BaseAgent[VaultHealthReport]):
         orphans: list[OrphanNote] = []
         for rel, n in notes.items():
             title_norm = n["title_norm"]
+            rel_norm = unicodedata.normalize("NFC", rel).lower()
+            # Templates and daily notes are intentionally unlinked.
+            if any(rel_norm.startswith(p) for p in _PLACEHOLDER_SOURCE_PREFIXES):
+                continue
+            if rel_norm.startswith("60 - daily"):
+                continue
             if any(p in title_norm for p in _ORPHAN_EXEMPT_PATTERNS):
                 continue
             if title_norm not in referenced:
@@ -302,10 +382,28 @@ class JeanGrey(BaseAgent[VaultHealthReport]):
         return orphans
 
     def _find_duplicates(self, notes: dict[str, dict]) -> list[DuplicateCandidate]:
+        # Structural notes (folder/index notes, daily logs, templates) are
+        # intentionally similar to each other — exclude them so dup detection
+        # surfaces only genuine content duplication.
+        folder_names = self._collect_folder_names()
+
+        def _is_structural(rel: str, title_norm: str) -> bool:
+            rel_norm = unicodedata.normalize("NFC", rel).lower()
+            if rel_norm.startswith(("60 - daily", "70 - templates")):
+                return True
+            # Folder/index note: basename matches its own folder name, or a
+            # known folder name, or carries an index-style title.
+            if title_norm in folder_names:
+                return True
+            if any(p in title_norm for p in ("index", "moc")):
+                return True
+            return False
+
         # Pre-truncate bodies once so the O(n²) loop doesn't re-slice.
         items = [
             (rel, n["title_norm"], n["body"][:_BODY_WINDOW])
             for rel, n in notes.items()
+            if not _is_structural(rel, n["title_norm"])
         ]
         dups: list[DuplicateCandidate] = []
         sm = SequenceMatcher(autojunk=False)
