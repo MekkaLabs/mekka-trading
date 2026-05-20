@@ -4180,6 +4180,38 @@ body[data-theme="light"] .bg-grid { opacity: 0.35; }
 body[data-theme="light"] ::-webkit-scrollbar-thumb       { background: rgba(2,132,199,0.30); }
 body[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: rgba(2,132,199,0.55); }
 
+/* --- Light theme: flip the hardcoded dark surfaces (chrome that did NOT use
+   design tokens — that's why the sidebar/menus stayed dark in Modo Claro). --- */
+body[data-theme="light"] .sidebar {
+  background: rgba(255,255,255,0.95);
+  box-shadow: 4px 0 28px rgba(15,23,42,0.08);
+}
+body[data-theme="light"] .financial-topbar,
+body[data-theme="light"] .topbar {
+  background: rgba(255,255,255,0.92);
+}
+body[data-theme="light"] .timeline,
+body[data-theme="light"] .symbol-timeline,
+body[data-theme="light"] .anomaly-console,
+body[data-theme="light"] .office-hero-bar,
+body[data-theme="light"] .live-toolbar,
+body[data-theme="light"] .live-positions-wrap,
+body[data-theme="light"] .live-equity-strip,
+body[data-theme="light"] .cmd-center {
+  background: var(--bg-3);
+}
+body[data-theme="light"] .modal-card { background: #ffffff; }
+body[data-theme="light"] .help-dot::after {
+  background: rgba(15,23,42,0.94);
+  color: #fff;
+}
+/* Nav text legibility on the light sidebar */
+body[data-theme="light"] .nav-group-label { color: var(--muted); }
+body[data-theme="light"] .page-nav-btn { color: var(--text-2); }
+body[data-theme="light"] .page-nav-btn:hover { background: rgba(2,132,199,0.08); color: var(--text); }
+body[data-theme="light"] .page-nav-btn.active { background: rgba(2,132,199,0.12); color: var(--accent); }
+body[data-theme="light"] .page-nav-sub a { color: var(--muted); }
+
 /* ===================================================================
    MANUAL TRADING PANEL (P1.1 — HANDOFF 2026-05-20)
    =================================================================== */
