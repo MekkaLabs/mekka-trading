@@ -202,6 +202,32 @@ const HELP_TIPS = {
   'Iron Man Executions': 'Execuções enviadas pelo Iron Man com status e notional.',
   'Hero Audit Stream': 'Trilha de auditoria bruta dos eventos dos agentes para forense.',
   'Mini Manual Operacional': 'Guia rápido de leitura para reduzir tempo de onboarding e resposta a incidentes.',
+  // ── Painéis adicionais (item e — cobertura total + responsável) ──
+  'Dashboard Internals': 'Responsável: Nick Fury. Métricas internas do dashboard (latências, conexões, cache) para diagnóstico operacional.',
+  'Equity & PnL': 'Responsável: Portfolio Manager. Patrimônio disponível e lucro/prejuízo agregado da conta.',
+  'Equity Curve': 'Responsável: Portfolio Manager. Evolução do patrimônio ao longo do tempo.',
+  'Kill Switch': 'Responsável: Batman. Parada de emergência — bloqueia toda nova execução até ser liberada. Nunca é ignorável.',
+  'Live Risk Panel': 'Responsável: Batman. Estado de risco em tempo real: exposição, drawdown e gates ativos.',
+  'Open Positions': 'Responsável: Cyclops. Posições abertas monitoradas (stop loss / take profit) em tempo real.',
+  'Trades Execution Timeline': 'Responsável: Iron Man. Linha do tempo das ordens executadas e seus status.',
+  '⚙️ Personalizar Dashboard': 'Responsável: operador. Liga/desliga widgets e ajusta preferências de exibição.',
+  '⚡ Funding Rates': 'Responsável: Black Panther. Taxas de funding dos perpétuos — sinal de pressão long/short.',
+  '⚡ Modos de Trading': 'Responsável: operador. Ativa perfis (Super Agressivo, Altcoins) que alteram parâmetros do pipeline.',
+  '⚡ Performance Rolling': 'Responsável: Beast. Métricas de performance em janela móvel (win rate, expectancy).',
+  '✋ Operações Manuais': 'Responsável: operador + Batman (gate). Monte uma ordem manual; Batman valida o risco antes da execução.',
+  '🎯 Concentração de Risco por Símbolo': 'Responsável: Batman. Distribuição da exposição por ativo para evitar concentração.',
+  '🏆 Symbol Performance Leaderboard': 'Responsável: Beast. Ranking de desempenho por símbolo.',
+  '📅 P&L Diário': 'Responsável: Portfolio Manager. Resultado por dia para acompanhar consistência.',
+  '📈 Métricas do Backtest': 'Responsável: motor de backtest. Estatísticas do último backtest (retorno, Sharpe, drawdown).',
+  '📉 Equity Curve — Backtest': 'Responsável: motor de backtest. Curva de patrimônio simulada do backtest.',
+  '📊 Backtesting — Configurar Run': 'Responsável: operador. Define símbolo, período e parâmetros de um backtest.',
+  '📊 Resultado do Dia': 'Responsável: Portfolio Manager. Resumo simplificado do dia para leitura rápida.',
+  '🔣 Performance por Símbolo': 'Responsável: Beast. Desempenho detalhado por ativo.',
+  '🛠️ Central de Melhorias Contínuas': 'Responsável: Mekka (com Beast, Galactus e Jean Grey). Propostas de melhoria para aprovar/reprovar e enviar ao dev.',
+  '🦇 Batman Verdicts Timeline': 'Responsável: Batman. Histórico de vereditos de risco (aprovado/reduzido/rejeitado/kill switch).',
+  '🧠 Debate Multiagente': 'Responsável: Professor X. Síntese de perspectivas divergentes dos agentes de análise.',
+  '🧠 Episodic Memory — O que os Agentes Aprenderam': 'Responsável: Jean Grey / DecisionMemory. Histórico de trades resolvidos que ajusta decisões futuras.',
+  '🧪 Histórico de Backtests': 'Responsável: motor de backtest. Backtests anteriores para comparação.',
 };
 
 const SPRITE_PATTERN = [
@@ -5088,6 +5114,9 @@ function _mkBootDashboardV2() {
   try { _bootSystemPower(); } catch (e) { console.error('[v2] _bootSystemPower failed:', e); }
   // Global WS — real-time topbar + positions across all pages
   try { _bootGlobalWs(); } catch (e) { console.error('[v2] _bootGlobalWs failed:', e); }
+  // Item e — (re)apply help tooltips so panels added after the initial pass
+  // (manual trade, melhorias, command center, etc.) also get a "?" dot.
+  try { enhanceTitlesWithHelp(); } catch (e) { console.error('[v2] enhanceTitlesWithHelp failed:', e); }
 }
 
 // ── Story 064 — Episodic Memory Panel ────────────────────────────────────────
