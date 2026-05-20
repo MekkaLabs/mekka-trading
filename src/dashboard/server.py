@@ -407,6 +407,7 @@ class MekkaDashboardServer:
         self._app.router.add_post("/api/trade/analyze", self._handle_trade_analyze)
         self._app.router.add_post("/api/trade/execute", self._handle_trade_execute)
         self._app.router.add_post("/api/trade/manual", self._handle_trade_manual)
+        self._app.router.add_post("/api/trade/manual-analyze", self._handle_trade_manual_analyze)
         self._app.router.add_get("/api/prefs", self._handle_prefs_get)
         self._app.router.add_post("/api/prefs", self._handle_prefs_set)
         self._app.router.add_post("/api/auth/login", self._handle_auth_login)
@@ -5458,10 +5459,209 @@ class MekkaDashboardServer:
             "executed_at": executed_at,
         }, status=200)
 
-    async def _handle_trade_manual(self, request: web.Request) -> web.Response:
-        """POST /api/trade/manual — submete ordem manual diretamente (sem analyze step).
+    # ------------------------------------------------------------------
+    # Manual trading (P1.1 — HANDOFF 2026-05-20)
+    #
+    # The operator can request a trade with explicit parameters (symbol,
+    # side, size, leverage, SL%, TP%, entry). Unlike /api/trade/analyze,
+    # the signal originates from the OPERATOR, not Vision — but it STILL
+    # flows through Batman → IronMan exactly like every other execution.
+    # This honours the inviolable rule in CLAUDE.md:
+    #   "NUNCA implemente lógica que bypasse Batman antes de IronMan"
+    #   "NUNCA coloque ordens diretamente — toda execução passa por IronMan"
+    # The previous _handle_trade_manual stub returned a fake order_id
+    # without touching Batman or IronMan; that bypass is removed here.
+    # ------------------------------------------------------------------
+
+    def _build_manual_signal(self, body: dict):
+        """Translate operator params into a validated TradingSignal.
+
+        Returns a tuple ``(signal, entry_price, meta)``. Raises ``ValueError``
+        with an operator-readable message on invalid input.
+
+        Body fields: symbol, side(LONG|SHORT), size_pct(%), leverage,
+        sl_pct(%), tp_pct(%), entry_price(optional → market mark price).
+        """
+        from src.models.signal import TradingSignal, TradeAction
+
+        symbol = str(body.get("symbol") or "BTC").strip().upper()
+        side   = str(body.get("side") or "LONG").strip().upper()
+        if side not in ("LONG", "SHORT"):
+            raise ValueError("side inválido (use LONG ou SHORT)")
+
+        try:
+            size_pct_in = float(body.get("size_pct") or 0)
+            leverage    = int(body.get("leverage") or 0)
+            sl_pct      = float(body.get("sl_pct") or 0)
+            tp_pct      = float(body.get("tp_pct") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Parâmetros numéricos inválidos.")
+
+        # size_pct arrives as a percentage (e.g. 2 = 2%). Convert to the
+        # fraction TradingSignal expects, and clamp to the model's 10% cap.
+        if not (0.1 <= size_pct_in <= 10):
+            raise ValueError("size_pct fora do range permitido (0.1%–10%).")
+        size_frac = round(size_pct_in / 100.0, 4)
+
+        if not (1 <= leverage <= 50):
+            raise ValueError("leverage fora do range (1–50).")
+        if not (0.1 <= sl_pct <= 50):
+            raise ValueError("SL% fora do range (0.1–50).")
+        if not (0.1 <= tp_pct <= 100):
+            raise ValueError("TP% fora do range (0.1–100).")
+
+        # Resolve entry price — explicit value or current mark price.
+        entry_in = body.get("entry_price")
+        if entry_in not in (None, "", 0, "0"):
+            try:
+                entry_price = float(entry_in)
+            except (TypeError, ValueError):
+                raise ValueError("entry_price inválido.")
+        else:
+            entry_price = float((self._mark_prices or {}).get(symbol) or 0.0)
+        if entry_price <= 0:
+            raise ValueError(
+                f"Sem preço de entrada para {symbol}. Informe um entry_price "
+                "manual (o feed de preço ainda não tem cotação para este ativo)."
+            )
+
+        # Derive absolute SL/TP from percentages + side. The model validator
+        # enforces LONG: SL < entry < TP and SHORT: TP < entry < SL.
+        if side == "LONG":
+            stop_loss   = round(entry_price * (1 - sl_pct / 100.0), 6)
+            take_profit = round(entry_price * (1 + tp_pct / 100.0), 6)
+            action = TradeAction.LONG
+        else:
+            stop_loss   = round(entry_price * (1 + sl_pct / 100.0), 6)
+            take_profit = round(entry_price * (1 - tp_pct / 100.0), 6)
+            action = TradeAction.SHORT
+
+        signal = TradingSignal(
+            symbol=symbol,
+            action=action,
+            confidence=1.0,  # operator conviction — manual override
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            size_pct=size_frac,
+            leverage=leverage,
+            reasoning="Ordem manual do operador (dashboard).",
+        )
+        meta = {
+            "size_pct_input": size_pct_in,
+            "sl_pct": sl_pct,
+            "tp_pct": tp_pct,
+            "entry_source": "manual" if entry_in not in (None, "", 0, "0") else "mark_price",
+        }
+        return signal, entry_price, meta
+
+    async def _manual_equity_usd(self) -> float:
+        """Best-effort equity lookup shared by manual analyze + execute."""
+        from src.config.settings import settings as _s
+        try:
+            summary = await MekkaRepository.get_pnl_summary(window_days=1)
+            eq = float(summary["window"].get("latest_equity_usd") or 0.0)
+            if eq > 0:
+                return eq
+        except Exception:
+            pass
+        return float(getattr(_s, "paper_equity_usd", 0.0) or 0.0) if _s.paper_trading else 0.0
+
+    async def _handle_trade_manual_analyze(self, request: web.Request) -> web.Response:
+        """POST /api/trade/manual-analyze — "pedir parecer dos robôs".
+
+        Runs the operator's parameters through Batman (risk gate) WITHOUT
+        executing. Returns the verdict, reasons, adjusted size/leverage,
+        available equity and the derived SL/TP so the operator can decide.
 
         Body: { symbol, side, size_pct, leverage, sl_pct, tp_pct, entry_price? }
+        """
+        from src.config.settings import settings as _s
+        from src.agents.batman import is_kill_switch_active
+
+        generated_at = datetime.now(timezone.utc).isoformat()
+        body = await self._safe_json_body(request) or {}
+
+        try:
+            signal, entry_price, meta = self._build_manual_signal(body)
+        except ValueError as exc:
+            return web.json_response({
+                "ok": False,
+                "verdict": "INVALID",
+                "reason": str(exc),
+                "generated_at": generated_at,
+            }, status=400)
+
+        equity_usd = await self._manual_equity_usd()
+        ks_active = is_kill_switch_active()
+
+        risk_usd = round(
+            equity_usd * signal.size_pct * abs(signal.entry_price - signal.stop_loss) / signal.entry_price,
+            2,
+        ) if signal.entry_price else 0.0
+        rr = round(signal.risk_reward_ratio, 2) if hasattr(signal, "risk_reward_ratio") else None
+
+        verdict_payload = {
+            "ok": True,
+            "kill_switch_active": ks_active,
+            "equity_usd": round(equity_usd, 2),
+            "signal": {
+                "symbol": signal.symbol,
+                "side": signal.action.value.upper(),
+                "entry_price": signal.entry_price,
+                "stop_loss": signal.stop_loss,
+                "take_profit": signal.take_profit,
+                "size_pct": signal.size_pct,
+                "leverage": signal.leverage,
+                "entry_source": meta["entry_source"],
+                "risk_usd": risk_usd,
+                "risk_reward": rr,
+            },
+            "generated_at": generated_at,
+        }
+
+        # Batman parecer (advisory — no execution here).
+        try:
+            from src.agents.batman import Batman
+            batman = Batman()
+            approval = await batman.run(signal=signal, equity_usd=equity_usd)
+            verdict_payload["batman"] = {
+                "verdict": approval.verdict.value,
+                "is_executable": approval.is_executable,
+                "reasons": approval.reasons,
+                "adjusted_size_pct": approval.adjusted_size_pct,
+                "adjusted_leverage": approval.adjusted_leverage,
+            }
+        except Exception as exc:
+            logger.warning("manual_analyze Batman call failed: %s", exc)
+            verdict_payload["batman"] = {
+                "verdict": "ERROR",
+                "is_executable": False,
+                "reasons": [f"Falha ao consultar Batman: {exc}"],
+            }
+
+        await MekkaRepository.log_event(
+            agent="Dashboard",
+            event="MANUAL_TRADE_ANALYZED",
+            severity="INFO",
+            message=(
+                f"Parecer manual: {signal.action.value.upper()} {signal.symbol} "
+                f"verdict={verdict_payload['batman'].get('verdict')}"
+            ),
+            payload=verdict_payload,
+        )
+        return web.json_response(verdict_payload, status=200)
+
+    async def _handle_trade_manual(self, request: web.Request) -> web.Response:
+        """POST /api/trade/manual — execute an operator-defined trade.
+
+        Body: { symbol, side, size_pct, leverage, sl_pct, tp_pct,
+                entry_price?, confirmed, force_execute? }
+
+        Flows through Batman → IronMan exactly like /api/trade/execute. The
+        force_execute escape hatch is honoured ONLY in paper mode or on a
+        testnet (never against mainnet/live money). Kill switch is never
+        bypassable.
         """
         from src.config.settings import settings as _s
         from src.agents.batman import is_kill_switch_active
@@ -5469,40 +5669,213 @@ class MekkaDashboardServer:
         executed_at = datetime.now(timezone.utc).isoformat()
         body = await self._safe_json_body(request) or {}
 
-        symbol   = str(body.get("symbol") or "BTC").strip().upper()
-        side     = str(body.get("side") or "LONG").strip().upper()
-        size_pct = float(body.get("size_pct") or 2.0)
-        leverage = int(body.get("leverage") or 5)
-        sl_pct   = float(body.get("sl_pct") or 2.0)
-        tp_pct   = float(body.get("tp_pct") or 4.0)
-        entry_px = body.get("entry_price")
+        # Hard gate: confirmed must be exactly True (boolean).
+        if body.get("confirmed") is not True:
+            return web.json_response({
+                "status": "rejected",
+                "reason": "Campo 'confirmed' deve ser exatamente true para executar.",
+                "order_id": None,
+                "is_paper": _s.paper_trading,
+                "executed_at": executed_at,
+            }, status=400)
 
-        if side not in ("LONG", "SHORT"):
-            return web.json_response({"status": "rejected", "reason": "side inválido (LONG|SHORT)"}, status=400)
-        if not (0.1 <= size_pct <= 100):
-            return web.json_response({"status": "rejected", "reason": "size_pct fora do range (0.1–100)"}, status=400)
+        force_execute = bool(body.get("force_execute") or False)
+
+        try:
+            signal, entry_price, meta = self._build_manual_signal(body)
+        except ValueError as exc:
+            return web.json_response({
+                "status": "rejected",
+                "reason": str(exc),
+                "order_id": None,
+                "is_paper": _s.paper_trading,
+                "executed_at": executed_at,
+            }, status=400)
+
         if is_kill_switch_active():
-            return web.json_response({"status": "blocked", "reason": "Kill switch ativo.", "is_paper": _s.paper_trading, "executed_at": executed_at})
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="MANUAL_TRADE_BLOCKED",
+                severity="WARNING",
+                message="Manual trade blocked — kill switch active",
+                payload={"symbol": signal.symbol, "side": signal.action.value},
+            )
+            return web.json_response({
+                "status": "blocked",
+                "reason": "Kill switch ativo — libere antes de operar.",
+                "order_id": None,
+                "is_paper": _s.paper_trading,
+                "executed_at": executed_at,
+            }, status=200)
+
+        equity_usd = await self._manual_equity_usd()
 
         await MekkaRepository.log_event(
             agent="Dashboard",
             event="MANUAL_TRADE_SUBMITTED",
             severity="INFO",
-            message=f"Ordem manual: {side} {symbol} size={size_pct}% lev={leverage}x SL={sl_pct}% TP={tp_pct}%",
-            payload={"symbol": symbol, "side": side, "size_pct": size_pct, "leverage": leverage, "sl_pct": sl_pct, "tp_pct": tp_pct, "entry_price": entry_px},
+            message=(
+                f"Ordem manual: {signal.action.value.upper()} {signal.symbol} "
+                f"size={signal.size_pct:.2%} lev={signal.leverage}x "
+                f"entry={signal.entry_price} SL={signal.stop_loss} TP={signal.take_profit}"
+            ),
+            payload={
+                "symbol": signal.symbol, "side": signal.action.value,
+                "size_pct": signal.size_pct, "leverage": signal.leverage,
+                "entry_price": signal.entry_price, "stop_loss": signal.stop_loss,
+                "take_profit": signal.take_profit, "force_execute": force_execute,
+                "entry_source": meta["entry_source"],
+            },
         )
 
-        # Em paper mode, simula a ordem
-        order_id = f"MANUAL-{symbol}-{side}-{int(datetime.now(timezone.utc).timestamp())}"
-        return web.json_response({
-            "status": "paper" if _s.paper_trading else "submitted",
-            "order_id": order_id,
-            "reason": f"Ordem manual {side} {symbol} registrada ({'paper' if _s.paper_trading else 'live'}).",
-            "is_paper": _s.paper_trading,
-            "symbol": symbol,
-            "side": side,
-            "executed_at": executed_at,
-        })
+        order_id: str | None = None
+        try:
+            from src.agents.batman import Batman
+            from src.agents.iron_man import IronMan
+
+            batman = Batman()
+            approval = await batman.run(signal=signal, equity_usd=equity_usd)
+
+            if not approval.is_executable:
+                bybit_safe = (
+                    _s.active_exchange == "bybit" and bool(getattr(_s, "bybit_testnet", False))
+                )
+                binance_safe = (
+                    _s.active_exchange == "binance" and bool(getattr(_s, "binance_testnet", False))
+                )
+                hl_safe = _s.active_exchange == "hyperliquid" and not _s.is_mainnet
+                env_is_safe_for_bypass = _s.paper_trading or bybit_safe or binance_safe or hl_safe
+
+                if force_execute and env_is_safe_for_bypass:
+                    await MekkaRepository.log_event(
+                        agent="Dashboard",
+                        event="MANUAL_TRADE_FORCE_EXECUTE",
+                        severity="WARNING",
+                        message=(
+                            f"FORCE_EXECUTE: Batman verdict {approval.verdict.value} OVERRIDDEN "
+                            f"on manual trade. env: exchange={_s.active_exchange} "
+                            f"paper={_s.paper_trading} bybit_testnet={getattr(_s,'bybit_testnet','-')}"
+                        ),
+                        payload={
+                            "symbol": signal.symbol, "side": signal.action.value,
+                            "verdict": approval.verdict.value, "reasons": approval.reasons,
+                        },
+                    )
+                    # Fall through to IronMan as if approved.
+                elif force_execute and not env_is_safe_for_bypass:
+                    reason = (
+                        "FORCE_EXECUTE solicitado em ambiente mainnet/live — recusado por "
+                        "regra dura. Alterne para paper mode ou testnet primeiro."
+                    )
+                    await MekkaRepository.log_event(
+                        agent="Dashboard",
+                        event="MANUAL_TRADE_FORCE_EXECUTE_REJECTED",
+                        severity="ERROR",
+                        message=reason,
+                        payload={"symbol": signal.symbol, "is_mainnet": _s.is_mainnet},
+                    )
+                    return web.json_response({
+                        "status": "rejected", "reason": reason, "order_id": None,
+                        "is_paper": _s.paper_trading, "executed_at": executed_at,
+                    }, status=200)
+                else:
+                    reason = (
+                        f"Batman bloqueou: {approval.verdict.value} — "
+                        + (approval.reasons[0] if approval.reasons else "risco excedido")
+                    )
+                    await MekkaRepository.log_event(
+                        agent="Dashboard",
+                        event="MANUAL_TRADE_BLOCKED",
+                        severity="WARNING",
+                        message=f"Manual trade blocked by Batman verdict={approval.verdict.value}",
+                        payload={
+                            "symbol": signal.symbol, "verdict": approval.verdict.value,
+                            "reasons": approval.reasons,
+                        },
+                    )
+                    return web.json_response({
+                        "status": "blocked", "reason": reason, "order_id": None,
+                        "is_paper": _s.paper_trading, "executed_at": executed_at,
+                    }, status=200)
+
+            iron_man = IronMan()
+            result = await iron_man.run(signal=signal, approval=approval, equity_usd=equity_usd)
+
+            try:
+                result.metadata = {
+                    **(result.metadata or {}),
+                    "stop_loss": signal.stop_loss,
+                    "take_profit": signal.take_profit,
+                    "manual": True,
+                }
+                await MekkaRepository.save_trade(result, signal_id=None)
+            except Exception as _save_exc:
+                logger.warning("manual save_trade failed (non-fatal): %s", _save_exc)
+
+            try:
+                from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+                asyncio.create_task(_TA().trade_opened(execution=result, signal=signal))
+            except Exception:
+                pass
+
+            order_id = result.order_id
+            # Map IronMan's execution status to the dashboard contract.
+            # FILLED/PARTIAL/PAPER are successes; ERROR/REJECTED/SKIPPED are
+            # failures the operator must see (don't claim "submitted" when
+            # the venue rejected the order, e.g. notional below min size).
+            ok_statuses = {"FILLED", "PARTIAL", "PAPER"}
+            exec_ok = result.status.value in ok_statuses
+            api_status = "submitted" if exec_ok else "blocked"
+            err_detail = getattr(result, "error", None)
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="MANUAL_TRADE_EXECUTED" if exec_ok else "MANUAL_TRADE_BLOCKED",
+                severity="INFO" if exec_ok else "WARNING",
+                message=(
+                    f"Manual order {result.status.value} "
+                    f"{'(paper)' if result.is_paper else '(LIVE)'} "
+                    f"{signal.symbol} order_id={order_id}"
+                ),
+                payload={
+                    "order_id": order_id, "is_paper": result.is_paper,
+                    "status": result.status.value, "symbol": result.symbol,
+                    "quantity": result.quantity, "avg_price": result.avg_price,
+                    "batman_verdict": approval.verdict.value,
+                    "error": err_detail,
+                },
+            )
+            reason = (
+                f"{'Paper' if result.is_paper else 'Live'} order {result.status.value} | "
+                f"qty={result.quantity} avg={result.avg_price}"
+            )
+            if not exec_ok and err_detail:
+                reason += f" — {err_detail}"
+            return web.json_response({
+                "status": api_status,
+                "reason": reason,
+                "order_id": order_id,
+                "is_paper": result.is_paper,
+                "symbol": result.symbol,
+                "side": signal.action.value.upper(),
+                "executed_at": executed_at,
+            }, status=200)
+
+        except Exception as exc:
+            logger.error("manual trade execution failed: %s", exc, exc_info=True)
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="MANUAL_TRADE_BLOCKED",
+                severity="ERROR",
+                message=f"Manual trade exception: {exc}",
+                payload={"symbol": signal.symbol, "error": str(exc)},
+            )
+            return web.json_response({
+                "status": "blocked",
+                "reason": f"Erro interno na execução: {exc}",
+                "order_id": None,
+                "is_paper": _s.paper_trading,
+                "executed_at": executed_at,
+            }, status=200)
 
     def _prune_snapshot_dir(self) -> None:
         """Keep only the most recent ``SNAPSHOT_RETENTION_MINUTES`` snapshots

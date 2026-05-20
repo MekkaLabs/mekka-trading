@@ -34,6 +34,7 @@
       <div class="sidebar-brand">MEKKA OPS</div>
       <nav class="sidebar-nav">
         <button class="page-nav-btn page-nav-live" data-page="live">📡 Live</button>
+        <button class="page-nav-btn page-nav-manual" data-page="manual">✋ Manual</button>
         <button class="page-nav-btn active" data-page="overview">🏠 Overview</button>
         <ul class="page-nav-sub">
           <li><a href="#sec-today-summary">📊 Resultado do Dia</a></li>
@@ -939,6 +940,71 @@
             <div class="live-equity-strip" id="live-equity-strip"></div>
           </div>
         </div>
+      </section>
+
+      <!-- ── Manual Trading Panel (P1.1 — HANDOFF 2026-05-20) ────────────
+           Operator-defined trade with a "pedir parecer dos robôs" step
+           (Batman risk verdict, no execution) before an explicit execute.
+           Both endpoints flow through Batman → IronMan server-side. -->
+      <section class="panel full manual-trade-panel" id="sec-manual-trade" data-page="manual">
+        <h2>✋ Operações Manuais</h2>
+        <p class="muted-line">
+          Defina os parâmetros, peça o parecer dos robôs (Batman avalia o risco
+          sem executar) e então confirme a execução. A ordem passa por
+          <strong>Batman → Iron Man</strong> como qualquer outra.
+        </p>
+
+        <form class="manual-trade-form" id="manual-trade-form" onsubmit="return false;">
+          <div class="mtf-field">
+            <label for="mt-symbol">Ativo</label>
+            <select id="mt-symbol">
+              <option value="BTC">BTC</option>
+              <option value="ETH">ETH</option>
+              <option value="SOL">SOL</option>
+              <option value="AVAX">AVAX</option>
+              <option value="BNB">BNB</option>
+              <option value="LINK">LINK</option>
+            </select>
+          </div>
+          <div class="mtf-field">
+            <label>Lado</label>
+            <div class="mtf-side-group">
+              <button type="button" class="mtf-side-btn long active" id="mt-side-long">▲ LONG</button>
+              <button type="button" class="mtf-side-btn short" id="mt-side-short">▼ SHORT</button>
+            </div>
+          </div>
+          <div class="mtf-field">
+            <label for="mt-entry">Entrada (vazio = mercado)</label>
+            <input type="number" id="mt-entry" placeholder="Market" step="any" min="0">
+          </div>
+          <div class="mtf-field">
+            <label for="mt-size">Tamanho %</label>
+            <input type="number" id="mt-size" value="2" min="0.1" max="10" step="0.1">
+          </div>
+          <div class="mtf-field">
+            <label for="mt-leverage">Alavancagem</label>
+            <input type="number" id="mt-leverage" value="2" min="1" max="50" step="1">
+          </div>
+          <div class="mtf-field">
+            <label for="mt-sl">Stop Loss %</label>
+            <input type="number" id="mt-sl" value="2" min="0.1" max="50" step="0.1">
+          </div>
+          <div class="mtf-field">
+            <label for="mt-tp">Take Profit %</label>
+            <input type="number" id="mt-tp" value="4" min="0.1" max="100" step="0.1">
+          </div>
+        </form>
+
+        <div class="manual-trade-actions">
+          <button type="button" class="mt-analyze-btn" id="mt-analyze-btn">🤖 Pedir parecer dos robôs</button>
+          <button type="button" class="mt-execute-btn" id="mt-execute-btn" disabled>⚡ Executar</button>
+          <label class="mt-force-label" title="Override do veredito do Batman (só funciona em paper/testnet)">
+            <input type="checkbox" id="mt-force-execute"> Force execute
+          </label>
+        </div>
+
+        <div class="manual-trade-verdict" id="mt-verdict"></div>
+        <div class="manual-trade-result" id="mt-result"></div>
       </section>
 
       <!-- ═══════════════════════════════════════════════════════════════

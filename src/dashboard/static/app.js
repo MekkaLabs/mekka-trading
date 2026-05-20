@@ -2968,6 +2968,7 @@ const _PAGE_SECTIONS = {
   logs:        ['sec-audit', 'sec-replay-player', 'sec-manual', 'sec-timeline', 'sec-symbol-timeline'],
   settings:    ['sec-trading-settings', 'sec-settings', 'sec-filters'],
   live:        ['sec-live-trading'],
+  manual:      ['sec-manual-trade'],
   memory:      ['sec-memory'],
   leaderboard: ['sec-leaderboard'],
   reports:     ['sec-report-daily', 'sec-report-symbol', 'sec-report-backtest'],
@@ -4794,6 +4795,7 @@ function _mkBootDashboardV2() {
   try { _mkBootPageNav(); } catch (e) { console.error('[v2] _mkBootPageNav failed:', e); }
   try { _mkBootTopBar();  } catch (e) { console.error('[v2] _mkBootTopBar failed:', e); }
   try { _mkBootTradeNow();} catch (e) { console.error('[v2] _mkBootTradeNow failed:', e); }
+  try { _bootManualTrade();} catch (e) { console.error('[v2] _bootManualTrade failed:', e); }
   try { _bootTradingModes(); } catch (e) { console.error('[v2] _bootTradingModes failed:', e); }
   try { _bootGlobalMode();   } catch (e) { console.error('[v2] _bootGlobalMode failed:', e); }
   // Global WS — real-time topbar + positions across all pages
@@ -5347,6 +5349,166 @@ function _cmdSetStatus(msg, type = 'info') {
   el.className = `cmd-status ${type}`;
 }
 
+// ============================================================
+// MANUAL TRADING PANEL (P1.1 — HANDOFF 2026-05-20)
+// ============================================================
+let _mtSide = 'LONG';
+let _mtLastAnalyzeOk = false;
+
+function _mtCollectParams() {
+  const num = (id, dflt) => {
+    const v = parseFloat(document.getElementById(id)?.value);
+    return Number.isFinite(v) ? v : dflt;
+  };
+  const entryRaw = document.getElementById('mt-entry')?.value;
+  return {
+    symbol:   document.getElementById('mt-symbol')?.value || 'BTC',
+    side:     _mtSide,
+    size_pct: num('mt-size', 2),
+    leverage: parseInt(document.getElementById('mt-leverage')?.value || '2', 10),
+    sl_pct:   num('mt-sl', 2),
+    tp_pct:   num('mt-tp', 4),
+    entry_price: entryRaw ? parseFloat(entryRaw) : null,
+  };
+}
+
+function _mtSetVerdict(html) {
+  const el = document.getElementById('mt-verdict');
+  if (el) el.innerHTML = html;
+}
+function _mtSetResult(html) {
+  const el = document.getElementById('mt-result');
+  if (el) el.innerHTML = html;
+}
+
+async function _mtAnalyze() {
+  const btn = document.getElementById('mt-analyze-btn');
+  const execBtn = document.getElementById('mt-execute-btn');
+  _mtSetResult('');
+  _mtSetVerdict('<span class="muted-line">Consultando Batman…</span>');
+  if (btn) btn.disabled = true;
+  _mtLastAnalyzeOk = false;
+  if (execBtn) execBtn.disabled = true;
+
+  try {
+    const res = await fetch('/api/trade/manual-analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(_mtCollectParams()),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      _mtSetVerdict(`<p class="trade-result-fail">⚠️ ${escapeHtml(data.reason || 'Parâmetros inválidos')}</p>`);
+      return;
+    }
+    const b = data.batman || {};
+    const s = data.signal || {};
+    const verdictClass = b.is_executable ? 'mt-verdict-ok' : 'mt-verdict-block';
+    const reasons = (b.reasons || []).map(r => `<li>${escapeHtml(r)}</li>`).join('');
+    _mtSetVerdict(`
+      <div class="mt-verdict-card ${verdictClass}">
+        <div class="mt-verdict-head">
+          <strong>Batman:</strong> ${escapeHtml(b.verdict || '—')}
+          ${b.is_executable ? '<span class="mt-badge ok">EXECUTÁVEL</span>' : '<span class="mt-badge block">BLOQUEADO</span>'}
+        </div>
+        <div class="mt-verdict-grid">
+          <span>Entrada (${escapeHtml(s.entry_source || '—')})</span><b>${_liveFmtMoney(s.entry_price || 0)}</b>
+          <span>Stop Loss</span><b>${_liveFmtMoney(s.stop_loss || 0)}</b>
+          <span>Take Profit</span><b>${_liveFmtMoney(s.take_profit || 0)}</b>
+          <span>Tamanho</span><b>${((s.size_pct || 0) * 100).toFixed(2)}%</b>
+          <span>Alavancagem</span><b>${s.leverage || 0}x</b>
+          <span>Risco estimado</span><b>${_liveFmtMoney(s.risk_usd || 0)}</b>
+          <span>R:R</span><b>${s.risk_reward != null ? s.risk_reward : '—'}</b>
+          <span>Equity disponível</span><b>${_liveFmtMoney(data.equity_usd || 0)}</b>
+          ${b.adjusted_size_pct != null ? `<span>Size ajustado (Batman)</span><b>${(b.adjusted_size_pct * 100).toFixed(2)}%</b>` : ''}
+          ${b.adjusted_leverage != null ? `<span>Lev. ajustada (Batman)</span><b>${b.adjusted_leverage}x</b>` : ''}
+        </div>
+        ${reasons ? `<ul class="mt-verdict-reasons">${reasons}</ul>` : ''}
+        ${data.kill_switch_active ? '<p class="trade-result-fail">🚨 Kill switch ATIVO — execução será bloqueada.</p>' : ''}
+      </div>
+    `);
+    _mtLastAnalyzeOk = true;
+    if (execBtn) execBtn.disabled = false;
+  } catch (err) {
+    _mtSetVerdict(`<p class="trade-result-fail">❌ Erro ao consultar: ${escapeHtml(String(err))}</p>`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function _mtExecute() {
+  const execBtn = document.getElementById('mt-execute-btn');
+  if (!_mtLastAnalyzeOk) {
+    _mtSetResult('<p class="trade-result-fail">⚠️ Peça o parecer dos robôs antes de executar.</p>');
+    return;
+  }
+  const forceEl = document.getElementById('mt-force-execute');
+  if (execBtn) execBtn.disabled = true;
+  _mtSetResult('<span class="muted-line">Executando…</span>');
+
+  try {
+    const res = await fetch('/api/trade/manual', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ..._mtCollectParams(),
+        confirmed: true,
+        force_execute: !!(forceEl && forceEl.checked),
+      }),
+    });
+    const data = await res.json();
+    if (data.status === 'submitted' || data.status === 'paper') {
+      _mtSetResult(`
+        <p class="trade-result-success">✅ ${data.is_paper ? '[PAPER] ' : ''}Ordem enviada!</p>
+        <p>Order ID: <code>${escapeHtml(data.order_id || '—')}</code></p>
+        <p>${escapeHtml(data.reason || '')}</p>
+      `);
+      _mkPlayTradeSound && _mkPlayTradeSound('win');
+      setTimeout(_mkLoadTopBar, 2000);
+    } else {
+      _mtSetResult(`
+        <p class="trade-result-fail">🚫 ${escapeHtml((data.status || 'ERRO').toUpperCase())}</p>
+        <p>${escapeHtml(data.reason || 'Execução bloqueada.')}</p>
+      `);
+    }
+  } catch (err) {
+    _mtSetResult(`<p class="trade-result-fail">❌ Erro na execução: ${escapeHtml(String(err))}</p>`);
+  } finally {
+    if (execBtn) execBtn.disabled = false;
+  }
+}
+
+function _bootManualTrade() {
+  const longBtn  = document.getElementById('mt-side-long');
+  const shortBtn = document.getElementById('mt-side-short');
+  const setSide = (side) => {
+    _mtSide = side;
+    longBtn  && longBtn.classList.toggle('active', side === 'LONG');
+    shortBtn && shortBtn.classList.toggle('active', side === 'SHORT');
+    // Changing direction invalidates a prior verdict.
+    _mtLastAnalyzeOk = false;
+    const execBtn = document.getElementById('mt-execute-btn');
+    if (execBtn) execBtn.disabled = true;
+  };
+  if (longBtn)  longBtn.addEventListener('click', () => setSide('LONG'));
+  if (shortBtn) shortBtn.addEventListener('click', () => setSide('SHORT'));
+
+  // Any param change invalidates the last verdict (force re-analyze).
+  ['mt-symbol', 'mt-entry', 'mt-size', 'mt-leverage', 'mt-sl', 'mt-tp'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', () => {
+      _mtLastAnalyzeOk = false;
+      const execBtn = document.getElementById('mt-execute-btn');
+      if (execBtn) execBtn.disabled = true;
+    });
+  });
+
+  const analyzeBtn = document.getElementById('mt-analyze-btn');
+  const executeBtn = document.getElementById('mt-execute-btn');
+  if (analyzeBtn) analyzeBtn.addEventListener('click', _mtAnalyze);
+  if (executeBtn) executeBtn.addEventListener('click', _mtExecute);
+}
+
 async function _cmdExecute() {
   const btn = document.getElementById('cmd-execute-btn');
   const symbol = document.getElementById('cmd-symbol')?.value || 'BTC';
@@ -5366,6 +5528,11 @@ async function _cmdExecute() {
   _cmdSetStatus('Enviando ordem…', 'info');
 
   try {
+    // P1.1: /api/trade/manual now flows through Batman → IronMan and
+    // requires an explicit confirmed:true (hard gate). The Command Center
+    // is itself the operator's deliberate action, so we send it here. The
+    // force_execute opt-in mirrors the Trade Now modal toggle.
+    const forceEl = document.getElementById('trade-force-execute');
     const res = await fetch('/api/trade/manual', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -5377,6 +5544,8 @@ async function _cmdExecute() {
         sl_pct,
         tp_pct,
         entry_price,
+        confirmed: true,
+        force_execute: !!(forceEl && forceEl.checked),
       }),
     });
     const data = await res.json();
