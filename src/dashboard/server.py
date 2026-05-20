@@ -5153,6 +5153,14 @@ class MekkaDashboardServer:
         body = await self._safe_json_body(request) or {}
         rec_id = str(body.get("recommendation_id") or "").strip()[:64]
         confirmed = body.get("confirmed")
+        # Force-execute override (Story M22.1 — operator escape hatch).
+        # When True, the Batman verdict is treated as advisory: a non-
+        # executable verdict is logged with severity WARNING but the
+        # order is still placed. The override is REJECTED if both
+        # `paper_trading=False` AND `bybit_testnet=False`/`is_mainnet=True`
+        # — i.e. the operator must be in paper mode OR on a testnet to
+        # bypass risk gates. Kill switch is NOT bypassable.
+        force_execute = bool(body.get("force_execute") or False)
 
         # Hard gate: confirmed must be exactly True (boolean)
         if confirmed is not True:
@@ -5266,29 +5274,100 @@ class MekkaDashboardServer:
             approval = await batman.run(signal=signal, equity_usd=equity_usd)
 
             if not approval.is_executable:
-                exec_status = "blocked"
-                exec_reason = (
-                    f"Batman bloqueou: {approval.verdict.value} — "
-                    + (approval.reasons[0] if approval.reasons else "risco excedido")
+                # ── Force-execute escape hatch (M22.1) ───────────────────
+                # If the operator explicitly opted in via force_execute=true
+                # AND we are in a safe environment (paper mode OR a testnet),
+                # we log the bypass at WARNING and proceed. Otherwise we
+                # block exactly like before.
+                bybit_safe = (
+                    _s.active_exchange == "bybit" and bool(getattr(_s, "bybit_testnet", False))
                 )
-                await MekkaRepository.log_event(
-                    agent="Dashboard",
-                    event="TRADE_NOW_BLOCKED",
-                    severity="WARNING",
-                    message=f"TradeNow blocked by Batman verdict={approval.verdict.value}",
-                    payload={
-                        "recommendation_id": rec_id,
-                        "verdict": approval.verdict.value,
-                        "reasons": approval.reasons,
-                    },
+                binance_safe = (
+                    _s.active_exchange == "binance" and bool(getattr(_s, "binance_testnet", False))
                 )
-                return web.json_response({
-                    "status": "blocked",
-                    "reason": exec_reason,
-                    "order_id": None,
-                    "is_paper": _s.paper_trading,
-                    "executed_at": executed_at,
-                }, status=200)
+                hl_safe = _s.active_exchange == "hyperliquid" and not _s.is_mainnet
+                env_is_safe_for_bypass = _s.paper_trading or bybit_safe or binance_safe or hl_safe
+
+                if force_execute and env_is_safe_for_bypass:
+                    # Bypass Batman — log loudly so the audit trail makes it
+                    # impossible to claim later "I didn't know that was overridden".
+                    await MekkaRepository.log_event(
+                        agent="Dashboard",
+                        event="TRADE_NOW_FORCE_EXECUTE",
+                        severity="WARNING",
+                        message=(
+                            f"FORCE_EXECUTE: Batman verdict {approval.verdict.value} OVERRIDDEN by operator. "
+                            f"env: exchange={_s.active_exchange} paper={_s.paper_trading} "
+                            f"bybit_testnet={getattr(_s,'bybit_testnet','-')}"
+                        ),
+                        payload={
+                            "recommendation_id": rec_id,
+                            "verdict": approval.verdict.value,
+                            "reasons": approval.reasons,
+                            "exchange": _s.active_exchange,
+                            "paper_trading": _s.paper_trading,
+                            "bybit_testnet": getattr(_s, "bybit_testnet", None),
+                        },
+                    )
+                    # Fall through to the IronMan call below as if Batman approved.
+                    # exec_reason left empty — successful path.
+                elif force_execute and not env_is_safe_for_bypass:
+                    # Operator asked to force on a mainnet/live combo — REJECT.
+                    # This is a hard rule: we never override risk gates against
+                    # real money. The operator must drop to paper or testnet
+                    # first if they want this escape hatch.
+                    exec_status = "rejected"
+                    exec_reason = (
+                        "FORCE_EXECUTE solicitado em ambiente mainnet/live — recusado por "
+                        "regra dura. Para usar este botão, alterne para paper mode "
+                        "ou para uma testnet (bybit_testnet=true, binance_testnet=true, "
+                        "ou hyperliquid_network=testnet)."
+                    )
+                    await MekkaRepository.log_event(
+                        agent="Dashboard",
+                        event="TRADE_NOW_FORCE_EXECUTE_REJECTED",
+                        severity="ERROR",
+                        message=exec_reason,
+                        payload={
+                            "recommendation_id": rec_id,
+                            "exchange": _s.active_exchange,
+                            "paper_trading": _s.paper_trading,
+                            "bybit_testnet": getattr(_s, "bybit_testnet", None),
+                            "is_mainnet": _s.is_mainnet,
+                        },
+                    )
+                    return web.json_response({
+                        "status": "rejected",
+                        "reason": exec_reason,
+                        "order_id": None,
+                        "is_paper": _s.paper_trading,
+                        "executed_at": executed_at,
+                    }, status=200)
+                else:
+                    # No force flag — normal block path.
+                    exec_status = "blocked"
+                    exec_reason = (
+                        f"Batman bloqueou: {approval.verdict.value} — "
+                        + (approval.reasons[0] if approval.reasons else "risco excedido")
+                    )
+                    await MekkaRepository.log_event(
+                        agent="Dashboard",
+                        event="TRADE_NOW_BLOCKED",
+                        severity="WARNING",
+                        message=f"TradeNow blocked by Batman verdict={approval.verdict.value}",
+                        payload={
+                            "recommendation_id": rec_id,
+                            "verdict": approval.verdict.value,
+                            "reasons": approval.reasons,
+                        },
+                    )
+                    return web.json_response({
+                        "status": "blocked",
+                        "reason": exec_reason,
+                        "order_id": None,
+                        "is_paper": _s.paper_trading,
+                        "executed_at": executed_at,
+                    }, status=200)
 
             # IronMan execution (paper or live depending on settings.paper_trading)
             iron_man = IronMan()

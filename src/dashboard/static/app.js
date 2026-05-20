@@ -3170,6 +3170,12 @@ function _tradeOpenModal() {
   if (_tradeModal) {
     _tradeModal.classList.remove('hidden');
     _tradeShowPanel('trade-modal-loading');
+    // Re-evaluate whether Force Execute should be visible — env may
+    // have changed since boot (operator flipped PAPER_TRADING).
+    _refreshForceExecuteVisibility();
+    // Always uncheck on open so a stale state doesn't persist across modals.
+    const cb = document.getElementById('trade-force-execute');
+    if (cb) cb.checked = false;
   }
 }
 
@@ -3336,11 +3342,21 @@ async function _tradeExecute() {
   if (_tradeConfirmBtn) _tradeConfirmBtn.disabled = true;
   _tradeShowPanel('trade-modal-loading');
 
+  // Pick up the force-execute opt-in if the operator checked it. The
+  // server re-validates the env-safety condition, so toggling this in
+  // DevTools on a mainnet build still gets rejected.
+  const forceEl = document.getElementById('trade-force-execute');
+  const forceExecute = !!(forceEl && forceEl.checked);
+
   try {
     const res = await fetch('/api/trade/execute', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ recommendation_id: _currentRecId, confirmed: true }),
+      body: JSON.stringify({
+        recommendation_id: _currentRecId,
+        confirmed: true,
+        force_execute: forceExecute,
+      }),
     });
     const data = await res.json();
     const resultEl = document.getElementById('trade-result-content');
@@ -3387,6 +3403,34 @@ function _mkBootTradeNow() {
   if (_tradeConfirmBtn)  _tradeConfirmBtn.addEventListener('click', _tradeExecute);
   if (_tradeResultClose) _tradeResultClose.addEventListener('click', _tradeCloseModal);
   if (_tradeModal)       _tradeModal.addEventListener('click', e => { if (e.target === _tradeModal) _tradeCloseModal(); });
+
+  // Show the Force-Execute row only when the env is safe for bypass
+  // (paper mode OR any testnet). Re-checked on every modal open below.
+  _refreshForceExecuteVisibility();
+}
+
+/**
+ * Reveal the Force-Execute opt-in only when the current environment is
+ * paper or testnet. The server enforces the same rule — this is purely a
+ * UX hint so the operator does not see a useless checkbox in mainnet.
+ * Polls /api/env at most once per modal open + every 60s globally.
+ */
+async function _refreshForceExecuteVisibility() {
+  const row = document.getElementById('trade-force-execute-row');
+  if (!row) return;
+  try {
+    const env = await fetch('/api/env').then(r => r.ok ? r.json() : null);
+    if (!env) { row.classList.add('hidden'); return; }
+    // Server's canonical "safe" definition: paper OR any non-mainnet network.
+    const safe = env.paper_trading === true || env.network === 'testnet';
+    row.classList.toggle('hidden', !safe);
+    if (!safe) {
+      const cb = document.getElementById('trade-force-execute');
+      if (cb) cb.checked = false;
+    }
+  } catch (_e) {
+    row.classList.add('hidden');
+  }
 }
 
 // ============================================================

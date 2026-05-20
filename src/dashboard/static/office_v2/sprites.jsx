@@ -637,6 +637,24 @@ const AGENTS = [
                a:"#0a0a0a", A:"#1c1c1c", p:"#0a0a0a", P:"#000000" },
     overlay: { sprite: "MASK", palette: { A:"#dc2626", a:"#dc2626", e:"#f9fafb" } },
   },
+  {
+    // Beast — Story 248 (codex M40). Read-only continuous-improvement
+    // agent. Dr. Hank McCoy: blue fur, glasses, lab coat. Never trades —
+    // proposes improvements via Telegram. Placed in L4 "Analyst" tier
+    // alongside Wolverine (recovery) and PortfolioManager (snapshot).
+    id: "beast",
+    name: "Beast",
+    role: "Continuous Improvement",
+    layer: "L4",
+    color: "#38bdf8",  // cyan-blue — distinct from Superman blue
+    summary: "Reads the audit log. Proposes weekly improvement candidates to the operator.",
+    task: "Auditing last 7 days of trades — 2 proposals queued",
+    // Blue fur (cyan body), white lab coat, dark glasses overlay
+    palette: { k:"#0a1a2a", h:"#1e3a5f", H:"#0f1f3a", s:"#38bdf8", S:"#0284c7",
+               e:"#1c1c1c", m:"#1c2a3a", c:"#f1f5f9", C:"#cbd5e1",
+               a:"#38bdf8", A:"#0284c7", p:"#1c1c1c", P:"#000000" },
+    overlay: { sprite: "VISOR", palette: { A:"#1c1c1c", a:"#1c1c1c", e:"#1c1c1c" } },
+  },
 ];
 
 // Visor overlay — Cyclops style horizontal red band across eyes

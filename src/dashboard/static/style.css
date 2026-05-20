@@ -1610,6 +1610,28 @@ input, select { padding: 7px 10px; }
   border-radius: var(--r-sm);
   line-height: 1.5;
 }
+/* Force-Execute opt-in row — only shown in paper/testnet (toggled by JS) */
+.trade-force-execute {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  margin: 10px 0 4px;
+  background: rgba(251, 146, 60, 0.06);
+  border: 1px dashed rgba(251, 146, 60, 0.45);
+  border-radius: var(--r-sm);
+  color: #fbcfa1;
+  font-size: 0.82rem;
+  cursor: pointer;
+  user-select: none;
+}
+.trade-force-execute input[type=checkbox] {
+  width: 16px; height: 16px; accent-color: #fb923c; cursor: pointer;
+  flex-shrink: 0;
+}
+.trade-force-execute strong { color: #fb923c; }
+.trade-force-execute.hidden { display: none; }
+
 .trade-modal-actions {
   display: flex;
   gap: 10px;

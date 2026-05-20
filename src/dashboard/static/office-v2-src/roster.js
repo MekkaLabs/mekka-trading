@@ -14,6 +14,11 @@ export const AGENTS = [
   { id: 'wolverine', name: 'Wolverine', layer: 'L4', role: 'Recovery Agent', color: '#eab308', outfit: 'yellow_blue' },
   { id: 'flash', name: 'Flash', layer: 'L1.5', role: 'Momentum Scalper', color: '#ef4444', outfit: 'red_lightning' },
   { id: 'deadpool', name: 'Deadpool', layer: 'Pending', role: 'Chaos Simulator', color: '#dc2626', outfit: 'red_black' },
+  // Cyclops (Story 046) — SL/TP monitor for paper positions. Visor overlay.
+  { id: 'cyclops', name: 'Cyclops', layer: 'L3', role: 'SL/TP Monitor', color: '#ef4444', outfit: 'red_blue_visor' },
+  // Beast (Story 248 / codex M40) — read-only continuous-improvement
+  // analyst. Sits in L4 (analyst tier) alongside Wolverine and PortfolioManager.
+  { id: 'beast', name: 'Beast', layer: 'L4', role: 'Continuous Improvement', color: '#38bdf8', outfit: 'blue_fur_labcoat' },
 ];
 
 export const STATIONS = [
@@ -32,6 +37,9 @@ export const STATIONS = [
   { id: 'wolverine', x: 140, y: 265 },
   { id: 'flash', x: 320, y: 265 },
   { id: 'deadpool', x: 500, y: 265 },
+  // Row 4 — newer arrivals: Cyclops (monitor) and Beast (analyst).
+  { id: 'cyclops', x: 230, y: 355 },
+  { id: 'beast', x: 410, y: 355 },
 ];
 
 export const AGENT_ID_MAP = {
@@ -57,6 +65,8 @@ export const AGENT_ID_MAP = {
   wolverine: 'wolverine',
   flash: 'flash',
   deadpool: 'deadpool',
+  cyclops: 'cyclops',
+  beast: 'beast',
 };
 
 export function normalizeAgentId(raw) {

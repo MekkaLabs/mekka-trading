@@ -1160,6 +1160,18 @@
           <div id="trade-modal-recommendation" class="hidden">
             <div id="trade-guardrails" class="trade-guardrails"></div>
             <div id="trade-rec-card" class="trade-rec-card"></div>
+            <!--
+              FORCE EXECUTE checkbox (M22.1) — opt-in escape hatch that
+              bypasses Batman's risk verdict. Hidden by default; rendered
+              only in safe environments (paper mode or any testnet). The
+              server re-checks the same condition before honouring the flag,
+              so toggling the checkbox in DevTools on a mainnet+live build
+              still gets rejected with HTTP 200 status="rejected".
+            -->
+            <label id="trade-force-execute-row" class="trade-force-execute hidden" title="Atalho operacional: ignora veredito do Batman. Só funciona em testnet/paper.">
+              <input type="checkbox" id="trade-force-execute" />
+              <span>⚠️ <strong>Force Execute</strong> — ignorar veredito do Batman (somente testnet/paper)</span>
+            </label>
             <div class="trade-modal-actions">
               <button id="trade-confirm-btn" type="button" class="btn-engage">✅ Confirmar e Executar</button>
               <button id="trade-cancel-btn" type="button" class="prefs-reset-btn">Cancelar</button>
