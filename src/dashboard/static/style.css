@@ -611,9 +611,9 @@ input, select { padding: 7px 10px; }
   width: 40px;
   height: auto;
   flex-shrink: 0;
-  filter: drop-shadow(0 0 8px rgba(124,179,66,0.35));
+  filter: drop-shadow(0 0 8px rgba(255,255,255,0.30));
 }
-.brand-leaf { fill: #7cb342; }
+.brand-leaf { fill: #ffffff; }
 .brand-wordmark {
   font-family: var(--font-sans);
   font-size: 1.15rem;
@@ -625,8 +625,10 @@ input, select { padding: 7px 10px; }
   background-clip: text;
   -webkit-text-fill-color: transparent;
 }
-/* Light theme: deepen the leaf green slightly for contrast on white */
-body[data-theme="light"] .brand-leaf { fill: #6aa233; }
+/* Light theme: white logo would vanish on the light sidebar — use a dark
+   slate for contrast (and a soft dark glow). */
+body[data-theme="light"] .brand-leaf { fill: #334155; }
+body[data-theme="light"] .brand-mark { filter: drop-shadow(0 0 6px rgba(15,23,42,0.18)); }
 
 .sidebar-mode {
   font-size: 0.64rem;
