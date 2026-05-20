@@ -517,24 +517,69 @@ function remountOfficeV2Panel() {
   mountOfficeV2Panel();
 }
 
-// Office iframe auto-resize: the embedded office (/office-v2/) posts its full
-// content height; we size #office-v2-frame to match so the office shows ALL
-// its content (scene + Hero Audit Stream + side panels) with NO internal
-// scrollbar. Same-origin only; ignored while the Overview/office is hidden.
+// Office iframe auto-resize: size #office-v2-frame to its content so the
+// office shows ALL its content (scene + Hero Audit Stream + side panels) with
+// NO internal scrollbar. Two complementary mechanisms (same-origin):
+//   1) postMessage from the office (works even if direct access is blocked);
+//   2) parent-side measurement of the iframe's own document (deterministic —
+//      doesn't depend on the office's emit timing). A ResizeObserver on the
+//      inner <html> plus a short poll guarantees convergence after the async
+//      Babel render + scene zoom settle.
+function _sizeOfficeFrame(rawHeight) {
+  const frame = document.getElementById('office-v2-frame');
+  if (!frame) return;
+  const sec = document.getElementById('sec-office');
+  if (sec && sec.classList.contains('page-section-hidden')) return; // hidden → skip
+  let h = rawHeight;
+  if (!Number.isFinite(h) || h < 1) {
+    try {
+      const doc = frame.contentDocument;
+      h = doc ? Math.ceil(doc.documentElement.scrollHeight) : 0;
+    } catch (_) { return; }
+  }
+  if (!Number.isFinite(h) || h < 1) return;
+  h = Math.max(420, Math.min(Math.round(h), Math.round(window.innerHeight * 2.2)));
+  if (Math.abs((parseInt(frame.style.height, 10) || 0) - h) > 2) {
+    frame.style.height = h + 'px';
+  }
+}
+
 function _initOfficeAutoResize() {
+  // (1) postMessage path
   window.addEventListener('message', (e) => {
     if (e.origin !== window.location.origin) return;
     const d = e.data;
     if (!d || d.type !== 'mekka-office-height' || !Number.isFinite(d.height)) return;
-    const frame = document.getElementById('office-v2-frame');
-    if (!frame) return;
-    // Don't apply while the office section is hidden (a 0-size frame would
-    // report a collapsed height and fight the layout when shown again).
-    const sec = document.getElementById('sec-office');
-    if (sec && sec.classList.contains('page-section-hidden')) return;
-    const h = Math.max(420, Math.min(Math.round(d.height), Math.round(window.innerHeight * 1.6)));
-    frame.style.height = h + 'px';
+    _sizeOfficeFrame(d.height);
   });
+
+  // (2) parent-side measurement (same-origin). Attach a ResizeObserver to the
+  // iframe's inner document once it's available; also poll for ~15s to cover
+  // the async Babel render + scene-zoom layout settling.
+  const frame = document.getElementById('office-v2-frame');
+  if (!frame) return;
+  let observer = null;
+  const attachObserver = () => {
+    try {
+      const doc = frame.contentDocument;
+      if (!doc || !doc.body) return false;
+      if (!observer && typeof ResizeObserver !== 'undefined') {
+        observer = new ResizeObserver(() => _sizeOfficeFrame());
+        observer.observe(doc.documentElement);
+      }
+      _sizeOfficeFrame();
+      return true;
+    } catch (_) { return false; }
+  };
+  let ticks = 0;
+  const poll = setInterval(() => {
+    ticks += 1;
+    attachObserver();
+    if (ticks > 30) clearInterval(poll); // ~15s @ 500ms
+  }, 500);
+  frame.addEventListener('load', () => { observer = null; attachObserver(); });
+  // Re-measure when returning to the Overview (frame may have been hidden).
+  window.addEventListener('resize', () => _sizeOfficeFrame());
 }
 
 function applyPrefs() {

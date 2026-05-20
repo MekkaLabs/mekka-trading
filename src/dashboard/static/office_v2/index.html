@@ -248,6 +248,11 @@
      next to the office, avoiding a duplicate. Standalone keeps it. */
   body.embedded .side { grid-template-columns: 1fr; }
   body.embedded .side > .roster { display: none; }
+  /* In embed, the parent sizes the iframe to our content. Drop the 100vh
+     min-height + bottom padding so our measured height == real content
+     (otherwise body always fills the iframe and the measurement is inflated). */
+  body.embedded { min-height: 0; }
+  body.embedded .page { padding-bottom: 12px; }
   .ticker-row {
     display: grid; grid-template-columns: 90px 130px 1fr;
     gap: 12px; padding: 8px 16px;
