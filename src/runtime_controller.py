@@ -79,7 +79,15 @@ class RuntimeController:
         }
 
     # ── lifecycle ─────────────────────────────────────────────────────────
-    async def start(self) -> dict[str, Any]:
+    def _notify(self, state: str, detail: str = "") -> None:
+        """Fire-and-forget Telegram notification of a runtime state change."""
+        try:
+            from src.services.telegram_alerter import TelegramAlerter
+            asyncio.create_task(TelegramAlerter().system_state(state=state, detail=detail))
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def start(self, notify: bool = True) -> dict[str, Any]:
         """Spawn the runtime loop if it is not already running."""
         async with self._lock:
             if self._state in ("running", "starting"):
@@ -88,9 +96,11 @@ class RuntimeController:
             self._state = "starting"
             self._task = asyncio.create_task(self._run_loop(), name="mekka_runtime")
             logger.info("[RuntimeController] start requested → runtime task spawned")
+            if notify:
+                self._notify("running", "Runtime de trading iniciado.")
             return {"ok": True, "state": self._state}
 
-    async def stop(self) -> dict[str, Any]:
+    async def stop(self, notify: bool = True) -> dict[str, Any]:
         """Cancel the runtime loop and drain it. Stops all token spend."""
         async with self._lock:
             if self._state == "stopped":
@@ -114,13 +124,17 @@ class RuntimeController:
             self._started_at = None
             self._state = "stopped"
             logger.info("[RuntimeController] runtime stopped — no further cycles/LLM calls")
+            if notify:
+                self._notify("stopped", "Runtime parado — sem novas chamadas de LLM.")
             return {"ok": True, "state": "stopped"}
 
     async def reboot(self) -> dict[str, Any]:
-        """Stop then start the runtime fresh."""
+        """Stop then start the runtime fresh (single 'rebooted' notification)."""
         logger.info("[RuntimeController] reboot requested")
-        await self.stop()
-        return await self.start()
+        await self.stop(notify=False)
+        res = await self.start(notify=False)
+        self._notify("rebooted", "Runtime reiniciado.")
+        return res
 
     # ── internal loop ─────────────────────────────────────────────────────
     async def _run_loop(self) -> None:

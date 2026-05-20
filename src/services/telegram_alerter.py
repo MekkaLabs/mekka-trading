@@ -788,6 +788,25 @@ class TelegramAlerter:
             self._log.warning(f"improvement_proposed failed (suppressed): {exc}")
             return False
 
+    async def system_state(self, *, state: str, detail: str = "") -> bool:
+        """Notify the operator that the runtime was turned on/off/rebooted.
+        Bypasses the severity filter (always delivered). Never throws.
+        """
+        if not settings.telegram_enabled:
+            return False
+        emoji = {"running": "🟢", "stopped": "🔴", "rebooted": "🔄"}.get(state, "⚪")
+        label = {"running": "LIGADO", "stopped": "DESLIGADO", "rebooted": "REINICIADO"}.get(state, state.upper())
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        lines = [f"{emoji} *Sistema {label}*"]
+        if detail:
+            lines.append(detail)
+        lines.append(f"Modo: {settings.mode_label} · {now}")
+        try:
+            return await self._post("\n".join(lines), parse_mode="Markdown")
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"system_state failed (suppressed): {exc}")
+            return False
+
     # ------------------------------------------------------------------
     # HTTP
     # ------------------------------------------------------------------
