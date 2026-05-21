@@ -4207,15 +4207,15 @@ body[data-theme="light"] {
   --warn-dim:        rgba(180,83,9,0.10);
   --warn-border:     rgba(180,83,9,0.30);
 
-  /* --- Text --- */
-  --text:            #0f172a;          /* near-black */
-  --text-2:          #334155;          /* slate-700 */
-  --muted:           #64748b;          /* slate-500 */
-  --text-muted:      #64748b;
+  /* --- Text — darkened for AA contrast on white (IMP-df28ec4b8ca8) --- */
+  --text:            #0b1220;          /* near-black */
+  --text-2:          #2b3a4f;          /* slate-700+ */
+  --muted:           #475569;          /* slate-600 (era 500 — pouco contraste) */
+  --text-muted:      #475569;
 
-  /* --- Borders --- */
-  --border:          rgba(15,23,42,0.10);
-  --border-subtle:   rgba(15,23,42,0.05);
+  /* --- Borders (um pouco mais marcadas p/ separar cards no claro) --- */
+  --border:          rgba(15,23,42,0.14);
+  --border-subtle:   rgba(15,23,42,0.08);
 
   /* --- Shadows (lighter halo) --- */
   --shadow-sm:  0 1px 3px rgba(15,23,42,0.08);
