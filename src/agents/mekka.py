@@ -54,7 +54,7 @@ _TRADING_AREAS = {
 }
 _DEV_AREAS = {
     "backend", "frontend", "dashboard", "design", "ux", "security", "data",
-    "infra", "docs",
+    "infra", "docs", "memory", "research", "measurement",
 }
 
 
@@ -171,6 +171,22 @@ class Mekka(BaseAgent[MekkaCouncilReport]):
             self._log.warning(f"[Mekka] inbox source failed: {exc}")
             report.errors.append(f"inbox: {exc}")
 
+        # Continuous Improvement Department scanners (each isolated: one failing
+        # scanner never blocks the others). All read-only / fail-silent.
+        for src_name, coro in (
+            ("code_auditor", self._code_auditor_proposals()),
+            ("risk_scanner", self._risk_scanner_proposals(period_days)),
+            ("ops_scanner", self._ops_scanner_proposals(period_days)),
+            ("memory_scanner", self._memory_scanner_proposals()),
+            ("ice_man", self._ice_man_proposals()),
+            ("sage", self._sage_proposals()),
+        ):
+            try:
+                proposals.extend(await coro)
+            except Exception as exc:  # noqa: BLE001
+                self._log.warning(f"[Mekka] {src_name} source failed: {exc}")
+                report.errors.append(f"{src_name}: {exc}")
+
         if not proposals:
             self._log.info("[Mekka] no proposals to consolidate")
             return report
@@ -224,6 +240,78 @@ class Mekka(BaseAgent[MekkaCouncilReport]):
                 "title": p.title, "description": p.description,
                 "impact": p.impact, "area": p.area, "evidence": p.evidence,
                 "source": "beast", "suggested_story": p.suggested_story,
+            })
+        return out
+
+    async def _code_auditor_proposals(self) -> list[dict]:
+        """CodeAuditor — repo technical-debt scanner (dev-squad)."""
+        from src.agents.code_auditor import CodeAuditor
+        out: list[dict] = []
+        for p in await CodeAuditor().scan():
+            out.append({
+                "title": p.title, "description": p.description,
+                "impact": p.impact, "area": p.area, "evidence": p.evidence,
+                "source": "code_auditor", "suggested_story": p.suggested_story,
+            })
+        return out
+
+    async def _risk_scanner_proposals(self, period_days: int) -> list[dict]:
+        """RiskScanner — risk-posture scanner (trading-ops)."""
+        from src.agents.risk_scanner import RiskScanner
+        out: list[dict] = []
+        for p in await RiskScanner().scan(period_days=period_days):
+            out.append({
+                "title": p.title, "description": p.description,
+                "impact": p.impact, "area": p.area, "evidence": p.evidence,
+                "source": "risk_scanner", "suggested_story": p.suggested_story,
+            })
+        return out
+
+    async def _ops_scanner_proposals(self, period_days: int) -> list[dict]:
+        """OpsScanner — operational-health scanner (dev-squad/infra)."""
+        from src.agents.ops_scanner import OpsScanner
+        out: list[dict] = []
+        for p in await OpsScanner().scan(period_days=period_days):
+            out.append({
+                "title": p.title, "description": p.description,
+                "impact": p.impact, "area": p.area, "evidence": p.evidence,
+                "source": "ops_scanner", "suggested_story": p.suggested_story,
+            })
+        return out
+
+    async def _memory_scanner_proposals(self) -> list[dict]:
+        """MemoryScanner — Jean Grey now *proposes* from vault health."""
+        from src.agents.jean_grey import JeanGrey
+        out: list[dict] = []
+        for p in await JeanGrey().scan_proposals():
+            out.append({
+                "title": p.title, "description": p.description,
+                "impact": p.impact, "area": p.area, "evidence": p.evidence,
+                "source": "memory_scanner", "suggested_story": p.suggested_story,
+            })
+        return out
+
+    async def _ice_man_proposals(self) -> list[dict]:
+        """Ice Man — external research scanner (dependency freshness/CVEs)."""
+        from src.agents.ice_man import IceMan
+        out: list[dict] = []
+        for p in await IceMan().scan():
+            out.append({
+                "title": p.title, "description": p.description,
+                "impact": p.impact, "area": p.area, "evidence": p.evidence,
+                "source": "ice_man", "suggested_story": p.suggested_story,
+            })
+        return out
+
+    async def _sage_proposals(self) -> list[dict]:
+        """Sage — measurement loop (regression detection vs baseline)."""
+        from src.agents.sage import Sage
+        out: list[dict] = []
+        for p in await Sage().scan():
+            out.append({
+                "title": p.title, "description": p.description,
+                "impact": p.impact, "area": p.area, "evidence": p.evidence,
+                "source": "sage", "suggested_story": p.suggested_story,
             })
         return out
 

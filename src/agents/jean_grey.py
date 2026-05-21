@@ -568,6 +568,69 @@ class JeanGrey(BaseAgent[VaultHealthReport]):
                 return ("…" if start else "") + body[start:end].replace("\n", " ").strip() + ("…" if end < len(body) else "")
         return body[:window].replace("\n", " ").strip()
 
+    # -- MemoryScanner: vault health → council proposals ----------------
+
+    async def scan_proposals(self) -> list:
+        """MemoryScanner — turn vault health findings into ImprovementProposals
+        for the Mekka council. Read-only, fail-silent: returns [] on any error
+        and never raises. Jean Grey thus *proposes* (not just audits)."""
+        from src.agents.beast import ImprovementProposal  # noqa: WPS433
+        out: list = []
+        try:
+            report = await self.run(mode="health")
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"[JeanGrey/MemoryScanner] health scan failed: {exc}")
+            return out
+
+        broken = list(getattr(report, "broken_links", []) or [])
+        dups = list(getattr(report, "duplicates", []) or [])
+        orphans = list(getattr(report, "orphans", []) or [])
+
+        if broken:
+            n = len(broken)
+            ex = "; ".join(f"{b.source_note}→[[{b.target}]]" for b in broken[:4])
+            out.append(ImprovementProposal(
+                title=f"Vault: {n} link(s) quebrado(s) no segundo cérebro",
+                description=(
+                    "Wikilinks apontando para notas inexistentes degradam a navegação "
+                    "e a recuperação de memória dos agentes. Corrigir os alvos ou criar as notas."
+                ),
+                impact="LOW" if n < 10 else "MEDIUM",
+                area="memory",
+                evidence=f"{n} links quebrados. Ex.: {ex}",
+                suggested_story="Corrigir wikilinks quebrados do vault",
+            ))
+
+        if dups:
+            n = len(dups)
+            ex = "; ".join(f"{d.note_a}≈{d.note_b} ({d.similarity:.0%})" for d in dups[:3])
+            out.append(ImprovementProposal(
+                title=f"Vault: {n} par(es) de notas duplicadas",
+                description=(
+                    "Notas quase idênticas fragmentam o conhecimento e confundem a "
+                    "recuperação. Consolidar/mesclar as duplicatas."
+                ),
+                impact="LOW",
+                area="memory",
+                evidence=f"{n} pares candidatos. Ex.: {ex}",
+                suggested_story="Consolidar notas duplicadas do vault",
+            ))
+
+        if len(orphans) >= 10:
+            n = len(orphans)
+            out.append(ImprovementProposal(
+                title=f"Vault: {n} notas órfãs (sem backlinks)",
+                description=(
+                    "Muitas notas sem nenhum link de entrada ficam invisíveis ao grafo "
+                    "e à recuperação. Conectar às MOCs/índices relevantes."
+                ),
+                impact="LOW",
+                area="memory",
+                evidence=f"{n} notas órfãs detectadas.",
+                suggested_story="Conectar notas órfãs ao grafo do vault",
+            ))
+        return out
+
     # -- Beast → ADR pipeline -------------------------------------------
 
     def draft_adr_from_beast(self, report, adr_dir: Optional[Path | str] = None) -> list[str]:

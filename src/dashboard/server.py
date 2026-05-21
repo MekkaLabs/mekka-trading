@@ -165,6 +165,33 @@ async def _security_headers_middleware(
     return resp
 
 
+def _json_safe_default(obj: Any) -> Any:
+    """json.dumps ``default`` hook — make Pydantic models, enums and datetimes
+    serializable. Event payloads can carry raw domain models (e.g.
+    VolatilityData) that json can't encode; this coerces them to plain data
+    instead of raising TypeError.
+    """
+    # Pydantic v2 model
+    _dump = getattr(obj, "model_dump", None)
+    if callable(_dump):
+        try:
+            return _dump(mode="json")
+        except Exception:  # noqa: BLE001
+            return _dump()
+    # Enum
+    if hasattr(obj, "value") and type(obj).__class__.__name__ == "EnumMeta":
+        return obj.value
+    # datetime / date
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if hasattr(obj, "isoformat"):
+        try:
+            return obj.isoformat()
+        except Exception:  # noqa: BLE001
+            pass
+    return str(obj)
+
+
 def _is_request_authenticated(request: web.Request) -> bool:
     """Accept any of three credentials, in order:
 
@@ -341,6 +368,9 @@ class MekkaDashboardServer:
         self._market_diag: dict[str, dict[str, Any]] = {}
         self._market_fail_streak: dict[str, int] = {}
         self._market_breaker_until: dict[str, float] = {}
+        self._portfolio_cache: tuple[float, dict[str, Any]] | None = None
+        self._portfolio_cache_lock = asyncio.Lock()
+        self._portfolio_warm_task: asyncio.Task[Any] | None = None
         self._configure_routes()
         self._app.on_startup.append(self._on_startup)
         self._app.on_shutdown.append(self._on_shutdown)
@@ -348,6 +378,62 @@ class MekkaDashboardServer:
     @property
     def app(self) -> web.Application:
         return self._app
+
+    async def _get_live_portfolio_context(self, max_age_s: float = 2.0) -> dict[str, Any]:
+        """Return a cached live portfolio snapshot for wallet/equity widgets."""
+        loop = asyncio.get_running_loop()
+        default_payload = {
+            "equity_usd": 0.0,
+            "available_balance_usd": 0.0,
+            "margin_used_usd": 0.0,
+            "open_positions_count": 0,
+            "source": "UNKNOWN",
+            "is_paper": settings.paper_trading,
+            "is_live_ok": False,
+            "error": None,
+        }
+        cached = self._portfolio_cache
+        if cached and cached[0] > loop.time():
+            return cached[1]
+        if self._portfolio_cache_lock.locked():
+            return cached[1] if cached else default_payload
+        async with self._portfolio_cache_lock:
+            cached = self._portfolio_cache
+            if cached and cached[0] > loop.time():
+                return cached[1]
+
+            payload = default_payload.copy()
+            try:
+                from src.agents.portfolio_manager import PortfolioManager  # noqa: WPS433
+
+                snapshot = await asyncio.wait_for(PortfolioManager().run(), timeout=6.0)
+                payload = {
+                    "equity_usd": float(snapshot.equity_usd or 0.0),
+                    "available_balance_usd": float(snapshot.available_balance_usd or 0.0),
+                    "margin_used_usd": float(snapshot.margin_used_usd or 0.0),
+                    "open_positions_count": int(snapshot.open_positions_count or 0),
+                    "source": snapshot.source.value,
+                    "is_paper": bool(snapshot.is_paper),
+                    "is_live_ok": (snapshot.source.value != "PAPER_FALLBACK") and not bool(snapshot.error),
+                    "error": snapshot.error,
+                }
+            except Exception as exc:  # noqa: BLE001
+                payload["error"] = str(exc)
+                if cached:
+                    stale = dict(cached[1])
+                    stale["error"] = payload["error"]
+                    self._portfolio_cache = (loop.time() + min(max_age_s, 2.0), stale)
+                    return stale
+
+            self._portfolio_cache = (loop.time() + max_age_s, payload)
+            return payload
+
+    async def _warm_live_portfolio_context(self) -> None:
+        """Best-effort warmup so the first overview request stays responsive."""
+        try:
+            await self._get_live_portfolio_context(max_age_s=8.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("portfolio warmup failed: %s", exc)
 
     def _configure_routes(self) -> None:
         """Register all HTTP/WS routes, grouped by domain (IMP-33f2fe698672 —
@@ -445,6 +531,8 @@ class MekkaDashboardServer:
         r.add_post("/api/system/reboot", self._handle_system_reboot)
         r.add_get("/api/mode", self._handle_mode_get)
         r.add_post("/api/mode", self._handle_mode_set)
+        r.add_get("/api/exchange", self._handle_exchange_get)
+        r.add_post("/api/exchange", self._handle_exchange_set)
         r.add_get("/api/report/daily", self._handle_report_daily)
         r.add_get("/api/report/weekly", self._handle_report_weekly)
 
@@ -546,6 +634,7 @@ class MekkaDashboardServer:
             make_price_feed().run(self._mark_prices)
         )
         self._live_bcast_task = asyncio.create_task(self._live_price_broadcast_loop())
+        self._portfolio_warm_task = asyncio.create_task(self._warm_live_portfolio_context())
         # Startup ping — fire-and-forget, non-blocking
         asyncio.create_task(TelegramAlerter().ping(reason="dashboard startup"))
         # Story 228 — BacktestScheduler: daily auto-run at midnight UTC
@@ -588,6 +677,13 @@ class MekkaDashboardServer:
             except Exception:  # noqa: BLE001
                 pass
             self._daily_reporter = None
+        if self._portfolio_warm_task is not None:
+            self._portfolio_warm_task.cancel()
+            try:
+                await self._portfolio_warm_task
+            except asyncio.CancelledError:
+                pass
+            self._portfolio_warm_task = None
         for ws in list(self._sockets):
             await ws.close(code=1001, message=b"server shutdown")
         for ws in list(self._live_sockets):
@@ -1920,7 +2016,11 @@ class MekkaDashboardServer:
                     _open_notional += _long_notional[sym]
                 elif net < -1e-8:
                     _open_notional += _short_notional[sym]
-            _equity = await MekkaRepository.get_today_peak_equity()
+            if settings.paper_trading:
+                _equity = await MekkaRepository.get_today_peak_equity()
+            else:
+                _live_portfolio = await self._get_live_portfolio_context(max_age_s=2.0)
+                _equity = float(_live_portfolio.get("equity_usd") or 0.0)
             _cap_usd = _equity * settings.max_portfolio_exposure_pct
             _used_pct = round(_open_notional / _cap_usd * 100, 1) if _cap_usd > 0 else 0.0
             exposure = {
@@ -1935,7 +2035,13 @@ class MekkaDashboardServer:
         # ── Daily PnL ──────────────────────────────────────────────────
         try:
             _pnl_usd = await MekkaRepository.get_today_pnl_usd()
-            _eq = _equity if "_equity" in dir() else await MekkaRepository.get_today_peak_equity()
+            if "_equity" in dir():
+                _eq = _equity
+            elif settings.paper_trading:
+                _eq = await MekkaRepository.get_today_peak_equity()
+            else:
+                _live_portfolio = await self._get_live_portfolio_context(max_age_s=2.0)
+                _eq = float(_live_portfolio.get("equity_usd") or 0.0)
             _pnl_pct = round(_pnl_usd / _eq * 100, 3) if _eq > 0 else 0.0
             daily_pnl = {
                 "pnl_usd": round(_pnl_usd, 2),
@@ -2406,7 +2512,11 @@ class MekkaDashboardServer:
             wins = sum(1 for p in pnls if p > 0)
             losses = sum(1 for p in pnls if p < 0)
             decided = wins + losses
-            equity = await MekkaRepository.get_today_peak_equity()
+            if settings.paper_trading:
+                equity = await MekkaRepository.get_today_peak_equity()
+            else:
+                live_portfolio = await self._get_live_portfolio_context(max_age_s=2.0)
+                equity = float(live_portfolio.get("equity_usd") or 0.0)
         except Exception as exc:  # noqa: BLE001
             logger.warning("session_stats error: %s", exc)
             return web.json_response({"error": str(exc)}, status=500)
@@ -2471,6 +2581,39 @@ class MekkaDashboardServer:
             return web.json_response(
                 {"error": "symbol e side (LONG|SHORT) são obrigatórios"}, status=400
             )
+
+        # ── LIVE close (Bybit/Binance): place a real reduce-only market order
+        # and cancel resting SL/TP. The paper logic below only nets the local
+        # DB and would NOT close a real position — so live must take this path.
+        if not _s.paper_trading:
+            try:
+                from src.agents.iron_man import IronMan  # noqa: WPS433
+                res = await IronMan().close_position(symbol, side)
+                ok = res.status.value in ("FILLED", "PARTIAL")
+                if ok:
+                    try:
+                        res.metadata = {**(res.metadata or {}), "manual_close": True}
+                        await MekkaRepository.save_trade(res)
+                    except Exception as _save_exc:  # noqa: BLE001
+                        logger.warning("manual live close save_trade failed: %s", _save_exc)
+                    await MekkaRepository.log_event(
+                        agent="Dashboard", event="POSITION_CLOSED", severity="INFO",
+                        symbol=symbol,
+                        message=f"Posição LIVE {symbol} {side} fechada manualmente — qty={res.quantity}",
+                        payload={"order_id": res.order_id, "exchange": _s.active_exchange},
+                    )
+                    return web.json_response({
+                        "status": "closed", "symbol": symbol, "side": side,
+                        "quantity": res.quantity, "avg_price": res.avg_price,
+                        "order_id": res.order_id, "is_paper": False,
+                    })
+                return web.json_response({
+                    "status": res.status.value.lower() or "error",
+                    "error": res.error or "Falha ao fechar posição live.",
+                }, status=200)
+            except Exception as exc:
+                logger.error("live positions_close error: %s", exc, exc_info=True)
+                return web.json_response({"error": f"Erro ao fechar posição live: {exc}"}, status=500)
 
         try:
             # Calculate open net position
@@ -2885,7 +3028,11 @@ class MekkaDashboardServer:
         ``days`` clamps the window (1..365). Output is oldest-first so the
         frontend can pipe it straight into Chart.js.
         """
-        days = _safe_limit(request.query.get("days"), default=30, max_value=365)
+        days = _safe_limit(
+            request.query.get("days") or request.query.get("window"),
+            default=30,
+            max_value=365,
+        )
         rows = await MekkaRepository.list_recent_daily_pnl(limit=days)
         items = [
             {
@@ -3094,7 +3241,11 @@ class MekkaDashboardServer:
             return web.json_response({"error": str(exc)}, status=500)
 
     async def _handle_pnl_summary(self, request: web.Request) -> web.Response:
-        days = _safe_limit(request.query.get("days"), default=30, max_value=365)
+        days = _safe_limit(
+            request.query.get("days") or request.query.get("window"),
+            default=30,
+            max_value=365,
+        )
         try:
             data = await asyncio.wait_for(
                 MekkaRepository.get_pnl_summary(window_days=days), timeout=3.0
@@ -3102,19 +3253,34 @@ class MekkaDashboardServer:
         except asyncio.TimeoutError:
             return web.json_response({"error": "pnl summary timed out"}, status=504)
 
-        # [C3] For paper mode: inject dynamic equity (realized + unrealized PnL)
-        if settings.paper_trading:
-            try:
+        try:
+            if settings.paper_trading:
                 from src.dashboard.positions_provider import get_paper_equity_summary  # noqa: WPS433
                 eq = await asyncio.wait_for(
                     get_paper_equity_summary(mark_prices=dict(self._mark_prices)), timeout=2.0
                 )
                 data["paper_equity"] = eq
-                # Override latest_equity_usd in the window summary for accuracy
                 if "window" in data and eq.get("equity_usd"):
                     data["window"]["latest_equity_usd"] = eq["equity_usd"]
-            except Exception as _exc:
-                logger.debug("paper equity summary failed: %s", _exc)
+            else:
+                live_portfolio = await self._get_live_portfolio_context(max_age_s=2.0)
+                if (
+                    "window" in data
+                    and live_portfolio.get("is_live_ok")
+                    and float(live_portfolio.get("equity_usd") or 0.0) > 0
+                ):
+                    data["window"]["latest_equity_usd"] = round(
+                        float(live_portfolio["equity_usd"]), 2
+                    )
+                    data["window"]["available_balance_usd"] = round(
+                        float(live_portfolio.get("available_balance_usd") or 0.0), 2
+                    )
+                    data["window"]["margin_used_usd"] = round(
+                        float(live_portfolio.get("margin_used_usd") or 0.0), 2
+                    )
+                    data["window"]["wallet_source"] = live_portfolio.get("source")
+        except Exception as _exc:
+            logger.debug("dynamic equity summary failed: %s", _exc)
 
         return web.json_response(data)
 
@@ -3202,6 +3368,62 @@ class MekkaDashboardServer:
 
         logger.info("Trading mode changed to '%s' via dashboard API", mode)
         return web.json_response({"mode": mode, "params": get_params()})
+
+    # ------------------------------------------------------------------
+    # Active Exchange — GET /api/exchange  POST /api/exchange
+    # ------------------------------------------------------------------
+
+    async def _handle_exchange_get(self, _: web.Request) -> web.Response:
+        """Return active exchange + per-exchange metadata for the selector."""
+        from src.config.runtime_exchange import summary
+        return web.json_response(summary())
+
+    async def _handle_exchange_set(self, request: web.Request) -> web.Response:
+        """
+        POST /api/exchange  body: {"exchange": "binance"}
+
+        Switches the active exchange in memory (next cycle/action picks it up)
+        and persists the choice to data/runtime_exchange.json. Rejects unknown
+        exchanges or ones without configured credentials. Never touches the
+        live-trading double-gate or testnet flags.
+        """
+        from src.config.runtime_exchange import set_exchange, summary, network_for
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+
+        ex = str(body.get("exchange", "")).strip().lower()
+        try:
+            set_exchange(ex)
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+        try:
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="EXCHANGE_CHANGED",
+                severity="WARNING",
+                message=f"Active exchange switched to {ex} ({network_for(ex)}) via dashboard",
+                payload={"exchange": ex, "network": network_for(ex)},
+            )
+        except Exception:
+            pass  # audit is best-effort
+
+        # Pre-warm the newly-selected CCXT exchange so the first trade after the
+        # switch is fast (load_markets ~9-18s otherwise). Fire-and-forget.
+        async def _prewarm() -> None:
+            try:
+                if ex in ("binance", "bybit"):
+                    from src.agents.iron_man import IronMan
+                    await IronMan()._get_ccxt_exchange(ex)
+            except Exception as _exc:  # noqa: BLE001
+                logger.warning("exchange switch pre-warm failed (non-fatal): %s", _exc)
+
+        asyncio.create_task(_prewarm())
+
+        logger.info("Active exchange changed to '%s' via dashboard API", ex)
+        return web.json_response({"ok": True, **summary()})
 
     async def _handle_env(self, _: web.Request) -> web.Response:
         """GET /api/env — environment & safety posture for the UI badge.
@@ -3389,7 +3611,7 @@ class MekkaDashboardServer:
         # REST endpoints share this builder; serving the same payload twice
         # within the TTL avoids hammering the DB and keeps responses crisp.
         loop = asyncio.get_running_loop()
-        ttl = 1.5 if include_tables else 0.5
+        ttl = 4.0 if include_tables else 2.0
         cached = self._payload_cache.get(include_tables)
         if cached and cached[0] > loop.time():
             self._metrics["payload_cache_hits_total"] += 1
@@ -3401,14 +3623,15 @@ class MekkaDashboardServer:
         # loop's outer try/except log it rather than blocking every WS client.
         try:
             overview = await asyncio.wait_for(
-                MekkaRepository.get_overview(), timeout=3.0
+                MekkaRepository.get_overview(), timeout=2.0
             )
         except asyncio.TimeoutError:
             logger.warning("get_overview timed out; serving last known payload")
             if cached:
                 return cached[1]
-            raise
+            overview = {}
         from src.config.runtime_mode import get_mode  # noqa: WPS433
+        live_portfolio = await self._get_live_portfolio_context(max_age_s=8.0)
 
         payload = {
             "overview": {
@@ -3419,6 +3642,11 @@ class MekkaDashboardServer:
                 "network": settings.hyperliquid_network,
                 "assets": settings.trading_assets,
                 "active_exchange": settings.active_exchange,
+                "equity_usd": round(float(live_portfolio.get("equity_usd") or 0.0), 2),
+                "available_balance_usd": round(float(live_portfolio.get("available_balance_usd") or 0.0), 2),
+                "margin_used_usd": round(float(live_portfolio.get("margin_used_usd") or 0.0), 2),
+                "portfolio_source": live_portfolio.get("source"),
+                "portfolio_error": live_portfolio.get("error"),
             }
         }
         if not include_tables:
@@ -3439,7 +3667,20 @@ class MekkaDashboardServer:
             logger.warning("payload tables query timed out")
             if cached:
                 return cached[1]
-            raise
+            payload["signals"] = []
+            payload["trades"] = []
+            payload["audit"] = []
+            payload["layers"] = []
+            payload["timeline"] = []
+            payload["symbol_timeline"] = []
+            payload["risk_heatmap"] = []
+            payload["risk_drilldown"] = []
+            payload["anomalies"] = []
+            payload["global_alerts"] = []
+            payload["hero_sla"] = []
+            payload["overview"]["drawdown_pct_today"] = 0.0
+            self._payload_cache[include_tables] = (loop.time() + ttl, payload)
+            return payload
 
         payload["signals"] = [
             {
@@ -3733,7 +3974,7 @@ class MekkaDashboardServer:
 
             return web.Response(
                 content_type="application/json",
-                text=_json.dumps({"ok": True, **data}),
+                text=_json.dumps({"ok": True, **data}, default=_json_safe_default),
             )
         except Exception as exc:  # noqa: BLE001
             import json as _json
@@ -4610,10 +4851,18 @@ class MekkaDashboardServer:
         days = _safe_limit(request.query.get("days"), default=30, max_value=90)
         try:
             rows = await MekkaRepository.list_recent_audit(limit=5000)
-            # Filtrar por janela de tempo
+            # Filtrar por janela de tempo. Timestamps do DB podem ser naive;
+            # normaliza para UTC-aware antes de comparar com o cutoff aware
+            # (senão: "can't compare offset-naive and offset-aware datetimes").
             from datetime import timedelta
+
+            def _aware(dt: Any) -> Any:
+                if dt is not None and getattr(dt, "tzinfo", None) is None:
+                    return dt.replace(tzinfo=timezone.utc)
+                return dt
+
             cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-            rows = [r for r in rows if r.timestamp and r.timestamp >= cutoff]
+            rows = [r for r in rows if r.timestamp and _aware(r.timestamp) >= cutoff]
 
             # Contagem por regime e hora UTC
             regime_hour: dict = defaultdict(lambda: defaultdict(int))
@@ -4794,7 +5043,7 @@ class MekkaDashboardServer:
 
         today_utc = datetime.now(timezone.utc).date().isoformat()
         mark_prices: dict[str, float] = dict(self._mark_prices) if self._mark_prices else {}
-        has_prices = bool(mark_prices)
+        has_mark_prices = bool(mark_prices)
 
         try:
             pos_data, trades_all, daily_pnl = await asyncio.gather(
@@ -4809,13 +5058,18 @@ class MekkaDashboardServer:
         # ── Posições abertas ──────────────────────────────────────────────
         open_positions = []
         open_pnl = 0.0
-        open_pnl_known = False  # True quando temos mark prices reais
+        open_pnl_known = False  # True quando temos mark prices reais ou uPnL nativo da exchange
         for p in (pos_data.get("items") or []):
             entry = float(p.get("entry_price") or 0.0)
             mark  = float(p.get("mark_price")  or 0.0)
-            pnl   = float(p.get("pnl_usd")     or 0.0)
-            # Considera uPnL calculado apenas se mark != entry (preço real disponível)
-            has_upnl = has_prices and mark > 0 and abs(mark - entry) > 0.001
+            raw_pnl = p.get("pnl_usd")
+            pnl   = float(raw_pnl or 0.0)
+            is_paper_pos = bool(p.get("is_paper", True))
+            # Para Hyperliquid/paper usamos mark prices do servidor.
+            # Para Binance/Bybit live aceitamos o uPnL nativo vindo da própria exchange.
+            has_server_mark = has_mark_prices and mark > 0 and abs(mark - entry) > 0.001
+            has_native_live_pnl = (not is_paper_pos) and (raw_pnl is not None)
+            has_upnl = has_server_mark or has_native_live_pnl
             if has_upnl:
                 open_pnl += pnl
                 open_pnl_known = True
@@ -4828,7 +5082,7 @@ class MekkaDashboardServer:
                 "mark_price":  round(mark, 4),
                 "pnl_usd":     round(pnl, 2) if has_upnl else None,
                 "has_upnl":    has_upnl,
-                "is_paper":    p.get("is_paper", True),
+                "is_paper":    is_paper_pos,
                 "emoji":       emoji,
             })
 
@@ -4869,6 +5123,9 @@ class MekkaDashboardServer:
         net_pnl   = round(total_pnl + (open_pnl if open_pnl_known else 0.0), 2)
         day_emoji = "🟢" if net_pnl > 0 else ("🔴" if net_pnl < 0 else "➖")
 
+        show_quote_warning = (not open_pnl_known) and len(open_positions) > 0
+        active_exchange_label = str(settings.active_exchange or "exchange").upper()
+
         return web.json_response({
             "ok":                True,
             "date_utc":          today_utc,
@@ -4876,7 +5133,12 @@ class MekkaDashboardServer:
             "open_positions":    open_positions,
             "open_count":        len(open_positions),
             "open_pnl_usd":      round(open_pnl, 2) if open_pnl_known else None,
-            "has_prices":        has_prices,
+            "has_prices":        has_mark_prices or open_pnl_known,
+            "show_quote_warning": show_quote_warning,
+            "quote_warning_message": (
+                f"Sem cotação de mercado ao vivo na {active_exchange_label} agora. "
+                "P&L das posições indisponível."
+            ),
             # Trades
             "today_trades":      today_trades,
             "recent_trades":     recent_trades,
@@ -5021,12 +5283,7 @@ class MekkaDashboardServer:
         })
 
         # G2: equity available
-        equity_usd = 0.0
-        try:
-            summary = await MekkaRepository.get_pnl_summary(window_days=1)
-            equity_usd = float(summary["window"].get("latest_equity_usd") or 0.0)
-        except Exception:
-            equity_usd = float(_s.paper_equity_usd) if _s.paper_trading else 0.0
+        equity_usd = await self._manual_equity_usd()
         wallet_ok = equity_usd > 0
         checks.append({
             "name": "wallet_ok",
@@ -5420,8 +5677,24 @@ class MekkaDashboardServer:
                             "bybit_testnet": getattr(_s, "bybit_testnet", None),
                         },
                     )
-                    # Fall through to the IronMan call below as if Batman approved.
-                    # exec_reason left empty — successful path.
+                    # Build an EXECUTABLE approval so IronMan actually places
+                    # the order. Merely "falling through" kept Batman's REJECTED
+                    # verdict, and IronMan independently SKIPs anything that is
+                    # not is_executable (qty=0). Override with the recommended
+                    # size/leverage (clamped to model bounds). Safe because we
+                    # already gated on paper/testnet above. Mirrors the manual
+                    # trade handler's force path.
+                    from src.models.risk import RiskApproval, RiskVerdict
+                    approval = RiskApproval(
+                        symbol=signal.symbol,
+                        verdict=RiskVerdict.APPROVED,
+                        reasons=["FORCE_EXECUTE (Modo Deus): override do Batman em paper/testnet"]
+                                + list(approval.reasons or []),
+                        adjusted_size_pct=max(0.0001, min(float(signal.size_pct), 0.10)),
+                        adjusted_leverage=max(1, min(int(signal.leverage), 50)),
+                        breached_limits=list(approval.breached_limits or []),
+                        metadata={**(approval.metadata or {}), "force_execute": True},
+                    )
                 elif force_execute and not env_is_safe_for_bypass:
                     # Operator asked to force on a mainnet/live combo — REJECT.
                     # This is a hard rule: we never override risk gates against
@@ -5515,17 +5788,26 @@ class MekkaDashboardServer:
                 pass
 
             order_id = result.order_id
-            exec_status = "submitted"
+            # Map IronMan's execution status to the dashboard contract.
+            # FILLED/PARTIAL/PAPER are successes; ERROR/REJECTED/SKIPPED are
+            # failures the operator MUST see — never claim "submitted" when the
+            # venue rejected the order (e.g. notional below min, IOC filled 0).
+            ok_statuses = {"FILLED", "PARTIAL", "PAPER"}
+            exec_ok = result.status.value in ok_statuses
+            err_detail = getattr(result, "error", None)
+            exec_status = "submitted" if exec_ok else "blocked"
             exec_reason = (
                 f"{'Paper' if result.is_paper else 'Live'} order "
                 f"{result.status.value} | "
                 f"qty={result.quantity} avg={result.avg_price}"
             )
+            if not exec_ok and err_detail:
+                exec_reason += f" — {err_detail}"
 
             await MekkaRepository.log_event(
                 agent="Dashboard",
-                event="TRADE_NOW_EXECUTED",
-                severity="INFO",
+                event="TRADE_NOW_EXECUTED" if exec_ok else "TRADE_NOW_BLOCKED",
+                severity="INFO" if exec_ok else "WARNING",
                 message=(
                     f"TradeNow order {result.status.value} "
                     f"{'(paper)' if result.is_paper else '(LIVE)'} "
@@ -5541,6 +5823,7 @@ class MekkaDashboardServer:
                     "avg_price": result.avg_price,
                     "notional_usd": result.notional_usd,
                     "batman_verdict": approval.verdict.value,
+                    "error": err_detail,
                 },
             )
 
@@ -5668,6 +5951,14 @@ class MekkaDashboardServer:
     async def _manual_equity_usd(self) -> float:
         """Best-effort equity lookup shared by manual analyze + execute."""
         from src.config.settings import settings as _s
+        if not _s.paper_trading:
+            try:
+                live_portfolio = await self._get_live_portfolio_context(max_age_s=2.0)
+                eq = float(live_portfolio.get("equity_usd") or 0.0)
+                if live_portfolio.get("is_live_ok") and eq > 0:
+                    return eq
+            except Exception:
+                pass
         try:
             summary = await MekkaRepository.get_pnl_summary(window_days=1)
             eq = float(summary["window"].get("latest_equity_usd") or 0.0)
@@ -6417,4 +6708,3 @@ def _build_global_alerts(
             }
         )
     return alerts
-

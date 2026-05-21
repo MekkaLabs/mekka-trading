@@ -24,6 +24,7 @@ Hard rules
 from __future__ import annotations
 
 import json
+import asyncio
 from typing import Any, Optional
 from pathlib import Path
 
@@ -138,10 +139,13 @@ class PortfolioManager(BaseAgent[EquitySnapshot]):
 
         cfg: dict[str, Any] = {
             "enableRateLimit": True,
-            "timeout": 10_000,
+            "timeout": 20_000,
             "options": {
                 "defaultType": "swap",
-                "recvWindow": 10_000,
+                # 60s is Binance's max recvWindow. A wide window makes the
+                # InvalidNonce -1021 ("timestamp outside recvWindow") effectively
+                # impossible from clock drift, which we saw intermittently.
+                "recvWindow": 60_000,
                 "adjustForTimeDifference": True,
             },
         }
@@ -155,6 +159,13 @@ class PortfolioManager(BaseAgent[EquitySnapshot]):
                 raise RuntimeError("Binance API credentials missing")
             cfg["apiKey"] = settings.binance_api_key
             cfg["secret"] = settings.binance_api_secret
+            cfg["options"].update(
+                {
+                    "defaultSubType": "linear",
+                    "fetchMarkets": {"types": ["linear"]},
+                    "disableFuturesSandboxWarning": True,
+                }
+            )
 
         exchange = cls(cfg)
         try:
@@ -162,7 +173,14 @@ class PortfolioManager(BaseAgent[EquitySnapshot]):
                 set_sandbox_mode = getattr(exchange, "set_sandbox_mode", None)
                 if callable(set_sandbox_mode):
                     set_sandbox_mode(True)
-            await exchange.load_markets()
+            for attempt in range(1, 4):
+                try:
+                    await exchange.load_markets()
+                    break
+                except Exception:
+                    if attempt >= 3:
+                        raise
+                    await asyncio.sleep(float(attempt))
             return exchange
         except Exception:
             close_fn = getattr(exchange, "close", None)
@@ -402,6 +420,14 @@ class PortfolioManager(BaseAgent[EquitySnapshot]):
                 pos.get("leverage"),
                 self._safe_int((pos.get("info") or {}).get("leverage"), None),
             )
+            mark_price = self._safe_float(
+                pos.get("markPrice"),
+                self._safe_float((pos.get("info") or {}).get("markPrice"), 0.0),
+            ) or None
+            liq_price = self._safe_float(
+                pos.get("liquidationPrice"),
+                self._safe_float((pos.get("info") or {}).get("liquidationPrice"), 0.0),
+            ) or None
 
             parsed_positions.append(
                 PositionSummary(
@@ -411,6 +437,8 @@ class PortfolioManager(BaseAgent[EquitySnapshot]):
                     entry_price=entry_price,
                     unrealized_pnl_usd=unrealized,
                     leverage=leverage,
+                    mark_price=mark_price,
+                    liquidation_price=liq_price,
                 )
             )
 

@@ -17,7 +17,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
+
+# Strip EMPTY LLM API-key env vars before settings load. An empty
+# ``ANTHROPIC_API_KEY=`` / ``OPENAI_API_KEY=`` in the shell environment takes
+# precedence over the .env file in pydantic-settings and would silently shadow
+# a valid key configured in .env (observed: Vision falling back to HOLD because
+# an empty env var hid the real Anthropic key). Removing only empty values
+# lets the .env be authoritative while still honoring a real exported key.
+for _k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+    if os.environ.get(_k, None) == "":
+        del os.environ[_k]
 
 from loguru import logger
 
@@ -199,6 +210,14 @@ def main() -> int:
             # anterior), mas garantimos o stop() ao encerrar para que nenhuma
             # chamada de LLM continue após o shutdown.
             async def _run_both() -> None:
+                # Apply a persisted runtime exchange override (set via the
+                # dashboard selector) onto live settings before anything boots.
+                try:
+                    from src.config.runtime_exchange import apply_to_settings
+                    apply_to_settings()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[run] runtime exchange override skipped: {}", exc)
+
                 controller = RuntimeController(equity_usd=args.equity)
                 # Telegram inbound poller lives in the control plane (survives
                 # runtime stop/start) so /ligar, /desligar e /reboot funcionam
@@ -217,6 +236,25 @@ def main() -> int:
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("[run] TelegramInboundPoller failed (non-fatal): %s", exc)
                 await controller.start()
+
+                # Pre-warm the CCXT exchange in the background. load_markets
+                # costs 9-18s on Binance testnet; warming it now means the
+                # first dashboard "Executar Trade" click is fast instead of
+                # paying the cold connection cost. Fire-and-forget; non-fatal.
+                async def _prewarm_ccxt() -> None:
+                    try:
+                        if settings.active_exchange in ("binance", "bybit"):
+                            from src.agents.iron_man import IronMan
+                            await IronMan()._get_ccxt_exchange(settings.active_exchange)
+                            logger.info(
+                                "[run] CCXT exchange pre-warmed: {}",
+                                settings.active_exchange,
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("[run] CCXT pre-warm failed (non-fatal): {}", exc)
+
+                asyncio.create_task(_prewarm_ccxt(), name="ccxt_prewarm")
+
                 try:
                     await run_dashboard_server(
                         host=args.dashboard_host,
@@ -227,6 +265,11 @@ def main() -> int:
                     if poller_task is not None:
                         poller_task.cancel()
                     await controller.stop()
+                    try:
+                        from src.agents.iron_man import aclose_ccxt_cache
+                        await aclose_ccxt_cache()
+                    except Exception:  # noqa: BLE001
+                        pass
 
             asyncio.run(_run_both())
             return 0

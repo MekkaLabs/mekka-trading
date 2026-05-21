@@ -152,6 +152,7 @@ class Superman(BaseAgent[MarketData]):
 
         base_cfg: dict = {
             "enableRateLimit": True,
+            "timeout": 20_000,
             "options": {
                 "defaultType": "swap",
                 "recvWindow": 10_000,
@@ -169,6 +170,13 @@ class Superman(BaseAgent[MarketData]):
             if settings.binance_api_key:
                 base_cfg["apiKey"] = settings.binance_api_key
                 base_cfg["secret"] = settings.binance_api_secret
+            base_cfg["options"].update(
+                {
+                    "defaultSubType": "linear",
+                    "fetchMarkets": {"types": ["linear"]},
+                    "disableFuturesSandboxWarning": True,
+                }
+            )
 
         return base_cfg
 
@@ -182,6 +190,7 @@ class Superman(BaseAgent[MarketData]):
         if self._exchange is not None:
             return self._exchange
 
+        import asyncio
         # Lazy import — keeps module import cheap when ccxt isn't installed
         import ccxt.async_support as ccxt  # noqa: WPS433
 
@@ -214,7 +223,20 @@ class Superman(BaseAgent[MarketData]):
                             f"[Superman/{ex_id}] set_sandbox_mode failed: {_sbx_exc}"
                         )
 
-                    await exchange.load_markets()
+                    last_exc: Exception | None = None
+                    for attempt in range(1, 4):
+                        try:
+                            await exchange.load_markets()
+                            break
+                        except Exception as exc:
+                            last_exc = exc
+                            if attempt >= 3:
+                                raise
+                            self._log.warning(
+                                f"[Superman/{ex_id}] load_markets retry {attempt}/3 after error: {exc}"
+                            )
+                            await asyncio.sleep(float(attempt))
+
                     self._exchange = exchange
                     self._exchange_id = ex_id
                     if ex_id == primary:

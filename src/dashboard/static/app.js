@@ -3470,6 +3470,81 @@ function _mkBootTopBar() {
   // badge is dangerous on a mainnet → testnet downgrade so we still poll.
   _mkLoadEnvBadge();
   setInterval(_mkLoadEnvBadge, 60000);
+  _mkLoadExchangeSelector();
+}
+
+// ── Exchange selector ────────────────────────────────────────
+/**
+ * Populate #exchange-select from /api/exchange and wire the switch.
+ * Options without configured credentials are disabled. Switching POSTs to
+ * /api/exchange (mutates settings in runtime + persists) and refreshes the
+ * env badge so the operator immediately sees the new venue/network.
+ */
+async function _mkLoadExchangeSelector() {
+  const sel = document.getElementById('exchange-select');
+  if (!sel) return;
+  if (sel.dataset.wired !== '1') {
+    sel.addEventListener('change', _mkOnExchangeChange);
+    sel.dataset.wired = '1';
+  }
+  try {
+    const res = await fetch('/api/exchange').then(r => r.json());
+    const list = (res && res.exchanges) || [];
+    if (!list.length) return;
+    sel.innerHTML = '';
+    for (const ex of list) {
+      const opt = document.createElement('option');
+      opt.value = ex.id;
+      const net = String(ex.network || '').toUpperCase();
+      opt.textContent = ex.credentials_present
+        ? `${ex.label} · ${net}`
+        : `${ex.label} (sem chaves)`;
+      opt.disabled = !ex.credentials_present;
+      if (ex.active) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.dataset.current = res.active || '';
+  } catch (_e) {
+    // Leave the placeholder; selector is non-critical.
+  }
+}
+
+async function _mkOnExchangeChange(ev) {
+  const sel = ev.target;
+  const next = sel.value;
+  const prev = sel.dataset.current || '';
+  if (!next || next === prev) return;
+  const label = sel.options[sel.selectedIndex]?.textContent || next;
+  if (!window.confirm(`Trocar a corretora ativa para "${label}"?\n\nA mudança vale para o próximo ciclo e novas ordens.`)) {
+    sel.value = prev;
+    return;
+  }
+  sel.disabled = true;
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = (typeof getDashboardToken === 'function') ? getDashboardToken() : '';
+    if (token) headers['X-Mekka-Token'] = token;
+    const res = await fetch('/api/exchange', {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: JSON.stringify({ exchange: next }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      window.alert(`Não foi possível trocar de corretora:\n${data.error || res.status}`);
+      sel.value = prev;
+    } else {
+      sel.dataset.current = data.active || next;
+      _mkLoadEnvBadge();
+    }
+  } catch (e) {
+    window.alert(`Erro ao trocar de corretora: ${e}`);
+    sel.value = prev;
+  } finally {
+    sel.disabled = false;
+    _mkLoadExchangeSelector();
+  }
 }
 
 // ── Environment badge ────────────────────────────────────────
@@ -4045,9 +4120,19 @@ async function _refreshForceExecuteVisibility() {
     // Server's canonical "safe" definition: paper OR any non-mainnet network.
     const safe = env.paper_trading === true || env.network === 'testnet';
     row.classList.toggle('hidden', !safe);
-    if (!safe) {
-      const cb = document.getElementById('trade-force-execute');
-      if (cb) cb.checked = false;
+    const cb = document.getElementById('trade-force-execute');
+    if (cb) {
+      if (!safe) {
+        // Hard rule: never force on mainnet/live. Force the box off.
+        cb.checked = false;
+        cb.dataset.defaulted = '';
+      } else if (cb.dataset.defaulted !== '1') {
+        // On paper/testnet, default Modo Deus ON so test trades execute even
+        // when the agents (Batman/guardrails) say no. Only default once so a
+        // deliberate uncheck by the operator is respected on later polls.
+        cb.checked = true;
+        cb.dataset.defaulted = '1';
+      }
     }
   } catch (_e) {
     row.classList.add('hidden');
@@ -4751,9 +4836,14 @@ function _liveRenderPositions(positions) {
         let rows = '';
         if (sl > 0) rows += `<div class="live-pos-row live-pos-sl"><span>🛑 SL${slDist ? ' (−'+slDist+'%)' : ''}</span><span>$${_liveFmtMoney(sl)}</span></div>`;
         if (tp > 0) rows += `<div class="live-pos-row live-pos-tp"><span>🎯 TP${tpDist ? ' (+'+tpDist+'%)' : ''}</span><span>$${_liveFmtMoney(tp)}</span></div>`;
+        const liq = Number(p.liq_price || 0);
+        if (liq > 0) {
+          const liqDist = (entry > 0) ? Math.abs((liq - entry) / entry * 100).toFixed(1) : null;
+          rows += `<div class="live-pos-row live-pos-liq"><span>🔥 Liq${liqDist ? ' ('+liqDist+'%)' : ''}</span><span>$${_liveFmtMoney(liq)}</span></div>`;
+        }
         return rows;
       })()}
-      ${p.is_paper ? `<div class="live-pos-actions"><button class="live-pos-close-btn" data-sym="${escapeHtml(p.symbol)}" data-side="${escapeHtml(p.side || 'LONG')}">✕ Fechar</button></div>` : ''}
+      <div class="live-pos-actions"><button class="live-pos-close-btn" data-sym="${escapeHtml(p.symbol)}" data-side="${escapeHtml(p.side || 'LONG')}">✕ Fechar</button></div>
     </div>`;
   }).join('');
 
@@ -6140,6 +6230,19 @@ function _cmdSetStatus(msg, type = 'info') {
 let _imprData = [];
 let _imprDomainFilter = 'all';
 let _imprViewFilter = 'novas';   // aba de status: novas | andamento | fechadas | todas
+let _imprSourceFilter = 'all';   // fonte/scanner: all | beast | code_auditor | risk_scanner | ops_scanner | memory_scanner | inbox
+
+// Continuous Improvement Department — scanner/source badges.
+const _IMPR_SOURCE_BADGE = {
+  beast:          { emoji: '🐺', label: 'Beast' },
+  code_auditor:   { emoji: '🔍', label: 'CodeAuditor' },
+  risk_scanner:   { emoji: '⚠️', label: 'RiskScanner' },
+  ops_scanner:    { emoji: '🛠️', label: 'OpsScanner' },
+  memory_scanner: { emoji: '🧠', label: 'MemoryScanner' },
+  ice_man:        { emoji: '🧊', label: 'Ice Man' },
+  sage:           { emoji: '📐', label: 'Sage' },
+  inbox:          { emoji: '📥', label: 'Inbox' },
+};
 // Feature D — dev lifecycle / PR status keyed by rec id (from
 // /api/improvements/pr-status). Empty when the endpoint is unavailable.
 let _imprPrStatus = {};
@@ -6265,7 +6368,8 @@ function _imprRender() {
   if (!list) return;
   const rows = _imprData.filter(r =>
     (_imprDomainFilter === 'all' || r.domain === _imprDomainFilter) &&
-    (_imprViewFilter === 'todas' || _imprViewOf(r) === _imprViewFilter)
+    (_imprViewFilter === 'todas' || _imprViewOf(r) === _imprViewFilter) &&
+    (_imprSourceFilter === 'all' || (r.source || 'beast') === _imprSourceFilter)
   );
   if (!rows.length) {
     const msg = _imprViewFilter === 'novas'
@@ -6289,6 +6393,7 @@ function _imprRender() {
         <div class="impr-card-top">
           <span class="impr-prio impr-prio-${escapeHtml(r.priority)}">${escapeHtml(r.priority)}</span>
           <span class="impr-domain">${r.domain === 'trading-ops' ? '⚔️ Trading/Ops' : '🧑‍💻 Dev'}</span>
+          ${(() => { const s = _IMPR_SOURCE_BADGE[r.source || 'beast']; return s ? `<span class="impr-source" title="Fonte: ${escapeHtml(s.label)}">${s.emoji} ${escapeHtml(s.label)}</span>` : ''; })()}
           <span class="impr-area">${escapeHtml(r.area)}</span>
           <span class="impr-decision impr-decision-${dec.cls}">${dec.label}</span>
           ${devBadge}
@@ -6513,6 +6618,14 @@ function _bootImprovements() {
     btn.addEventListener('click', () => {
       _imprViewFilter = btn.dataset.view || 'novas';
       document.querySelectorAll('.impr-view').forEach(b => b.classList.toggle('active', b === btn));
+      _imprRender();
+    });
+  });
+  // Source/scanner filter (Beast / CodeAuditor / RiskScanner / …).
+  document.querySelectorAll('.impr-src-filter').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _imprSourceFilter = btn.dataset.source || 'all';
+      document.querySelectorAll('.impr-src-filter').forEach(b => b.classList.toggle('active', b === btn));
       _imprRender();
     });
   });
@@ -7058,6 +7171,7 @@ async function loadTodaySummary() {
     if (!d.ok) throw new Error(d.error || 'API error');
 
     const hasPrices   = !!d.has_prices;
+    const showQuoteWarn = !!d.show_quote_warning;
     const openPnlNull = d.open_pnl_usd === null || d.open_pnl_usd === undefined;
 
     // ── Paper badge ──────────────────────────────────────────────────────
@@ -7070,11 +7184,11 @@ async function loadTodaySummary() {
       noQuoteWarn = document.createElement('div');
       noQuoteWarn.id = 'ts-no-quote-warn';
       noQuoteWarn.className = 'ts-warn-banner';
-      noQuoteWarn.innerHTML = '⚠️ Sem cotação de mercado — credenciais da Hyperliquid não configuradas. P&L das posições indisponível.';
       const sec = document.getElementById('sec-today-summary');
       if (sec) sec.insertBefore(noQuoteWarn, sec.firstChild);
     }
-    noQuoteWarn.style.display = hasPrices ? 'none' : '';
+    noQuoteWarn.textContent = d.quote_warning_message || 'Sem cotação de mercado ao vivo. P&L das posições indisponível.';
+    noQuoteWarn.style.display = (hasPrices || !showQuoteWarn) ? 'none' : '';
 
     // ── Big cards ────────────────────────────────────────────────────────
     // Resultado Líquido: se não há preços, mostrar só realizado

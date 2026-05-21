@@ -40,7 +40,9 @@ Output contract (stable):
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from typing import Any
 
 from src.config.settings import settings
@@ -48,6 +50,9 @@ from src.services.market_registry import to_mekka
 
 
 logger = logging.getLogger("mekka.dashboard.positions")
+
+_LIVE_POSITIONS_CACHE: tuple[float, dict[str, Any]] | None = None
+_LIVE_POSITIONS_LOCK = asyncio.Lock()
 
 
 def _stub_response(message: str) -> dict[str, Any]:
@@ -433,13 +438,30 @@ async def _fetch_ccxt_positions(exchange_id: str) -> dict[str, Any]:
     except ImportError:
         return _stub_response("ccxt not installed (pip install ccxt).")
 
-    cfg: dict[str, Any] = {"enableRateLimit": True, "options": {"defaultType": "swap"}}
+    cfg: dict[str, Any] = {
+        "enableRateLimit": True,
+        "timeout": 20_000,
+        "options": {
+            "defaultType": "swap",
+            # 60s recvWindow + time-difference adjustment so a drifted local
+            # clock never triggers InvalidNonce -1021 on the read path.
+            "recvWindow": 60_000,
+            "adjustForTimeDifference": True,
+        },
+    }
     if exchange_id == "bybit":
         cfg["apiKey"] = settings.bybit_api_key
         cfg["secret"] = settings.bybit_api_secret
     elif exchange_id == "binance":
         cfg["apiKey"] = settings.binance_api_key
         cfg["secret"] = settings.binance_api_secret
+        cfg["options"].update(
+            {
+                "defaultSubType": "linear",
+                "fetchMarkets": {"types": ["linear"]},
+                "disableFuturesSandboxWarning": True,
+            }
+        )
 
     exchange = getattr(ccxt, exchange_id)(cfg)
     try:
@@ -488,6 +510,45 @@ async def _fetch_ccxt_positions(exchange_id: str) -> dict[str, Any]:
             pass
 
 
+async def _live_sltp_map() -> dict[tuple[str, str], dict[str, float | None]]:
+    """Build a ``{(SYMBOL, SIDE): {"sl": float|None, "tp": float|None}}`` map
+    from the SL/TP stored in recent trades' execution metadata.
+
+    IronMan persists the bracket levels in ``trade.raw["metadata"]`` at order
+    time (``stop_loss`` / ``take_profit``). The PortfolioManager snapshot does
+    not carry them, so the dashboard recovers them here. The most recent trade
+    per (symbol, side) wins. Fail-silent — returns ``{}`` on any error so the
+    panel still renders (just without SL/TP rows).
+    """
+    out: dict[tuple[str, str], dict[str, float | None]] = {}
+    try:
+        from src.persistence.repository import MekkaRepository  # noqa: WPS433
+
+        trades = await MekkaRepository.list_recent_trades(limit=40)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("live SL/TP lookup failed: %s", exc)
+        return out
+
+    for t in trades or []:
+        try:
+            sym = (getattr(t, "symbol", "") or "").upper()
+            side = (getattr(t, "side", "") or "").upper()
+            if not sym or side not in ("LONG", "SHORT"):
+                continue
+            key = (sym, side)
+            if key in out:
+                continue  # list_recent_trades is newest-first → keep the first
+            meta = ((t.raw or {}).get("metadata") or {}) if getattr(t, "raw", None) else {}
+            sl = _to_float(meta.get("stop_loss")) or None
+            tp = _to_float(meta.get("take_profit")) or None
+            if sl is None and tp is None:
+                continue
+            out[key] = {"sl": sl, "tp": tp}
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
 async def fetch_positions(
     mark_prices: dict[str, float] | None = None,
 ) -> dict[str, Any]:
@@ -503,46 +564,103 @@ async def fetch_positions(
     if settings.paper_trading:
         return await _fetch_paper_positions(mark_prices=mark_prices)
 
+    global _LIVE_POSITIONS_CACHE
+    now = time.monotonic()
+    cached = _LIVE_POSITIONS_CACHE
+    if cached and cached[0] > now:
+        return cached[1]
+
     # In live mode, delegate to PortfolioManager regardless of exchange
     # (codex). PortfolioManager already implements per-exchange dispatch
     # (CCXT for Bybit/Binance, native SDK for Hyperliquid) and reuses a
     # long-lived client with the correct sandbox routing. Building a
     # second ephemeral client here would race PortfolioManager's session
     # and could double-count rate-limit budget on Bybit testnet.
-    try:
-        from src.agents.portfolio_manager import PortfolioManager  # noqa: WPS433
+    async with _LIVE_POSITIONS_LOCK:
+        now = time.monotonic()
+        cached = _LIVE_POSITIONS_CACHE
+        if cached and cached[0] > now:
+            return cached[1]
 
-        snapshot = await PortfolioManager().run()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("portfolio snapshot failed: %s", exc)
-        return _stub_response(f"Portfolio snapshot error: {type(exc).__name__}")
+        try:
+            from src.agents.portfolio_manager import PortfolioManager  # noqa: WPS433
 
-    items = [
-        {
-            "symbol": p.symbol,
-            "side": p.side.upper(),
-            "size": p.size,
-            "entry_price": p.entry_price,
-            "mark_price": p.entry_price,
-            "pnl_usd": p.unrealized_pnl_usd,
-            "leverage": p.leverage,
-            "liq_price": None,
-            "is_paper": snapshot.is_paper,
-        }
-        for p in snapshot.positions
-    ]
-    if not items:
-        return {
-            "items": [],
-            "count": 0,
-            "source": snapshot.source.value.lower(),
-            "supported": True,
-            "message": "No open positions.",
-        }
-    return {
-        "items": items,
-        "count": len(items),
-        "source": snapshot.source.value.lower(),
-        "supported": True,
-        "message": snapshot.error,
-    }
+            snapshot = await PortfolioManager().run()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("portfolio snapshot failed: %s", exc)
+            data = _stub_response(f"Portfolio snapshot error: {type(exc).__name__}")
+            _LIVE_POSITIONS_CACHE = (time.monotonic() + 1.0, data)
+            return data
+
+        # SL/TP for live positions are not carried by the PortfolioManager
+        # snapshot (PositionSummary has no SL/TP fields). Recover them from the
+        # SL/TP stored in each trade's execution metadata at order time.
+        sltp_map = await _live_sltp_map()
+
+        prices = mark_prices or {}
+        items = []
+        for p in snapshot.positions:
+            sym = p.symbol
+            side = p.side.upper()
+            entry = _to_float(p.entry_price)
+            size = _to_float(p.size)
+            # Live mark: prefer the streaming price feed, then the venue mark
+            # from the snapshot, then entry (so PnL reads 0 rather than crash).
+            snap_mark = _to_float(getattr(p, "mark_price", None))
+            mark = (
+                _to_float(prices.get(sym) or prices.get(sym.upper()))
+                or snap_mark
+                or entry
+            )
+
+            # Prefer a live-recomputed PnL from the streaming mark so the panel
+            # updates in real time. Fall back to the snapshot's uPnL when we
+            # have no live mark (mark == entry → recompute is 0 anyway).
+            if mark > 0 and entry > 0 and abs(mark - entry) > 1e-9:
+                if side == "LONG":
+                    pnl_usd = round((mark - entry) * size, 2)
+                else:
+                    pnl_usd = round((entry - mark) * size, 2)
+            else:
+                pnl_usd = round(_to_float(p.unrealized_pnl_usd), 2)
+
+            # Position return on notional (price move %, sign follows side).
+            if entry > 0:
+                move_pct = (mark - entry) / entry * 100.0
+                pnl_pct = round(move_pct if side == "LONG" else -move_pct, 2)
+            else:
+                pnl_pct = 0.0
+
+            sltp = sltp_map.get((sym.upper(), side), {})
+            items.append({
+                "symbol": sym,
+                "side": side,
+                "size": size,
+                "entry_price": entry,
+                "mark_price": round(mark, 4),
+                "pnl_usd": pnl_usd,
+                "pnl_pct": pnl_pct,
+                "leverage": p.leverage,
+                "liq_price": _to_float(getattr(p, "liquidation_price", None)) or None,
+                "sl_price": sltp.get("sl"),
+                "tp_price": sltp.get("tp"),
+                "is_paper": snapshot.is_paper,
+            })
+        if not items:
+            data = {
+                "items": [],
+                "count": 0,
+                "source": snapshot.source.value.lower(),
+                "supported": True,
+                "message": "No open positions.",
+            }
+        else:
+            data = {
+                "items": items,
+                "count": len(items),
+                "source": snapshot.source.value.lower(),
+                "supported": True,
+                "message": snapshot.error,
+            }
+        _LIVE_POSITIONS_CACHE = (time.monotonic() + 2.0, data)
+        return data

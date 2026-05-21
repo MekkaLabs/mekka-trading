@@ -241,7 +241,98 @@ class BybitPriceFeed(PriceFeedProvider):
 
 
 # --------------------------------------------------------------------------
-# Binance — intentionally not implemented yet
+# Binance implementation (USDM futures markPrice stream)
+# --------------------------------------------------------------------------
+
+class BinancePriceFeed(PriceFeedProvider):
+    """Subscribes to Binance USDM futures ``<symbol>@markPrice@1s`` streams.
+
+    Like Bybit, Binance has no single "all symbols" channel that suits us, so
+    we subscribe explicitly to ``settings.trading_assets``. Mark price updates
+    arrive once per second as ``markPriceUpdate`` events carrying ``s`` (symbol)
+    and ``p`` (mark price). Adding an asset at runtime requires a pump restart
+    — same constraint as Bybit/Superman.
+    """
+
+    name = "binance"
+
+    def _ws_url(self) -> str:
+        # Binance USDM futures WS base. Testnet and mainnet are different hosts;
+        # the markPrice stream path is identical.
+        return (
+            "wss://stream.binancefuture.com/ws"
+            if getattr(settings, "binance_testnet", False)
+            else "wss://fstream.binance.com/ws"
+        )
+
+    def _streams_for(self, symbols: Iterable[str]) -> list[str]:
+        # Binance futures stream names are lowercase ``{coin}usdt``. Reuse the
+        # Bybit wire mapping (BTC → BTCUSDT) and lowercase it.
+        out: list[str] = []
+        for sym in symbols:
+            wire = to_bybit_wire(sym)
+            if wire:
+                out.append(f"{wire.lower()}@markPrice@1s")
+        return out
+
+    async def run(self, prices: dict[str, float]) -> None:
+        url = self._ws_url()
+        symbols = list(settings.trading_assets)
+        streams = self._streams_for(symbols)
+        if not streams:
+            logger.warning(
+                "BinancePriceFeed: TRADING_ASSETS is empty — pump will idle. "
+                "Configure TRADING_ASSETS in .env."
+            )
+        while True:
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.ws_connect(
+                        url,
+                        heartbeat=20,
+                        timeout=aiohttp.ClientWSTimeout(ws_close=5.0),
+                    ) as ws:
+                        await ws.send_json({
+                            "method": "SUBSCRIBE",
+                            "params": streams,
+                            "id": 1,
+                        })
+                        logger.info(
+                            "Binance price pump connected: %s (streams=%d, testnet=%s)",
+                            url, len(streams), getattr(settings, "binance_testnet", False),
+                        )
+                        async for msg in ws:
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                try:
+                                    payload = json.loads(msg.data)
+                                    # Subscription ack frames look like
+                                    # {"result": null, "id": 1} — skip them.
+                                    if payload.get("e") != "markPriceUpdate":
+                                        continue
+                                    raw_sym = payload.get("s") or ""
+                                    coin = to_mekka(raw_sym)
+                                    if not coin:
+                                        continue
+                                    mark = payload.get("p")
+                                    if mark is None:
+                                        continue
+                                    try:
+                                        prices[coin] = float(mark)
+                                    except (TypeError, ValueError):
+                                        pass
+                                except Exception:
+                                    pass
+                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                break
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.warning("Binance price pump disconnected (%s) — reconnecting in 5s", exc)
+                await asyncio.sleep(5)
+
+
+# --------------------------------------------------------------------------
+# Null feed (fallback)
 # --------------------------------------------------------------------------
 
 class _NullPriceFeed(PriceFeedProvider):
@@ -283,9 +374,7 @@ def make_price_feed() -> PriceFeedProvider:
     if ex == "bybit":
         return BybitPriceFeed()
     if ex == "binance":
-        # TODO(price_feed): implement Binance USDM futures WS. Until then,
-        # the dashboard still boots — only the live-tick stream is empty.
-        return _NullPriceFeed("Binance WS price feed not yet implemented")
+        return BinancePriceFeed()
     # Defensive default — Literal narrowing makes this unreachable, but a
     # future enum addition must not silently break the dashboard.
     return _NullPriceFeed(f"Unknown ACTIVE_EXCHANGE={ex!r}")

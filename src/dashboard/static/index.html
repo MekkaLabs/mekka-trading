@@ -148,6 +148,14 @@
             <button id="sys-power-toggle" type="button" class="prefs-reset-btn sys-power-btn" disabled>—</button>
             <button id="sys-power-reboot" type="button" class="prefs-reset-btn sys-power-btn sys-power-reboot" disabled>⟳ Reboot</button>
           </div>
+          <!-- Seletor de corretora ativa. Populado de /api/exchange; troca via
+               POST /api/exchange (muta settings em runtime + persiste). -->
+          <div class="exchange-switch" title="Corretora ativa — troca em runtime" style="display:inline-flex;align-items:center;gap:4px">
+            <label for="exchange-select" class="muted-line">Corretora</label>
+            <select id="exchange-select" class="prefs-reset-btn">
+              <option value="">…</option>
+            </select>
+          </div>
           <label for="lang-toggle" class="muted-line">Idioma</label>
           <select id="lang-toggle" class="prefs-reset-btn">
             <option value="pt">Português</option>
@@ -1139,6 +1147,18 @@
           <button type="button" class="impr-filter active" data-domain="all">Todos</button>
           <button type="button" class="impr-filter" data-domain="trading-ops">⚔️ Trading/Ops</button>
           <button type="button" class="impr-filter" data-domain="dev-squad">🧑‍💻 Dev Squads</button>
+        </div>
+
+        <div class="impr-filters impr-source-filters">
+          <button type="button" class="impr-src-filter active" data-source="all">Todas as fontes</button>
+          <button type="button" class="impr-src-filter" data-source="beast">🐺 Beast</button>
+          <button type="button" class="impr-src-filter" data-source="code_auditor">🔍 CodeAuditor</button>
+          <button type="button" class="impr-src-filter" data-source="risk_scanner">⚠️ RiskScanner</button>
+          <button type="button" class="impr-src-filter" data-source="ops_scanner">🛠️ OpsScanner</button>
+          <button type="button" class="impr-src-filter" data-source="memory_scanner">🧠 MemoryScanner</button>
+          <button type="button" class="impr-src-filter" data-source="ice_man">🧊 Ice Man</button>
+          <button type="button" class="impr-src-filter" data-source="sage">📐 Sage</button>
+          <button type="button" class="impr-src-filter" data-source="inbox">📥 Inbox</button>
         </div>
 
         <div class="impr-list" id="impr-list">

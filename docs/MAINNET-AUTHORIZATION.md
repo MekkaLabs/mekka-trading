@@ -53,15 +53,16 @@ Marque com [x] apenas após verificação real. Não marque antecipadamente.
 - [ ] Story 032b (TS audit shim) entregue, OU waiver documentado abaixo:
 - Waiver: ____
 
-### H5 — Wallet mainnet dedicada
-- [ ] Wallet mainnet criada e separada de qualquer wallet pessoal.
-- [ ] Chaves privadas armazenadas em local seguro (não em `.env` versionado).
-- Endereço da wallet: ____
+### H5 — Conta/wallet mainnet dedicada
+- [ ] **Hyperliquid:** wallet mainnet criada, separada de wallet pessoal; chave privada em local seguro (não em `.env` versionado).
+- [ ] **Binance:** subconta dedicada de Futures (USDⓈ-M); API key com permissão **apenas** de Futures (sem saque), **IP allowlist** habilitada; chaves fora de `.env` versionado.
+- Endereço/conta: ____
 
-### H6 — Wallet funded via transferência real
-- [ ] Wallet funded por transferência real (não testnet faucet).
+### H6 — Conta funded via transferência real
+- [ ] Funded por transferência real (não faucet de testnet).
 - [ ] Valor inicial conservador: ≤ USD ____
 - [ ] `MAX_POSITION_SIZE_PCT=0.001` (0.1%) confirmado para primeira semana.
+- [ ] (Binance) `ACTIVE_EXCHANGE=binance` e `BINANCE_TESTNET=false` confirmados; preflight passa com os gates de Binance (chaves `BINANCE_*`, network mainnet).
 
 ---
 

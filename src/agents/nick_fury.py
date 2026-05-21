@@ -397,9 +397,15 @@ class NickFury(BaseAgent[list[CycleReport]]):
         # Best-effort: falhas nunca interrompem o ciclo principal.
         await self._run_pre_cycle_monitors(snapshot=snapshot, effective_equity=effective_equity)
 
-        # Runtime mode — hot-reload trading assets without restart
+        # Runtime mode — hot-reload sem nunca ampliar a lista definida no .env.
+        # O operador pode reduzir/ordenar ativos via TRADING_ASSETS e o preset
+        # do runtime_mode só atua como filtro adicional, não como expansão.
         from src.config.runtime_mode import get_params as _get_mode_params
-        _active_assets = _get_mode_params().get("trading_assets", settings.trading_assets)
+        _configured_assets = list(settings.trading_assets)
+        _mode_assets = _get_mode_params().get("trading_assets", _configured_assets)
+        _active_assets = [sym for sym in _configured_assets if sym in _mode_assets]
+        if not _active_assets:
+            _active_assets = _configured_assets
 
         # Story 050 — Altcoins validation: filter out symbols not available on
         # the current exchange (prevents CYCLE_ERROR spam for unknown pairs).
@@ -2356,6 +2362,31 @@ class NickFury(BaseAgent[list[CycleReport]]):
         except Exception as _exc:
             self._log.warning(f"[NickFury] Cyclops skipped: {_exc}")
 
+        # [C3] Live SL guardian — Cyclops is paper-only, so in live mode this is
+        # the safety net that guarantees no open position is left without a
+        # reduce-only stop on the venue (re-places a missing/cancelled stop and
+        # alerts). No-op in paper mode and on Hyperliquid.
+        sl_guardian: dict = {}
+        if not settings.paper_trading:
+            try:
+                from src.agents.iron_man import IronMan  # noqa: WPS433
+                sl_guardian = await IronMan().ensure_stops_for_open_positions()
+                if sl_guardian.get("replaced") or sl_guardian.get("errors"):
+                    await MekkaRepository.log_event(
+                        agent="IronMan",
+                        event="SL_GUARDIAN",
+                        severity="WARNING",
+                        message=(
+                            f"SL guardian: checked={sl_guardian.get('checked')} "
+                            f"protected={sl_guardian.get('protected')} "
+                            f"replaced={len(sl_guardian.get('replaced') or [])} "
+                            f"errors={len(sl_guardian.get('errors') or [])}"
+                        ),
+                        payload=sl_guardian,
+                    )
+            except Exception as _exc:  # noqa: BLE001
+                self._log.warning(f"[NickFury] SL guardian skipped: {_exc}")
+
         return {
             "status": "halted" if plan.kill_switch_engaged else "ok",
             "positions_monitored": len(plan.positions),
@@ -2363,6 +2394,7 @@ class NickFury(BaseAgent[list[CycleReport]]):
             "kill_switch_engaged": plan.kill_switch_engaged,
             "recovery_actions_taken": actions_taken,
             "cyclops_triggered": cyclops_triggered,
+            "sl_guardian": sl_guardian,
         }
 
     async def _execute_recovery_plan(

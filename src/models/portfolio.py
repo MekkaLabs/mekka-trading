@@ -35,6 +35,12 @@ class PositionSummary(BaseModel):
     entry_price: float = Field(..., gt=0)
     unrealized_pnl_usd: float = Field(default=0.0)
     leverage: Optional[int] = Field(default=None, ge=1)
+    mark_price: Optional[float] = Field(
+        default=None, description="Current mark price reported by the venue (if any)."
+    )
+    liquidation_price: Optional[float] = Field(
+        default=None, description="Estimated liquidation price reported by the venue (if any)."
+    )
 
 
 class EquitySnapshot(BaseModel):

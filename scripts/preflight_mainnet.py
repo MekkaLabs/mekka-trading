@@ -46,6 +46,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+# An empty ``ANTHROPIC_API_KEY=`` / ``OPENAI_API_KEY=`` in the shell environment
+# overrides the .env in pydantic-settings and would make the preflight report a
+# missing LLM key even when one is configured in .env. Strip only empty values
+# so the .env stays authoritative (mirrors run.py).
+for _k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+    if os.environ.get(_k, None) == "":
+        del os.environ[_k]
+
 # ---------------------------------------------------------------------------
 # Result model
 # ---------------------------------------------------------------------------
@@ -116,41 +124,89 @@ def _get_settings():
     return _s
 
 
+def _active_exchange() -> str:
+    """Resolve the active exchange (settings first, then env, default hyperliquid)."""
+    try:
+        return _get_settings().active_exchange
+    except Exception:
+        return os.getenv("ACTIVE_EXCHANGE", "hyperliquid").lower()
+
+
 def check_env_vars(report: PreflightReport) -> None:
-    required = [
-        "OPENAI_API_KEY",
-        "HYPERLIQUID_PRIVATE_KEY",
-        "HYPERLIQUID_WALLET_ADDRESS",
-    ]
+    ex = _active_exchange()
+    # Credentials are exchange-specific: only the ACTIVE exchange's keys are
+    # required. This keeps the preflight honest for Binance/Bybit instead of
+    # demanding Hyperliquid wallet keys that aren't used.
+    _per_exchange = {
+        "hyperliquid": ["HYPERLIQUID_PRIVATE_KEY", "HYPERLIQUID_WALLET_ADDRESS"],
+        "bybit": ["BYBIT_API_KEY", "BYBIT_API_SECRET"],
+        "binance": ["BINANCE_API_KEY", "BINANCE_API_SECRET"],
+    }
+    # Vision uses OpenAI as primary with Anthropic as fallback — at least ONE
+    # LLM provider key must be present (not necessarily OpenAI).
+    required = list(_per_exchange.get(ex, _per_exchange["hyperliquid"]))
     live_required = [
         "LIVE_TRADING_CONFIRMED",
     ]
-    missing = [k for k in required if not os.getenv(k)]
+
+    # Resolve a key from the process env first, then from loaded settings (which
+    # read .env via pydantic). os.getenv alone false-fails when keys live in
+    # .env but aren't exported into the shell — settings is the source of truth.
+    _s = None
+    try:
+        _s = _get_settings()
+    except Exception:
+        _s = None
+
+    _settings_map = {
+        "OPENAI_API_KEY": "openai_api_key",
+        "HYPERLIQUID_PRIVATE_KEY": "hyperliquid_private_key",
+        "HYPERLIQUID_WALLET_ADDRESS": "hyperliquid_wallet_address",
+        "BYBIT_API_KEY": "bybit_api_key",
+        "BYBIT_API_SECRET": "bybit_api_secret",
+        "BINANCE_API_KEY": "binance_api_key",
+        "BINANCE_API_SECRET": "binance_api_secret",
+    }
+
+    def _present(key: str) -> bool:
+        if os.getenv(key):
+            return True
+        attr = _settings_map.get(key)
+        return bool(attr and _s is not None and getattr(_s, attr, None))
+
+    # At least one LLM provider (OpenAI primary, Anthropic fallback).
+    _llm_ok = (
+        _present("OPENAI_API_KEY")
+        or bool(os.getenv("ANTHROPIC_API_KEY"))
+        or bool(_s is not None and getattr(_s, "anthropic_api_key", None))
+    )
+
+    missing = [k for k in required if not _present(k)]
+    if not _llm_ok:
+        missing.append("OPENAI_API_KEY or ANTHROPIC_API_KEY")
     if missing:
         report.fail(
             "env_vars_required",
-            f"Missing required env vars: {', '.join(missing)}",
-            fix="Add them to your .env file and source it before running.",
+            f"Missing required credentials for ACTIVE_EXCHANGE={ex}: {', '.join(missing)}",
+            fix="Add them to your .env file (or export them) before running.",
         )
     else:
-        report.ok("env_vars_required", "All required env vars present")
+        report.ok("env_vars_required", f"All required credentials present (exchange={ex})")
 
-    live_missing = [k for k in live_required if not os.getenv(k)]
-    if live_missing:
+    live_confirmed = bool(_s and getattr(_s, "live_trading_confirmed", False)) or (
+        os.getenv("LIVE_TRADING_CONFIRMED", "").lower() in ("true", "1", "yes")
+    )
+    if not live_confirmed:
         report.warn(
             "env_vars_live",
             "LIVE_TRADING_CONFIRMED not set (required to actually execute live orders)",
             fix="Set LIVE_TRADING_CONFIRMED=true ONLY after operator sign-off.",
         )
     else:
-        val = os.getenv("LIVE_TRADING_CONFIRMED", "").lower()
-        if val in ("true", "1", "yes"):
-            report.warn(
-                "env_vars_live",
-                "LIVE_TRADING_CONFIRMED=true — live orders will be sent. Confirm intentional.",
-            )
-        else:
-            report.ok("env_vars_live", f"LIVE_TRADING_CONFIRMED={val!r} (not enabled)")
+        report.warn(
+            "env_vars_live",
+            "LIVE_TRADING_CONFIRMED=true — live orders will be sent. Confirm intentional.",
+        )
 
 
 def check_settings(report: PreflightReport) -> None:
@@ -199,14 +255,36 @@ def check_kill_switch(report: PreflightReport) -> None:
 def check_network(report: PreflightReport) -> None:
     try:
         s = _get_settings()
-        if s.hyperliquid_network == "mainnet":
-            report.ok("network", "HYPERLIQUID_NETWORK=mainnet")
+        ex = s.active_exchange
+        if ex == "hyperliquid":
+            if s.hyperliquid_network == "mainnet":
+                report.ok("network", "hyperliquid network=mainnet")
+            else:
+                report.warn(
+                    "network",
+                    f"HYPERLIQUID_NETWORK={s.hyperliquid_network!r} (not mainnet)",
+                    fix="Set HYPERLIQUID_NETWORK=mainnet for live trading.",
+                )
+        elif ex == "bybit":
+            if not getattr(s, "bybit_testnet", False):
+                report.ok("network", "bybit network=mainnet (BYBIT_TESTNET=false)")
+            else:
+                report.warn(
+                    "network",
+                    "BYBIT_TESTNET=true (not mainnet)",
+                    fix="Set BYBIT_TESTNET=false for live trading.",
+                )
+        elif ex == "binance":
+            if not getattr(s, "binance_testnet", False):
+                report.ok("network", "binance network=mainnet (BINANCE_TESTNET=false)")
+            else:
+                report.warn(
+                    "network",
+                    "BINANCE_TESTNET=true (not mainnet)",
+                    fix="Set BINANCE_TESTNET=false for live trading.",
+                )
         else:
-            report.warn(
-                "network",
-                f"HYPERLIQUID_NETWORK={s.hyperliquid_network!r} (not mainnet)",
-                fix="Set HYPERLIQUID_NETWORK=mainnet for live trading.",
-            )
+            report.warn("network", f"Unknown ACTIVE_EXCHANGE={ex!r}")
     except Exception as exc:
         report.warn("network", f"Could not check network: {exc}")
 
@@ -271,35 +349,55 @@ def check_telegram(report: PreflightReport) -> None:
 
 
 def check_sdk_availability(report: PreflightReport) -> None:
+    ex = _active_exchange()
+    hl_active = ex == "hyperliquid"
+
+    # eth-account + hyperliquid SDK are only required when Hyperliquid is the
+    # active execution venue. On Binance/Bybit, CCXT is the execution path, so
+    # a missing HL SDK is informational, not a hard failure.
     try:
         import eth_account  # noqa: F401
-        report.ok("sdk_eth_account", f"eth-account installed")
+        report.ok("sdk_eth_account", "eth-account installed")
     except ImportError:
-        report.fail(
-            "sdk_eth_account",
-            "eth-account not installed (required for live execution)",
-            fix="pip install eth-account",
-        )
+        if hl_active:
+            report.fail(
+                "sdk_eth_account",
+                "eth-account not installed (required for Hyperliquid live execution)",
+                fix="pip install eth-account",
+            )
+        else:
+            report.ok("sdk_eth_account", f"eth-account not needed (exchange={ex})")
 
     try:
         from hyperliquid.exchange import Exchange  # noqa: F401
         report.ok("sdk_hyperliquid", "hyperliquid-python-sdk installed")
     except ImportError:
-        report.fail(
-            "sdk_hyperliquid",
-            "hyperliquid-python-sdk not installed (required for live execution)",
-            fix="pip install hyperliquid-python-sdk",
-        )
+        if hl_active:
+            report.fail(
+                "sdk_hyperliquid",
+                "hyperliquid-python-sdk not installed (required for live execution)",
+                fix="pip install hyperliquid-python-sdk",
+            )
+        else:
+            report.ok("sdk_hyperliquid", f"hyperliquid SDK not needed (exchange={ex})")
 
+    # CCXT is required for Binance/Bybit execution; informational for HL.
     try:
         import ccxt  # noqa: F401
         report.ok("sdk_ccxt", f"ccxt installed (version {ccxt.__version__})")
     except ImportError:
-        report.warn(
-            "sdk_ccxt",
-            "ccxt not installed — Superman will not be able to fetch market data.",
-            fix="pip install ccxt",
-        )
+        if hl_active:
+            report.warn(
+                "sdk_ccxt",
+                "ccxt not installed — Superman will not be able to fetch market data.",
+                fix="pip install ccxt",
+            )
+        else:
+            report.fail(
+                "sdk_ccxt",
+                f"ccxt not installed (required for {ex} live execution)",
+                fix="pip install ccxt",
+            )
 
 
 def check_authorization_file(report: PreflightReport) -> None:

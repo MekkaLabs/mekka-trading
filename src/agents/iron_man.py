@@ -49,6 +49,34 @@ from src.models.signal import TradeAction, TradingSignal
 from src.services.market_registry import to_ccxt, to_mekka
 
 
+# ---------------------------------------------------------------------------
+# Process-wide CCXT exchange cache
+# ---------------------------------------------------------------------------
+# Building a CCXT exchange + load_markets costs 9-18s on Binance testnet.
+# Doing it per IronMan() instance meant every dashboard "Executar Trade" click
+# paid that cost from scratch (and leaked the aiohttp session). We cache the
+# warmed exchange per (exchange_id, network) and reuse it across instances on
+# the same event loop. Loop identity is recorded so a cached aiohttp session is
+# never reused from a different loop (which would raise "attached to a
+# different loop"). Across a process restart the module state resets, so the
+# cache is naturally per-process.
+_CCXT_SHARED: dict[str, Any] = {}
+_CCXT_SHARED_LOOP: dict[str, Any] = {}
+_CCXT_SHARED_LOCK: asyncio.Lock = asyncio.Lock()
+
+
+async def aclose_ccxt_cache() -> None:
+    """Close all cached CCXT exchanges (call on process shutdown)."""
+    async with _CCXT_SHARED_LOCK:
+        for key, exchange in list(_CCXT_SHARED.items()):
+            try:
+                await exchange.close()
+            except Exception:  # noqa: BLE001
+                pass
+            _CCXT_SHARED.pop(key, None)
+            _CCXT_SHARED_LOOP.pop(key, None)
+
+
 class IronMan(BaseAgent[ExecutionResult]):
     """
     Multi-Exchange Execution Engineer.
@@ -460,21 +488,36 @@ class IronMan(BaseAgent[ExecutionResult]):
     # ------------------------------------------------------------------
 
     async def _get_ccxt_exchange(self, exchange_id: str) -> Any:
-        """Lazy-init a CCXT async exchange instance for Bybit or Binance."""
+        """Lazy-init a CCXT async exchange, reusing a process-wide warmed
+        instance when possible so we don't pay load_markets (9-18s) per call.
+        """
         if self._ccxt_exchange is not None:
             return self._ccxt_exchange
 
-        async with self._connect_lock:
-            if self._ccxt_exchange is not None:
-                return self._ccxt_exchange
+        _testnet = (
+            (exchange_id == "binance" and bool(getattr(settings, "binance_testnet", False)))
+            or (exchange_id == "bybit" and bool(getattr(settings, "bybit_testnet", False)))
+        )
+        cache_key = f"{exchange_id}:{'testnet' if _testnet else 'mainnet'}"
+        loop = asyncio.get_event_loop()
+
+        async with _CCXT_SHARED_LOCK:
+            # Reuse the shared warmed exchange if present and on the same loop.
+            _cached = _CCXT_SHARED.get(cache_key)
+            if _cached is not None and _CCXT_SHARED_LOOP.get(cache_key) is loop:
+                self._ccxt_exchange = _cached
+                return _cached
 
             import ccxt.async_support as ccxt  # noqa: WPS433
 
             cfg: dict = {
                 "enableRateLimit": True,
+                "timeout": 20_000,
                 "options": {
                     "defaultType": "swap",
-                    "recvWindow": 10_000,
+                    # 60s = Binance max recvWindow. Wide window prevents the
+                    # InvalidNonce -1021 timestamp rejection from clock drift.
+                    "recvWindow": 60_000,
                     "adjustForTimeDifference": True,
                 },
             }
@@ -492,6 +535,13 @@ class IronMan(BaseAgent[ExecutionResult]):
                     )
                 cfg["apiKey"] = settings.binance_api_key
                 cfg["secret"] = settings.binance_api_secret
+                cfg["options"].update(
+                    {
+                        "defaultSubType": "linear",
+                        "fetchMarkets": {"types": ["linear"]},
+                        "disableFuturesSandboxWarning": True,
+                    }
+                )
 
             exchange = getattr(ccxt, exchange_id)(cfg)
 
@@ -519,9 +569,21 @@ class IronMan(BaseAgent[ExecutionResult]):
                         f"[IronMan/{exchange_id}] set_sandbox_mode failed: {_sbx_exc}"
                     )
 
-                await exchange.load_markets()
+                for attempt in range(1, 4):
+                    try:
+                        await exchange.load_markets()
+                        break
+                    except Exception as exc:
+                        if attempt >= 3:
+                            raise
+                        self._log.warning(
+                            f"[IronMan/{exchange_id}] load_markets retry {attempt}/3 after error: {exc}"
+                        )
+                        await asyncio.sleep(float(attempt))
                 self._ccxt_exchange = exchange
-                self._log.info(f"[IronMan] Connected to {exchange_id} via CCXT")
+                _CCXT_SHARED[cache_key] = exchange
+                _CCXT_SHARED_LOOP[cache_key] = loop
+                self._log.info(f"[IronMan] Connected to {exchange_id} via CCXT (cached)")
                 return exchange
             except Exception:
                 await exchange.close()
@@ -599,6 +661,64 @@ class IronMan(BaseAgent[ExecutionResult]):
         is_buy = signal.action.value.upper() == "LONG"
         ccxt_symbol = to_ccxt(symbol, exchange_id)  # type: ignore[arg-type]
         ccxt_side = "buy" if is_buy else "sell"
+
+        # ── Min-notional "lance livre" preflight ──────────────────────────
+        # Venues enforce a minimum order size (amount.min) and minimum notional
+        # (cost.min). A risk-sized order below that floor would be rejected by
+        # the venue with a cryptic code. On a testnet we bump the quantity up to
+        # the venue minimum so the operator can freely test execution ("lance
+        # livre"). On mainnet/live we NEVER silently inflate position size — we
+        # reject with an actionable message and let the operator size up.
+        try:
+            _market = exchange.market(ccxt_symbol)
+            _limits = (_market or {}).get("limits", {}) or {}
+            _min_amount = (_limits.get("amount", {}) or {}).get("min")
+            _min_cost = (_limits.get("cost", {}) or {}).get("min")
+            _req_notional = quantity * float(signal.entry_price)
+
+            _needs_bump = False
+            _floor_qty = quantity
+            if _min_amount and quantity < float(_min_amount):
+                _needs_bump = True
+                _floor_qty = max(_floor_qty, float(_min_amount))
+            if _min_cost and _req_notional < float(_min_cost):
+                _needs_bump = True
+                _floor_qty = max(_floor_qty, float(_min_cost) / float(signal.entry_price))
+
+            if _needs_bump:
+                _is_testnet = (
+                    (exchange_id == "binance" and bool(getattr(settings, "binance_testnet", False)))
+                    or (exchange_id == "bybit" and bool(getattr(settings, "bybit_testnet", False)))
+                )
+                if _is_testnet:
+                    self._log.warning(
+                        "[IronMan/%s] order below venue minimum "
+                        "(qty=%.8f notional=$%.2f, min_amount=%s min_cost=%s) — "
+                        "bumping to venue minimum for testnet (lance livre)",
+                        exchange_id, quantity, _req_notional, _min_amount, _min_cost,
+                    )
+                    quantity = _floor_qty
+                else:
+                    return ExecutionResult(
+                        symbol=symbol,
+                        status=ExecutionStatus.REJECTED,
+                        is_paper=False,
+                        side="long" if is_buy else "short",
+                        error=(
+                            f"Ordem abaixo do mínimo da {exchange_id}: notional "
+                            f"${_req_notional:,.2f} < mín ${float(_min_cost or 0):,.2f} "
+                            f"(qty {quantity:.6f} < mín {float(_min_amount or 0):.6f}). "
+                            f"Aumente o tamanho da posição (size_pct/leverage) para operar live."
+                        ),
+                    )
+
+            # Round to venue step size so create_order isn't rejected on precision.
+            try:
+                quantity = float(exchange.amount_to_precision(ccxt_symbol, quantity))
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception as _lim_exc:  # noqa: BLE001
+            self._log.warning(f"[IronMan/{exchange_id}] min-notional preflight skipped: {_lim_exc}")
 
         # Clock-skew pre-flight — Bybit rejects ordered with code 10002 when
         # the local clock drifts more than ~5s from server time, and the
@@ -693,24 +813,91 @@ class IronMan(BaseAgent[ExecutionResult]):
             )
 
         # ── SL / TP reduce-only ──
+        # The stop-loss is SAFETY-CRITICAL: a filled position with no stop can
+        # run unbounded to liquidation. We retry SL placement and, if it still
+        # fails, FLATTEN the just-opened position immediately rather than hold
+        # it unprotected. TP failure is non-critical (the SL still covers the
+        # downside) so it only logs.
         sl_id: Optional[str] = None
         tp_id: Optional[str] = None
         sl_side = "sell" if is_buy else "buy"
 
-        try:
-            sl_order = await exchange.create_order(
-                symbol=ccxt_symbol,
-                type="stop_market",
-                side=sl_side,
-                amount=filled,
-                params={
-                    "stopPrice": signal.stop_loss,
-                    "reduceOnly": True,
+        sl_error: Optional[Exception] = None
+        for _sl_attempt in range(1, 4):
+            try:
+                sl_order = await exchange.create_order(
+                    symbol=ccxt_symbol,
+                    type="stop_market",
+                    side=sl_side,
+                    amount=filled,
+                    params={
+                        "stopPrice": signal.stop_loss,
+                        "reduceOnly": True,
+                    },
+                )
+                sl_id = str(sl_order.get("id") or "")
+                sl_error = None
+                break
+            except Exception as _exc:  # noqa: BLE001
+                sl_error = _exc
+                self._log.warning(
+                    f"[IronMan/{exchange_id}] SL placement attempt {_sl_attempt}/3 failed: {_exc}"
+                )
+                if _sl_attempt < 3:
+                    await asyncio.sleep(float(_sl_attempt))
+
+        if sl_id is None:
+            # SAFETY FAIL-SAFE: we could not protect the position. Never hold a
+            # naked position — flatten it now and report the failure loudly.
+            self._log.error(
+                f"[IronMan/{exchange_id}] SL placement FAILED after retries — "
+                f"flattening unprotected {symbol} position ({filled} units)"
+            )
+            close_ok, close_err = await self._emergency_flatten(
+                exchange, ccxt_symbol, is_buy, filled, exchange_id
+            )
+            try:
+                from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+                _msg = (
+                    f"🚨 SL FALHOU em {symbol} — posição "
+                    + ("FECHADA por segurança (sem stop = inaceitável)."
+                       if close_ok else
+                       "NÃO PÔDE SER FECHADA — INTERVENÇÃO MANUAL URGENTE.")
+                )
+                asyncio.create_task(_TA().alert(
+                    event="SL_PLACEMENT_FAILED",
+                    severity="CRITICAL",
+                    agent="IronMan",
+                    symbol=symbol,
+                    message=_msg,
+                ))
+            except Exception:  # noqa: BLE001
+                pass
+
+            return ExecutionResult(
+                symbol=symbol,
+                status=ExecutionStatus.ERROR,
+                is_paper=False,
+                side="long" if is_buy else "short",
+                quantity=round(filled, 8),
+                avg_price=round(avg_px, 6),
+                notional_usd=round(filled * avg_px, 2),
+                order_id=order_id,
+                error=(
+                    f"SL não pôde ser colocado ({sl_error}). "
+                    + ("Posição fechada por segurança."
+                       if close_ok else
+                       f"FALHA AO FECHAR posição desprotegida ({close_err}) — "
+                       "INTERVENÇÃO MANUAL URGENTE.")
+                ),
+                metadata={
+                    "exchange": exchange_id,
+                    "sl_failed": True,
+                    "flattened": close_ok,
+                    "stop_loss": signal.stop_loss,
+                    "raw_order": order,
                 },
             )
-            sl_id = str(sl_order.get("id") or "")
-        except Exception as _exc:
-            self._log.warning(f"[IronMan/{exchange_id}] SL placement failed: {_exc}")
 
         try:
             tp_order = await exchange.create_order(
@@ -753,6 +940,284 @@ class IronMan(BaseAgent[ExecutionResult]):
                 "take_profit": signal.take_profit,
                 "raw_order": order,
             },
+        )
+
+    async def _emergency_flatten(
+        self,
+        exchange: Any,
+        ccxt_symbol: str,
+        is_buy: bool,
+        amount: float,
+        exchange_id: str,
+    ) -> tuple[bool, Optional[str]]:
+        """Close a just-opened position with a reduce-only MARKET order.
+
+        Fail-safe used when the stop-loss could not be placed — we never hold
+        an unprotected position. Retries a few times; returns ``(ok, error)``.
+        A market order is intentional: we want OUT now, slippage is acceptable
+        versus the unbounded risk of a naked position.
+        """
+        close_side = "sell" if is_buy else "buy"
+        last_err: Optional[str] = None
+        for _attempt in range(1, 4):
+            try:
+                await exchange.create_order(
+                    symbol=ccxt_symbol,
+                    type="market",
+                    side=close_side,
+                    amount=amount,
+                    params={"reduceOnly": True},
+                )
+                self._log.warning(
+                    f"[IronMan/{exchange_id}] emergency flatten OK ({amount} units)"
+                )
+                return True, None
+            except Exception as _exc:  # noqa: BLE001
+                last_err = str(_exc)
+                self._log.error(
+                    f"[IronMan/{exchange_id}] emergency flatten attempt {_attempt}/3 failed: {_exc}"
+                )
+                if _attempt < 3:
+                    await asyncio.sleep(float(_attempt))
+        return False, last_err or "flatten failed after 3 attempts"
+
+    # ------------------------------------------------------------------
+    # Live SL Guardian — ensure every open position keeps a live stop
+    # ------------------------------------------------------------------
+
+    # Last-resort emergency stop distance used ONLY when a position has no
+    # known SL (no resting order, no DB metadata). Loud-alerted when used.
+    _GUARDIAN_DEFAULT_SL_PCT = 0.02
+
+    @staticmethod
+    def _has_protective_stop(open_orders: list, is_long: bool) -> bool:
+        """True if a reduce-only STOP order on the protective side exists.
+
+        A long is protected by a SELL stop, a short by a BUY stop. Binance/
+        Bybit expose the stop type as ``stop_market`` / ``STOP_MARKET`` and a
+        ``reduceOnly`` flag (sometimes only under ``info``). Take-profit orders
+        (``take_profit_market``) are intentionally excluded — they don't cap
+        the loss.
+        """
+        want_side = "sell" if is_long else "buy"
+        for o in open_orders or []:
+            typ = str(o.get("type") or "").lower()
+            info = o.get("info") or {}
+            info_type = str(info.get("type") or "").lower()
+            is_stop = ("stop" in typ or "stop" in info_type) and "take_profit" not in typ and "take_profit" not in info_type
+            ro = o.get("reduceOnly")
+            if ro is None:
+                ro = info.get("reduceOnly") or info.get("reduce_only") or info.get("closePosition")
+            reduce_only = ro in (True, "true", "True", "TRUE", 1, "1")
+            oside = str(o.get("side") or "").lower()
+            if is_stop and reduce_only and oside == want_side:
+                return True
+        return False
+
+    @staticmethod
+    async def _recent_sl_map() -> dict[tuple[str, str], float]:
+        """``{(SYMBOL, SIDE): sl_price}`` from recent trades' execution
+        metadata (newest wins). Fail-silent — returns ``{}`` on any error."""
+        out: dict[tuple[str, str], float] = {}
+        try:
+            from src.persistence.repository import MekkaRepository  # noqa: WPS433
+            trades = await MekkaRepository.list_recent_trades(limit=40)
+        except Exception:  # noqa: BLE001
+            return out
+        for t in trades or []:
+            try:
+                sym = (getattr(t, "symbol", "") or "").upper()
+                side = (getattr(t, "side", "") or "").upper()
+                if not sym or side not in ("LONG", "SHORT") or (sym, side) in out:
+                    continue
+                meta = ((t.raw or {}).get("metadata") or {}) if getattr(t, "raw", None) else {}
+                sl = float(meta.get("stop_loss") or 0)
+                if sl > 0:
+                    out[(sym, side)] = sl
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+
+    async def ensure_stops_for_open_positions(self) -> dict[str, Any]:
+        """Live SL guardian — guarantee every open position has a live
+        reduce-only stop-loss on the venue. Re-places a missing stop from the
+        last known SL (DB metadata) or, as a last resort, a conservative
+        emergency stop, and alerts. Paper mode is a no-op; Hyperliquid is
+        handled by its own bracket path and skipped here.
+
+        Read-mostly: it only writes when a stop is actually missing. Returns a
+        summary ``{checked, protected, replaced, errors}``.
+        """
+        summary: dict[str, Any] = {"checked": 0, "protected": 0, "replaced": [], "errors": []}
+        if settings.paper_trading:
+            return summary
+        exchange_id = settings.active_exchange
+        if exchange_id not in ("bybit", "binance"):
+            return summary
+
+        try:
+            exchange = await self._get_ccxt_exchange(exchange_id)
+            positions = await exchange.fetch_positions()
+        except Exception as exc:  # noqa: BLE001
+            summary["errors"].append(f"connect/positions: {exc}")
+            self._log.warning(f"[IronMan/guardian] could not read positions: {exc}")
+            return summary
+
+        sl_map = await self._recent_sl_map()
+
+        for p in positions or []:
+            try:
+                size = abs(float(p.get("contracts") or 0))
+                if size <= 0:
+                    continue
+                summary["checked"] += 1
+                ccxt_symbol = p.get("symbol") or ""
+                mekka = to_mekka(ccxt_symbol)
+                is_long = str(p.get("side") or "").lower() == "long"
+                entry = float(p.get("entryPrice") or 0)
+
+                try:
+                    open_orders = await exchange.fetch_open_orders(ccxt_symbol)
+                except Exception as exc:  # noqa: BLE001
+                    summary["errors"].append(f"{mekka} fetch_open_orders: {exc}")
+                    continue
+
+                if self._has_protective_stop(open_orders, is_long):
+                    summary["protected"] += 1
+                    continue
+
+                # Missing stop → determine SL price (known SL, else emergency %).
+                sl_price = sl_map.get((mekka.upper(), "LONG" if is_long else "SHORT"), 0.0)
+                emergency = False
+                if not sl_price or sl_price <= 0:
+                    emergency = True
+                    sl_price = (
+                        entry * (1 - self._GUARDIAN_DEFAULT_SL_PCT) if is_long
+                        else entry * (1 + self._GUARDIAN_DEFAULT_SL_PCT)
+                    )
+
+                sl_side = "sell" if is_long else "buy"
+                try:
+                    try:
+                        sl_price = float(exchange.price_to_precision(ccxt_symbol, sl_price))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    await exchange.create_order(
+                        symbol=ccxt_symbol,
+                        type="stop_market",
+                        side=sl_side,
+                        amount=size,
+                        params={"stopPrice": sl_price, "reduceOnly": True},
+                    )
+                    summary["replaced"].append(
+                        {"symbol": mekka, "sl": sl_price, "emergency": emergency}
+                    )
+                    self._log.warning(
+                        "[IronMan/guardian] re-placed missing SL for %s @ %.4f (emergency=%s)",
+                        mekka, sl_price, emergency,
+                    )
+                    try:
+                        from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+                        asyncio.create_task(_TA().alert(
+                            event="SL_GUARDIAN_REPLACED",
+                            severity="CRITICAL" if emergency else "WARNING",
+                            agent="IronMan",
+                            symbol=mekka,
+                            message=(
+                                f"🛡️ SL ausente em {mekka} — recolocado @ {sl_price:.4f}"
+                                + (" (EMERGÊNCIA: SL desconhecido, usei stop padrão de "
+                                   f"{self._GUARDIAN_DEFAULT_SL_PCT*100:.0f}%)" if emergency else "")
+                            ),
+                        ))
+                    except Exception:  # noqa: BLE001
+                        pass
+                except Exception as exc:  # noqa: BLE001
+                    summary["errors"].append(f"{mekka} replace SL: {exc}")
+                    self._log.error(
+                        f"[IronMan/guardian] FAILED to re-place SL for {mekka}: {exc}"
+                    )
+                    try:
+                        from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+                        asyncio.create_task(_TA().alert(
+                            event="SL_GUARDIAN_FAILED",
+                            severity="CRITICAL",
+                            agent="IronMan",
+                            symbol=mekka,
+                            message=(
+                                f"🚨 Posição {mekka} SEM STOP e falha ao recolocar: {exc} "
+                                "— INTERVENÇÃO MANUAL URGENTE."
+                            ),
+                        ))
+                    except Exception:  # noqa: BLE001
+                        pass
+            except Exception as exc:  # noqa: BLE001
+                summary["errors"].append(f"guardian loop: {exc}")
+                continue
+
+        return summary
+
+    async def close_position(self, symbol: str, side: str) -> ExecutionResult:
+        """Close an open LIVE position with a reduce-only MARKET order and
+        cancel its resting SL/TP orders. ``side`` is the OPEN position's side
+        ('LONG'/'SHORT'). Used by the dashboard 'Fechar' button for live
+        (Bybit/Binance) positions. Hyperliquid is not handled here.
+        """
+        exchange_id = settings.active_exchange
+        if exchange_id == "hyperliquid":
+            return ExecutionResult(
+                symbol=symbol, status=ExecutionStatus.ERROR, is_paper=False,
+                error="Fechamento manual via dashboard suportado em Bybit/Binance.",
+            )
+
+        exchange = await self._get_ccxt_exchange(exchange_id)
+        ccxt_symbol = to_ccxt(to_mekka(symbol), exchange_id)  # type: ignore[arg-type]
+
+        # Confirm the live size on the venue (don't trust the caller).
+        size = 0.0
+        try:
+            positions = await exchange.fetch_positions([ccxt_symbol])
+            for p in positions or []:
+                if to_mekka(p.get("symbol") or "") == to_mekka(symbol):
+                    size = abs(float(p.get("contracts") or 0))
+                    break
+        except Exception as _exc:  # noqa: BLE001
+            self._log.warning(f"[IronMan/{exchange_id}] fetch size for close failed: {_exc}")
+
+        if size <= 0:
+            return ExecutionResult(
+                symbol=symbol, status=ExecutionStatus.SKIPPED, is_paper=False,
+                error=f"Nenhuma posição aberta em {symbol} na {exchange_id}.",
+            )
+
+        is_long = side.upper() == "LONG"
+        close_side = "sell" if is_long else "buy"
+        order = await exchange.create_order(
+            symbol=ccxt_symbol,
+            type="market",
+            side=close_side,
+            amount=size,
+            params={"reduceOnly": True},
+        )
+        # Cancel resting SL/TP so they don't fire on a now-flat position.
+        try:
+            await exchange.cancel_all_orders(ccxt_symbol)
+        except Exception as _exc:  # noqa: BLE001
+            self._log.warning(f"[IronMan/{exchange_id}] cancel_all_orders after close failed: {_exc}")
+
+        avg = float(order.get("average") or 0) or 0.0
+        self._log.warning(
+            f"[IronMan/{exchange_id}] manual close {symbol} {side} qty={size} @ {avg}"
+        )
+        return ExecutionResult(
+            symbol=symbol,
+            status=ExecutionStatus.FILLED,
+            is_paper=False,
+            side="long" if is_long else "short",
+            quantity=round(size, 8),
+            avg_price=round(avg, 6),
+            notional_usd=round(size * avg, 2),
+            order_id=str(order.get("id") or ""),
+            metadata={"action": "manual_close", "exchange": exchange_id},
         )
 
     # ------------------------------------------------------------------
