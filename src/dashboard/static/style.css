@@ -1819,10 +1819,12 @@ body[data-theme="light"] .brand-mark { filter: drop-shadow(0 0 6px rgba(15,23,42
      It was reading attr(title) before — which is empty — so nothing showed. */
   content: attr(data-tip);
   position: absolute;
-  bottom: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%) translateY(4px);
-  background: rgba(8,15,32,0.98);
+  /* Drop the tip BELOW the "?" so titles near the topbar aren't hidden
+     behind the menu. High z-index keeps it above the sidebar (z 100). */
+  top: calc(100% + 8px);
+  left: 0;
+  transform: translateY(-4px);
+  background: rgba(8,15,32,0.985);
   border: 1px solid var(--glass-border-lg);
   border-radius: var(--r-sm);
   padding: 7px 10px;
@@ -1836,11 +1838,11 @@ body[data-theme="light"] .brand-mark { filter: drop-shadow(0 0 6px rgba(15,23,42
   opacity: 0;
   pointer-events: none;
   transition: opacity 120ms ease, transform 120ms ease;
-  z-index: 60;
-  box-shadow: var(--shadow-md);
+  z-index: 9999;
+  box-shadow: var(--shadow-lg, 0 10px 28px rgba(0,0,0,0.5));
 }
 .help-dot:hover::after,
-.help-dot:focus::after { opacity: 1; transform: translateX(-50%) translateY(0); }
+.help-dot:focus::after { opacity: 1; transform: translateY(0); }
 .help-dot { cursor: help; }
 
 /* --- 5.7 Widget customizer --- */
