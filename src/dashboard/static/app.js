@@ -5443,6 +5443,7 @@ function _mkBootDashboardV2() {
   try { _mkBootTradeNow();} catch (e) { console.error('[v2] _mkBootTradeNow failed:', e); }
   try { _bootManualTrade();} catch (e) { console.error('[v2] _bootManualTrade failed:', e); }
   try { _bootImprovements();} catch (e) { console.error('[v2] _bootImprovements failed:', e); }
+  try { _bootInlineButtons();} catch (e) { console.error('[v2] _bootInlineButtons failed:', e); }
   try { _bootTradingModes(); } catch (e) { console.error('[v2] _bootTradingModes failed:', e); }
   try { _bootGlobalMode();   } catch (e) { console.error('[v2] _bootGlobalMode failed:', e); }
   // Feature B — operator command center quick actions (Overview)
@@ -6185,9 +6186,9 @@ function _imprRender() {
         <div class="impr-rationale">🧠 <b>Mekka:</b> ${escapeHtml(r.rationale || '')}</div>
         ${_imprPrCard(r.id, dev)}
         <div class="impr-actions">
-          <button type="button" class="impr-btn impr-accept" onclick="_imprDecide('${escapeHtml(r.id)}','accepted')" ${r.status === 'accepted' ? 'disabled' : ''}>✔ Aceitar</button>
-          <button type="button" class="impr-btn impr-reject" onclick="_imprDecide('${escapeHtml(r.id)}','rejected')" ${r.status === 'rejected' ? 'disabled' : ''}>✘ Reprovar</button>
-          ${r.status !== 'pending' ? `<button type="button" class="impr-btn impr-reset" onclick="_imprDecide('${escapeHtml(r.id)}','pending')">↺ Reabrir</button>` : ''}
+          <button type="button" class="impr-btn impr-accept" data-act="accepted" data-id="${escapeHtml(r.id)}" ${r.status === 'accepted' ? 'disabled' : ''}>✔ Aceitar</button>
+          <button type="button" class="impr-btn impr-reject" data-act="rejected" data-id="${escapeHtml(r.id)}" ${r.status === 'rejected' ? 'disabled' : ''}>✘ Reprovar</button>
+          ${r.status !== 'pending' ? `<button type="button" class="impr-btn impr-reset" data-act="pending" data-id="${escapeHtml(r.id)}">↺ Reabrir</button>` : ''}
         </div>
       </div>
     `;
@@ -6225,7 +6226,7 @@ function _imprPrCard(recId, dev) {
       </div>
       <div class="impr-pr-actions">
         <button type="button" class="impr-btn impr-pr-approve"
-                onclick="_imprApprovePr('${escapeHtml(recId)}', ${prNum === '' ? 'null' : Number(prNum)})">
+                data-act="approve-pr" data-id="${escapeHtml(recId)}" data-pr="${prNum === '' ? '' : Number(prNum)}">
           ✅ Aprovar PR
         </button>
       </div>
@@ -6307,9 +6308,53 @@ function _imprUpdateSummary() {
   `;
 }
 
+// Wire the static buttons that used inline onclick= (blocked by the strict
+// CSP). Delegated on document so it covers all pages. CSP-safe.
+function _bootInlineButtons() {
+  if (document.body.dataset.inlineWired) return;
+  document.body.dataset.inlineWired = '1';
+  document.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('button[data-act]');
+    if (!btn) return;
+    const act = btn.dataset.act;
+    const arg = btn.dataset.arg;
+    try {
+      switch (act) {
+        case 'ind':          if (typeof _liveToggleIndicator === 'function') _liveToggleIndicator(arg); break;
+        case 'cmd-toggle':   if (typeof _cmdToggle === 'function') _cmdToggle(); break;
+        case 'sound-toggle': if (typeof _mkToggleSound === 'function') _mkToggleSound(); break;
+        case 'cmd-mode':     if (typeof _cmdSetMode === 'function') _cmdSetMode(arg); break;
+        case 'cmd-side':     if (typeof _cmdSetSide === 'function') _cmdSetSide(arg); break;
+        case 'cmd-exec':     if (typeof _cmdExecute === 'function') _cmdExecute(); break;
+        default: return; // not ours (e.g. impr-list handles its own data-act)
+      }
+    } catch (e) { console.error('[inline-btn] ' + act + ' failed:', e); }
+  });
+}
+
 function _bootImprovements() {
   const refresh = document.getElementById('impr-refresh');
   if (refresh) refresh.addEventListener('click', _imprLoad);
+
+  // Delegated click handler — inline onclick attributes are blocked by the
+  // dashboard's strict CSP (script-src has no 'unsafe-inline'), which is why
+  // the Accept/Reject/Approve buttons did nothing. Bind once on the list.
+  const list = document.getElementById('impr-list');
+  if (list && !list.dataset.delegated) {
+    list.dataset.delegated = '1';
+    list.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('button[data-act]');
+      if (!btn || btn.disabled) return;
+      const act = btn.dataset.act;
+      const id = btn.dataset.id;
+      if (act === 'approve-pr') {
+        const pr = btn.dataset.pr === '' ? null : Number(btn.dataset.pr);
+        _imprApprovePr(id, pr);
+      } else if (act === 'accepted' || act === 'rejected' || act === 'pending') {
+        _imprDecide(id, act);
+      }
+    });
+  }
   document.querySelectorAll('.impr-filter').forEach(btn => {
     btn.addEventListener('click', () => {
       _imprDomainFilter = btn.dataset.domain || 'all';

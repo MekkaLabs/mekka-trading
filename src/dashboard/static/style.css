@@ -1815,7 +1815,9 @@ body[data-theme="light"] .brand-mark { filter: drop-shadow(0 0 6px rgba(15,23,42
   vertical-align: middle;
 }
 .help-dot::after {
-  content: attr(title);
+  /* The tip text is set on the dot via data-tip (see enhanceTitlesWithHelp).
+     It was reading attr(title) before — which is empty — so nothing showed. */
+  content: attr(data-tip);
   position: absolute;
   bottom: calc(100% + 6px);
   left: 50%;
@@ -1823,17 +1825,23 @@ body[data-theme="light"] .brand-mark { filter: drop-shadow(0 0 6px rgba(15,23,42
   background: rgba(8,15,32,0.98);
   border: 1px solid var(--glass-border-lg);
   border-radius: var(--r-sm);
-  padding: 5px 8px;
+  padding: 7px 10px;
   font-size: 0.76rem;
+  line-height: 1.35;
   color: var(--text-2);
-  white-space: nowrap;
+  white-space: normal;
+  width: max-content;
+  max-width: 300px;
+  text-align: left;
   opacity: 0;
   pointer-events: none;
-  transition: all 120ms ease;
+  transition: opacity 120ms ease, transform 120ms ease;
   z-index: 60;
   box-shadow: var(--shadow-md);
 }
-.help-dot:hover::after { opacity: 1; transform: translateX(-50%) translateY(0); }
+.help-dot:hover::after,
+.help-dot:focus::after { opacity: 1; transform: translateX(-50%) translateY(0); }
+.help-dot { cursor: help; }
 
 /* --- 5.7 Widget customizer --- */
 .widget-customizer { display: block; margin-top: 12px; }

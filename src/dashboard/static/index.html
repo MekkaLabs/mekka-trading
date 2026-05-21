@@ -941,9 +941,9 @@
           </div>
           <!-- Indicator toggles -->
           <div class="live-ctrl live-ind-toggles">
-            <button class="live-ind-btn" id="ind-btn-bb"   title="Bollinger Bands (20,2)" onclick="_liveToggleIndicator('bb')">BB</button>
-            <button class="live-ind-btn" id="ind-btn-rsi"  title="RSI (14)"               onclick="_liveToggleIndicator('rsi')">RSI</button>
-            <button class="live-ind-btn" id="ind-btn-macd" title="MACD (12,26,9)"          onclick="_liveToggleIndicator('macd')">MACD</button>
+            <button class="live-ind-btn" id="ind-btn-bb"   title="Bollinger Bands (20,2)" data-act="ind" data-arg="bb">BB</button>
+            <button class="live-ind-btn" id="ind-btn-rsi"  title="RSI (14)"               data-act="ind" data-arg="rsi">RSI</button>
+            <button class="live-ind-btn" id="ind-btn-macd" title="MACD (12,26,9)"          data-act="ind" data-arg="macd">MACD</button>
           </div>
           <!-- Ticker strip -->
           <div class="live-ticker" id="live-ticker">
@@ -951,8 +951,8 @@
             <span class="live-ticker-change" id="live-change"></span>
           </div>
           <span class="live-status-msg muted-line" id="live-status">Conectando…</span>
-          <button class="live-cmd-toggle" id="live-cmd-toggle" onclick="_cmdToggle()" title="Central de Comando">⌨ Comando</button>
-          <button id="sound-toggle-btn" class="sound-toggle-btn" title="Sons desativados" onclick="_mkToggleSound()">🔇</button>
+          <button class="live-cmd-toggle" id="live-cmd-toggle" data-act="cmd-toggle" title="Central de Comando">⌨ Comando</button>
+          <button id="sound-toggle-btn" class="sound-toggle-btn" title="Sons desativados" data-act="sound-toggle">🔇</button>
         </div>
 
         <!-- Command Center -->
@@ -960,8 +960,8 @@
           <div class="cmd-row">
             <div class="cmd-mode-group">
               <span class="cmd-label">Modo</span>
-              <button class="cmd-mode-btn active" id="cmd-mode-auto" onclick="_cmdSetMode('auto')">🤖 Auto</button>
-              <button class="cmd-mode-btn" id="cmd-mode-manual" onclick="_cmdSetMode('manual')">✋ Manual</button>
+              <button class="cmd-mode-btn active" id="cmd-mode-auto" data-act="cmd-mode" data-arg="auto">🤖 Auto</button>
+              <button class="cmd-mode-btn" id="cmd-mode-manual" data-act="cmd-mode" data-arg="manual">✋ Manual</button>
             </div>
             <div class="cmd-sep"></div>
             <div class="cmd-field">
@@ -974,8 +974,8 @@
             <div class="cmd-field">
               <label>Lado</label>
               <div class="cmd-side-group">
-                <button class="cmd-side-btn long active" id="cmd-side-long" onclick="_cmdSetSide('LONG')">▲ LONG</button>
-                <button class="cmd-side-btn short" id="cmd-side-short" onclick="_cmdSetSide('SHORT')">▼ SHORT</button>
+                <button class="cmd-side-btn long active" id="cmd-side-long" data-act="cmd-side" data-arg="LONG">▲ LONG</button>
+                <button class="cmd-side-btn short" id="cmd-side-short" data-act="cmd-side" data-arg="SHORT">▼ SHORT</button>
               </div>
             </div>
             <div class="cmd-field">
@@ -998,7 +998,7 @@
               <label>Entrada</label>
               <input type="number" id="cmd-entry" placeholder="Market" step="any">
             </div>
-            <button class="cmd-execute-btn" id="cmd-execute-btn" onclick="_cmdExecute()">
+            <button class="cmd-execute-btn" id="cmd-execute-btn" data-act="cmd-exec">
               ⚡ Executar
             </button>
           </div>
