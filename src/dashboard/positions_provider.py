@@ -549,6 +549,98 @@ async def _live_sltp_map() -> dict[tuple[str, str], dict[str, float | None]]:
     return out
 
 
+async def fetch_open_orders() -> dict[str, Any]:
+    """Read the live reduce-only SL/TP orders sitting on the venue.
+
+    Lets the operator SEE that each open position is actually protected by a
+    stop on the exchange (not just in the bot's memory) — the key reassurance
+    for testnet validation before mainnet. Read-only, fail-silent: returns the
+    stub shape on any sad path so the panel never breaks.
+    """
+    if settings.paper_trading:
+        return {"items": [], "count": 0, "source": "paper", "supported": False,
+                "message": "Paper mode — ordens são simuladas (sem ordens reais na corretora)."}
+    exchange_id = settings.active_exchange
+    if exchange_id == "hyperliquid":
+        return _stub_response("Open-orders view: Hyperliquid usa SDK nativo (não-CCXT).")
+    if exchange_id == "binance" and not settings.binance_api_key:
+        return _stub_response("BINANCE_API_KEY not set.")
+    if exchange_id == "bybit" and not settings.bybit_api_key:
+        return _stub_response("BYBIT_API_KEY not set.")
+    try:
+        import ccxt.async_support as ccxt  # noqa: WPS433
+    except ImportError:
+        return _stub_response("ccxt not installed.")
+
+    cfg: dict[str, Any] = {
+        "enableRateLimit": True, "timeout": 20_000,
+        "options": {"defaultType": "swap", "recvWindow": 60_000, "adjustForTimeDifference": True},
+    }
+    if exchange_id == "bybit":
+        cfg["apiKey"] = settings.bybit_api_key
+        cfg["secret"] = settings.bybit_api_secret
+    elif exchange_id == "binance":
+        cfg["apiKey"] = settings.binance_api_key
+        cfg["secret"] = settings.binance_api_secret
+        cfg["options"].update({"defaultSubType": "linear", "fetchMarkets": {"types": ["linear"]},
+                               "disableFuturesSandboxWarning": True})
+    exchange = getattr(ccxt, exchange_id)(cfg)
+    try:
+        try:
+            if exchange_id == "bybit" and settings.bybit_testnet:
+                exchange.set_sandbox_mode(True)
+            elif exchange_id == "binance" and settings.binance_testnet:
+                exchange.set_sandbox_mode(True)
+        except Exception as sbx_exc:  # noqa: BLE001
+            logger.error("[orders/%s] set_sandbox_mode failed: %s", exchange_id, sbx_exc)
+        # Binance USDM requires a symbol for fetch_open_orders; try the bare
+        # call first, then fall back to per-symbol over the configured assets.
+        from src.services.market_registry import to_ccxt  # noqa: WPS433
+        raw: list = []
+        try:
+            raw = await asyncio.wait_for(exchange.fetch_open_orders(), timeout=8.0)
+        except asyncio.TimeoutError:
+            return _stub_response(f"{exchange_id} open-orders timed out.")
+        except Exception:  # noqa: BLE001
+            try:
+                await exchange.load_markets()
+                for _sym in list(settings.trading_assets):
+                    try:
+                        ccxt_sym = to_ccxt(_sym, exchange_id)  # type: ignore[arg-type]
+                        part = await asyncio.wait_for(
+                            exchange.fetch_open_orders(ccxt_sym), timeout=8.0)
+                        raw.extend(part or [])
+                    except Exception:  # noqa: BLE001
+                        continue
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("%s fetch_open_orders failed: %s", exchange_id, exc)
+                return _stub_response(f"{exchange_id} error: {type(exc).__name__}")
+        items = []
+        for o in raw or []:
+            info = o.get("info") or {}
+            otype = str(o.get("type") or info.get("type") or "").lower()
+            stop_px = _to_float(o.get("stopPrice") or info.get("stopPrice") or info.get("triggerPrice"))
+            reduce_only = bool(o.get("reduceOnly") or info.get("reduceOnly") or info.get("reduce_only"))
+            kind = "SL" if ("stop" in otype and "profit" not in otype) else (
+                "TP" if ("take_profit" in otype or "takeprofit" in otype) else otype.upper() or "ORDER")
+            items.append({
+                "symbol": to_mekka(o.get("symbol") or ""),
+                "kind": kind, "side": (o.get("side") or "").upper(),
+                "trigger_price": stop_px or None,
+                "price": _to_float(o.get("price")) or None,
+                "amount": _to_float(o.get("amount")),
+                "reduce_only": reduce_only,
+                "order_id": str(o.get("id") or ""),
+            })
+        return {"items": items, "count": len(items), "source": exchange_id,
+                "supported": True, "message": None if items else "Sem ordens abertas na corretora."}
+    finally:
+        try:
+            await exchange.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 async def fetch_positions(
     mark_prices: dict[str, float] | None = None,
 ) -> dict[str, Any]:

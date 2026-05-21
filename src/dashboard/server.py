@@ -542,6 +542,7 @@ class MekkaDashboardServer:
         r.add_post("/api/trade/manual", self._handle_trade_manual)
         r.add_post("/api/trade/manual-analyze", self._handle_trade_manual_analyze)
         r.add_get("/api/positions", self._handle_positions)
+        r.add_get("/api/positions/orders", self._handle_positions_orders)
         r.add_post("/api/positions/close", self._handle_positions_close)
 
     def _register_agents_memory_routes(self, r) -> None:
@@ -2533,6 +2534,18 @@ class MekkaDashboardServer:
             "equity_usd": round(equity, 2),
             "generated_at": now_utc.isoformat(),
         })
+
+    async def _handle_positions_orders(self, _: web.Request) -> web.Response:
+        """GET /api/positions/orders — live reduce-only SL/TP orders on the venue.
+        Read-only, fail-silent: always 200 with the provider's stub shape on error."""
+        from src.dashboard.positions_provider import fetch_open_orders
+        try:
+            return web.json_response(await fetch_open_orders(), status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("positions/orders failed: %s", exc)
+            return web.json_response(
+                {"items": [], "count": 0, "source": "stub", "supported": False,
+                 "message": f"error: {type(exc).__name__}"}, status=200)
 
     async def _handle_positions(self, _: web.Request) -> web.Response:
         """Open positions read via the Hyperliquid `info.user_state` endpoint.

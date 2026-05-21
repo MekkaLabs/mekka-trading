@@ -91,6 +91,20 @@ async def _run_forever_with_inbound(equity_usd: float | None = None) -> None:
 
     monitor_interval = settings.monitor_interval_seconds
     main_interval = settings.main_loop_interval_seconds
+    # Testnet fast-cycle: let the operator watch the bot decide/trade in minutes
+    # instead of 4h. Only applies on a testnet; mainnet always uses the 4h loop.
+    _on_testnet = (
+        (settings.active_exchange == "binance" and bool(getattr(settings, "binance_testnet", False)))
+        or (settings.active_exchange == "bybit" and bool(getattr(settings, "bybit_testnet", False)))
+        or (settings.active_exchange == "hyperliquid" and not settings.is_mainnet)
+    )
+    _fast = int(getattr(settings, "testnet_main_loop_interval_seconds", 0) or 0)
+    if _on_testnet and _fast > 0:
+        logger.info(
+            "[run] Testnet fast-cycle ON: main loop every {}s (mainnet would be {}s)",
+            _fast, main_interval,
+        )
+        main_interval = _fast
     last_main_at = 0.0
 
     try:

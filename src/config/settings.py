@@ -138,6 +138,14 @@ class Settings(BaseSettings):
             "testnet endpoints. Default True to match BYBIT_TESTNET safety posture."
         ),
     )
+    binance_entry_order_type: str = Field(
+        default="auto",
+        description=(
+            "Entry order type for CCXT execution: 'auto' | 'market' | 'limit_ioc'. "
+            "'auto' resolves to 'market' on testnet (reliable fills so the full flow "
+            "can be tested) and 'limit_ioc' on mainnet (slippage control)."
+        ),
+    )
 
     # --------------------------------------------------------------------------
     # Telegram
@@ -560,6 +568,14 @@ class Settings(BaseSettings):
     main_loop_interval_seconds: int = Field(
         default=14_400,  # 4 hours
         description="How often the main 4h analysis loop runs",
+    )
+    testnet_main_loop_interval_seconds: int = Field(
+        default=0,
+        description=(
+            "When > 0 AND running on a testnet, overrides main_loop_interval_seconds "
+            "with this (shorter) value so the operator can watch the bot decide/trade "
+            "in minutes instead of 4h. Mainnet always uses main_loop_interval_seconds."
+        ),
     )
     monitor_interval_seconds: int = Field(
         default=300,  # 5 minutes

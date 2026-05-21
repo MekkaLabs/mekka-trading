@@ -25,6 +25,7 @@ Exit code 0 = all green. Non-zero = first failure (message says what to fix).
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import time
 
@@ -137,6 +138,50 @@ async def main() -> int:
 
         items = map_ccxt_positions(raw)
         print(f"  ✓ fetch_positions OK — {len(raw)} raw, {len(items)} mapped")
+
+        # --- 7. ticker (market data path) ----------------------------------
+        try:
+            tk = await exchange.fetch_ticker("BTC/USDT:USDT")
+            print(f"  ✓ fetch_ticker OK — BTC last={tk.get('last')}")
+        except Exception as _t_exc:  # noqa: BLE001
+            print(f"  … fetch_ticker skipped: {type(_t_exc).__name__}")
+
+        # --- 8. open orders (SL/TP visibility) -----------------------------
+        try:
+            oo = await exchange.fetch_open_orders()
+            print(f"  ✓ fetch_open_orders OK — {len(oo)} open order(s) on venue")
+        except Exception as _o_exc:  # noqa: BLE001
+            print(f"  … fetch_open_orders skipped: {type(_o_exc).__name__}")
+
+        # --- 9. OPT-IN end-to-end order test (SMOKE_PLACE_ORDER=1) ----------
+        # Places a tiny MARKET order, confirms the position, places a stop,
+        # then CLOSES it. Only runs when explicitly opted in — it touches the
+        # (testnet) account. Never runs by default.
+        if os.environ.get("SMOKE_PLACE_ORDER") == "1":
+            print("  → SMOKE_PLACE_ORDER=1 — running live testnet order test…")
+            sym = "BTC/USDT:USDT"
+            mkt = exchange.market(sym)
+            min_amt = float(((mkt.get("limits") or {}).get("amount") or {}).get("min") or 0.001)
+            qty = float(exchange.amount_to_precision(sym, max(min_amt, 0.001)))
+            try:
+                entry = await exchange.create_order(sym, "market", "buy", qty, params={"reduceOnly": False})
+                print(f"    ✓ entry market filled qty={entry.get('filled')} id={entry.get('id')}")
+                # protective stop ~2% below
+                last = float((await exchange.fetch_ticker(sym)).get("last") or 0)
+                sl_px = round(last * 0.98, 1)
+                sl = await exchange.create_order(sym, "stop_market", "sell", qty,
+                                                 params={"stopPrice": sl_px, "reduceOnly": True})
+                print(f"    ✓ stop placed id={sl.get('id')} @ {sl_px}")
+                # close (reduce-only market) + cancel stop
+                await exchange.create_order(sym, "market", "sell", qty, params={"reduceOnly": True})
+                try:
+                    await exchange.cancel_order(sl.get("id"), sym)
+                except Exception:  # noqa: BLE001
+                    pass
+                print("    ✓ position closed + stop cancelled — full cycle OK")
+            except Exception as _ord_exc:  # noqa: BLE001
+                print(f"    ✗ order test FAILED: {type(_ord_exc).__name__}: {_ord_exc}")
+                return 6
 
     except Exception as exc:  # noqa: BLE001
         print(f"  ✗ FAILED: {type(exc).__name__}: {exc}")

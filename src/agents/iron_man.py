@@ -771,7 +771,21 @@ class IronMan(BaseAgent[ExecutionResult]):
         except Exception as _exc:
             self._log.warning(f"[IronMan/{exchange_id}] balance check failed: {_exc}")
 
-        # ── Entry order (limit IOC) ──
+        # ── Entry order ──
+        # Order type is configurable. 'auto' → market on testnet (reliable fills
+        # so the operator can exercise the full pipeline), limit-IOC on mainnet
+        # (slippage control). A limit-IOC that doesn't cross the book fills 0,
+        # which was the common "trade didn't work" on testnet.
+        _is_testnet = (
+            (exchange_id == "binance" and bool(getattr(settings, "binance_testnet", False)))
+            or (exchange_id == "bybit" and bool(getattr(settings, "bybit_testnet", False)))
+        )
+        _etype = str(getattr(settings, "binance_entry_order_type", "auto") or "auto").lower()
+        if _etype == "auto":
+            _etype = "market" if _is_testnet else "limit_ioc"
+        use_market = _etype == "market"
+        self._log.info(f"[IronMan/{exchange_id}] entry order type={_etype} (testnet={_is_testnet})")
+
         order: Any = None
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
@@ -780,14 +794,23 @@ class IronMan(BaseAgent[ExecutionResult]):
             reraise=True,
         ):
             with attempt:
-                order = await exchange.create_order(
-                    symbol=ccxt_symbol,
-                    type="limit",
-                    side=ccxt_side,
-                    amount=quantity,
-                    price=signal.entry_price,
-                    params={"timeInForce": "IOC", "reduceOnly": False},
-                )
+                if use_market:
+                    order = await exchange.create_order(
+                        symbol=ccxt_symbol,
+                        type="market",
+                        side=ccxt_side,
+                        amount=quantity,
+                        params={"reduceOnly": False},
+                    )
+                else:
+                    order = await exchange.create_order(
+                        symbol=ccxt_symbol,
+                        type="limit",
+                        side=ccxt_side,
+                        amount=quantity,
+                        price=signal.entry_price,
+                        params={"timeInForce": "IOC", "reduceOnly": False},
+                    )
 
         if order is None:
             return ExecutionResult(
@@ -808,7 +831,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                 status=ExecutionStatus.REJECTED,
                 is_paper=False,
                 side="long" if is_buy else "short",
-                error="IOC order filled 0 units",
+                error=f"{_etype} order filled 0 units",
                 metadata={"raw_order": order},
             )
 

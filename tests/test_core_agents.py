@@ -95,6 +95,26 @@ async def test_ironman_sl_failure_flattens_position():
     assert any(c["type"] == "market" and c["params"].get("reduceOnly") for c in fake.calls)
 
 
+async def test_ironman_entry_type_limit_ioc(monkeypatch):
+    from src.agents.iron_man import IronMan
+    from src.config.settings import settings
+    monkeypatch.setattr(settings, "binance_entry_order_type", "limit_ioc")
+    im = IronMan(); fake = _FakeExchange(sl_fails=False); im._ccxt_exchange = fake
+    await im._place_ccxt_order(signal=_signal(), quantity=0.01, leverage=2,
+                               size_pct=0.01, exchange_id="binance")
+    assert fake.calls[0]["type"] == "limit"  # entry is a limit IOC
+
+
+async def test_ironman_entry_type_market(monkeypatch):
+    from src.agents.iron_man import IronMan
+    from src.config.settings import settings
+    monkeypatch.setattr(settings, "binance_entry_order_type", "market")
+    im = IronMan(); fake = _FakeExchange(sl_fails=False); im._ccxt_exchange = fake
+    await im._place_ccxt_order(signal=_signal(), quantity=0.01, leverage=2,
+                               size_pct=0.01, exchange_id="binance")
+    assert fake.calls[0]["type"] == "market"  # entry is a market order
+
+
 async def test_ironman_sl_success_is_filled():
     from src.agents.iron_man import IronMan
     im = IronMan()
@@ -105,8 +125,9 @@ async def test_ironman_sl_success_is_filled():
     )
     assert result.status in (ExecutionStatus.FILLED, ExecutionStatus.PARTIAL)
     assert result.sl_order_id == "SL1"
-    # No emergency flatten when SL succeeds.
-    assert not any(c["type"] == "market" for c in fake.calls)
+    # No emergency flatten when SL succeeds (a flatten is a reduce-only market
+    # order; the entry itself may be market on testnet, which is fine).
+    assert not any(c["type"] == "market" and c["params"].get("reduceOnly") for c in fake.calls)
 
 
 # ---------------------------------------------------------------------------

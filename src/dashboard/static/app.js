@@ -2173,6 +2173,18 @@ async function loadPositions() {
         ? '<span class="pos-dot live" aria-label="live"></span>'
         : '<span class="pos-dot stub" aria-label="stub"></span>';
       positionsStatus.innerHTML = `${dot} ${escapeHtml(data.count || 0)} posições · ${escapeHtml(data.source || '-')}${data.message ? ' · ' + escapeHtml(data.message) : ''}`;
+      // Show live SL/TP orders sitting on the venue (testnet/live), so the
+      // operator can confirm positions are actually protected. Best-effort.
+      fetch('/api/positions/orders', { cache: 'no-store' })
+        .then(r => r.ok ? r.json() : null)
+        .then(od => {
+          if (!od || !positionsStatus) return;
+          const n = od.count || 0;
+          if (od.supported) {
+            positionsStatus.innerHTML += ` · 🛡️ ${n} stop${n === 1 ? '' : 's'} na corretora`;
+          }
+        })
+        .catch(() => {});
     }
     // Tune the auto-refresh cadence based on what the provider returned.
     const nextInterval = isLive ? 3000 : 30000;
