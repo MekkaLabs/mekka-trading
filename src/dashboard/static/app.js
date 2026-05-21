@@ -6225,15 +6225,42 @@ async function _imprDecide(id, status) {
     });
     const data = await res.json();
     if (data.ok) {
+      // Update locally + re-render INSTANTLY. Do NOT call _imprLoad() — that
+      // re-runs the 6–10s council (Beast+Galactus) and made the card vanish
+      // into "Carregando…", which looked like the button was broken.
       if (rec) rec.status = status;
       _imprRender();
-      _imprLoad();  // refresh summary counts
+      _imprUpdateSummary();
     } else {
       alert('❌ Não foi possível registrar a decisão: ' + (data.reason || 'erro desconhecido'));
     }
   } catch (e) {
     alert('❌ Falha de conexão ao registrar a decisão.');
   }
+}
+
+// Recompute the summary chips locally from _imprData (no server round-trip).
+function _imprUpdateSummary() {
+  const sum = document.getElementById('impr-summary');
+  if (!sum) return;
+  const d = _imprData;
+  const count = (f) => d.filter(f).length;
+  const s = {
+    total: d.length,
+    pending: count(r => (r.status || 'pending') === 'pending'),
+    accepted: count(r => r.status === 'accepted'),
+    rejected: count(r => r.status === 'rejected'),
+    trading_ops: count(r => r.domain === 'trading-ops'),
+    dev_squad: count(r => r.domain !== 'trading-ops'),
+  };
+  sum.innerHTML = `
+    <div class="impr-stat"><b>${s.total}</b><span>recomendações</span></div>
+    <div class="impr-stat impr-stat-pending"><b>${s.pending}</b><span>pendentes</span></div>
+    <div class="impr-stat impr-stat-ok"><b>${s.accepted}</b><span>aceitas</span></div>
+    <div class="impr-stat impr-stat-bad"><b>${s.rejected}</b><span>reprovadas</span></div>
+    <div class="impr-stat"><b>${s.trading_ops}</b><span>trading/ops</span></div>
+    <div class="impr-stat"><b>${s.dev_squad}</b><span>dev squads</span></div>
+  `;
 }
 
 function _bootImprovements() {

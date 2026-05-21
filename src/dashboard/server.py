@@ -6037,8 +6037,18 @@ class MekkaDashboardServer:
         operator's persisted accept/reject status. Read-only.
         """
         try:
+            import time as _time
             from src.agents.mekka import Mekka
+            # TTL cache (20s): the council (Beast+Galactus) takes 6–10s; without
+            # this every panel open/refresh and the Telegram push re-ran it,
+            # making the UI feel frozen. Cache the report dict + the fresh recs.
+            now = _time.monotonic()
+            cached = getattr(self, "_impr_cache", None)
+            if cached and (now - cached[0]) < 20.0:
+                return web.json_response(cached[1], status=200)
             report = await Mekka().run(period_days=7)
+            report_dict = report.to_dict()
+            self._impr_cache = (now, report_dict)
             # Push NEW pending proposals to Telegram once (operator can approve
             # there with /aprovar — synced with this dashboard). In-memory dedup.
             try:
@@ -6055,7 +6065,7 @@ class MekkaDashboardServer:
                         asyncio.create_task(alerter.improvement_proposed(r))
             except Exception as _push_exc:  # noqa: BLE001
                 logger.debug("improvement Telegram push skipped: %s", _push_exc)
-            return web.json_response(report.to_dict(), status=200)
+            return web.json_response(report_dict, status=200)
         except Exception as exc:  # noqa: BLE001
             logger.error("improvements council failed: %s", exc, exc_info=True)
             return web.json_response(
@@ -6082,6 +6092,8 @@ class MekkaDashboardServer:
         # (expensive) Mekka council on every accept — that was making the
         # accept button hang/fail under load.
         rec_payload = body.get("rec") if isinstance(body.get("rec"), dict) else None
+        # Invalidate the council cache so a fresh GET reflects the new status.
+        self._impr_cache = None
         try:
             from src.agents.mekka import Mekka
             queued_path: str | None = None
