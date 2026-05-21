@@ -266,6 +266,37 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 except Exception:  # noqa: BLE001
                     pass
 
+        # [Mainnet auth guard] Live mainnet with NO dashboard auth means the
+        # mutating endpoints (kill switch, trade execute) are open to anyone who
+        # can reach the port. Loopback bind mitigates LAN risk, but for real
+        # money we warn loudly to require a token/password.
+        if _binance_mainnet:
+            import os as _os
+            auth_enabled = bool(_os.environ.get("MEKKA_DASHBOARD_TOKEN", "").strip())
+            try:
+                from src.dashboard.auth import is_login_enabled as _ile  # noqa: WPS433
+                auth_enabled = auth_enabled or _ile()
+            except Exception:  # noqa: BLE001
+                pass
+            if not auth_enabled:
+                _msg = (
+                    "🔓 MAINNET LIVE SEM AUTH no dashboard — endpoints sensíveis "
+                    "(kill switch, trade execute) ficam abertos. Configure "
+                    "MEKKA_DASHBOARD_TOKEN ou MEKKA_DASHBOARD_PASSWORD."
+                )
+                self._log.error(f"[NickFury] {_msg}")
+                await MekkaRepository.log_event(
+                    agent="NickFury", event="MAINNET_NO_AUTH",
+                    severity="CRITICAL", message=_msg, payload={},
+                )
+                try:
+                    await self._telegram.alert(
+                        event="MAINNET_NO_AUTH", severity="CRITICAL",
+                        agent="NickFury", message=_msg, payload={},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
         self._log.info("[NickFury] Pipeline initialized")
 
     def reset_breakers(self) -> None:

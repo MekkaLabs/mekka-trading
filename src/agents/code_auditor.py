@@ -41,6 +41,7 @@ _TESTS = _REPO_ROOT / "tests"
 # Thresholds (conservative — only flag clear debt).
 _LARGE_FILE_LINES = 1500
 _HUGE_FILE_LINES = 4000
+_LONG_FUNCTION_LINES = 120  # functions longer than this are refactor candidates
 _MAX_PROPOSALS_PER_KIND = 5
 # Match debt markers only in COMMENTS (``# TODO``), so we don't match string
 # literals like a marker tuple in this very file.
@@ -68,6 +69,7 @@ class CodeAuditor:
         proposals: list[ImprovementProposal] = []
         for fn in (
             self._scan_large_files,
+            self._scan_long_functions,
             self._scan_todo_markers,
             self._scan_missing_tests,
             self._scan_ruff,
@@ -114,6 +116,50 @@ class CodeAuditor:
                 area=_area_for_path(p),
                 evidence=f"{rel}: {n} linhas (limite {_LARGE_FILE_LINES}, enorme ≥{_HUGE_FILE_LINES}).",
                 suggested_story=f"Refatorar {rel.name} em submódulos",
+            ))
+        return out
+
+    # ------------------------------------------------------------------
+    # Signal 1b — long functions (refactor candidates), via AST
+    # ------------------------------------------------------------------
+    async def _scan_long_functions(self) -> list[ImprovementProposal]:
+        import ast
+        if not _SRC.exists():
+            return []
+        longest: list[tuple[str, str, int]] = []  # (rel, func, lines)
+        for p in _SRC.rglob("*.py"):
+            if "__pycache__" in str(p):
+                continue
+            try:
+                tree = ast.parse(p.read_text(encoding="utf-8", errors="ignore"))
+            except (SyntaxError, OSError, ValueError):
+                continue
+            rel = str(p.relative_to(_REPO_ROOT))
+            if any(h in rel for h in _PROTECTED_HINTS):
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    end = getattr(node, "end_lineno", None)
+                    if end is None:
+                        continue
+                    span = end - node.lineno + 1
+                    if span >= _LONG_FUNCTION_LINES:
+                        longest.append((rel, node.name, span))
+        if not longest:
+            return []
+        longest.sort(key=lambda t: -t[2])
+        out: list[ImprovementProposal] = []
+        for rel, func, span in longest[:_MAX_PROPOSALS_PER_KIND]:
+            out.append(ImprovementProposal(
+                title=f"Função longa: {func}() em {Path(rel).name} ({span} linhas)",
+                description=(
+                    f"`{func}` em `{rel}` tem {span} linhas (limite {_LONG_FUNCTION_LINES}). "
+                    "Funções longas escondem complexidade e dificultam teste — extrair em helpers."
+                ),
+                impact="MEDIUM" if span < _LONG_FUNCTION_LINES * 3 else "HIGH",
+                area=_area_for_path(Path(rel)),
+                evidence=f"{rel}: {func}() = {span} linhas (limite {_LONG_FUNCTION_LINES}).",
+                suggested_story=f"Quebrar {func}() em funções menores",
             ))
         return out
 

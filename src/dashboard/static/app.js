@@ -6313,6 +6313,7 @@ async function _imprLoadKpi() {
     const data = await res.json();
     const k = data.kpi || {};
     const snap = data.latest_snapshot || null;
+    const imp = (data.impact && data.impact.counts) || {};
     const accRate = (k.acceptance_rate != null) ? `${k.acceptance_rate}%` : '—';
     const wr = (snap && snap.win_rate != null) ? `${snap.win_rate}%` : '—';
     const errs = (snap && snap.errors_24h != null) ? snap.errors_24h : '—';
@@ -6324,6 +6325,13 @@ async function _imprLoadKpi() {
         <div class="impr-kpi-stat"><b>${accRate}</b><span>taxa de aceitação</span></div>
         <div class="impr-kpi-stat"><b>${wr}</b><span>win rate (último)</span></div>
         <div class="impr-kpi-stat"><b>${errs}</b><span>erros 24h</span></div>
+      </div>
+      <div class="impr-kpi-title" style="margin-top:8px">🎯 Impacto das entregas <span class="muted-line">(antes/depois)</span></div>
+      <div class="impr-kpi-row">
+        <div class="impr-kpi-stat"><b class="up">${imp.effective || 0}</b><span>efetivas</span></div>
+        <div class="impr-kpi-stat"><b>${imp.neutral || 0}</b><span>neutras</span></div>
+        <div class="impr-kpi-stat"><b class="down">${imp.regression || 0}</b><span>regressões</span></div>
+        <div class="impr-kpi-stat"><b>${imp.pending || 0}</b><span>medindo</span></div>
       </div>`;
   } catch (_e) {
     el.innerHTML = '';

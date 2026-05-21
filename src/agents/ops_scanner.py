@@ -47,7 +47,8 @@ class OpsScanner:
     async def scan(self, period_days: int = 7) -> list[ImprovementProposal]:
         out: list[ImprovementProposal] = []
         for fn in (self._scan_audit_errors, self._scan_agent_failures,
-                   self._scan_log_exceptions, self._scan_slow_stages):
+                   self._scan_log_exceptions, self._scan_slow_stages,
+                   self._scan_breakers):
             try:
                 out.extend(await fn(period_days))
             except Exception as exc:  # noqa: BLE001
@@ -109,6 +110,45 @@ class OpsScanner:
             area="backend",
             evidence=f"{agent}: {n} CYCLE_ERROR em {period_days}d.",
             suggested_story=f"Estabilizar {agent} contra CYCLE_ERROR",
+        )]
+
+    async def _scan_breakers(self, period_days: int) -> list[ImprovementProposal]:
+        """Detect circuit-breaker openings and stale-price events from the
+        runtime log tail (the market diagnostics live on the server instance and
+        aren't reachable here, but they're logged). Frequent breaker/stale events
+        signal an unreliable data/exchange path — high relevance for live money."""
+        log_path = next((p for p in _LOG_CANDIDATES if p.exists()), None)
+        if log_path is None:
+            return []
+        try:
+            size = log_path.stat().st_size
+            with log_path.open("r", encoding="utf-8", errors="ignore") as fh:
+                if size > _LOG_TAIL_BYTES:
+                    fh.seek(size - _LOG_TAIL_BYTES)
+                text = fh.read().lower()
+        except OSError:
+            return []
+        breaker_hits = len(re.findall(r"breaker (open|opened|tripp)", text)) + text.count("circuit breaker")
+        stale_hits = text.count("stale price") + text.count("stale_price")
+        if breaker_hits < 3 and stale_hits < 3:
+            return []
+        parts = []
+        if breaker_hits >= 3:
+            parts.append(f"circuit breaker {breaker_hits}×")
+        if stale_hits >= 3:
+            parts.append(f"stale price {stale_hits}×")
+        detail = ", ".join(parts)
+        return [ImprovementProposal(
+            title=f"Caminho de dados instável: {detail}",
+            description=(
+                "Aberturas de circuit breaker / preços defasados recorrentes no log "
+                "indicam instabilidade no feed/exchange. Em produção com dinheiro real "
+                "isso pode atrasar decisões e proteções — investigar a fonte."
+            ),
+            impact="MEDIUM" if (breaker_hits + stale_hits) < 10 else "HIGH",
+            area="infra",
+            evidence=f"No tail de {log_path.name}: {detail}.",
+            suggested_story="Estabilizar feed de mercado (breakers/stale)",
         )]
 
     async def _scan_slow_stages(self, period_days: int) -> list[ImprovementProposal]:

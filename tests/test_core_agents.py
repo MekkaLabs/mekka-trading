@@ -197,3 +197,63 @@ def test_cyclops_extract_sl_tp_missing():
 
     sl, tp = _extract_sl_tp(_Rec())
     assert sl is None and tp is None
+
+
+# ---------------------------------------------------------------------------
+# MarketAnalysis.is_safe_to_trade — pre-Vision safety gate
+# ---------------------------------------------------------------------------
+
+def _market_data():
+    from datetime import datetime, timezone
+    from src.models.market_data import MarketData
+    return MarketData(symbol="BTC", timestamp=datetime.now(timezone.utc),
+                      timeframe="4h", price=70000.0)
+
+
+def test_is_safe_to_trade_default_true():
+    from src.models.market_data import MarketAnalysis
+    ma = MarketAnalysis(chart=_market_data())
+    assert ma.is_safe_to_trade is True
+
+
+def test_is_safe_to_trade_false_on_anomaly_pause():
+    from src.models.market_data import MarketAnalysis, AnomalyReport, AnomalySeverity
+    anomaly = AnomalyReport(symbol="BTC", severity=AnomalySeverity.HIGH, should_pause=True)
+    ma = MarketAnalysis(chart=_market_data(), anomaly=anomaly)
+    assert ma.is_safe_to_trade is False
+
+
+def test_is_safe_to_trade_false_on_extreme_vol():
+    from src.models.market_data import MarketAnalysis, VolatilityData, VolatilityRegime
+    vol = VolatilityData(symbol="BTC", atr_pct=10.0)  # validator → EXTREME
+    # Guard against validator changes: assert the regime then the gate.
+    assert vol.volatility_regime == VolatilityRegime.EXTREME
+    ma = MarketAnalysis(chart=_market_data(), volatility=vol)
+    assert ma.is_safe_to_trade is False
+
+
+# ---------------------------------------------------------------------------
+# Mekka — consolidation & domain mapping
+# ---------------------------------------------------------------------------
+
+def test_mekka_domain_for():
+    from src.agents.mekka import _domain_for
+    assert _domain_for("risk") == "trading-ops"
+    assert _domain_for("risk_gates") == "trading-ops"
+    assert _domain_for("backend") == "dev-squad"
+    assert _domain_for("memory") == "dev-squad"
+    assert _domain_for("measurement") == "dev-squad"
+    assert _domain_for("unknown") == "dev-squad"  # default
+
+
+def test_mekka_consolidate_survives_recommends():
+    from src.agents.mekka import Mekka
+    rec = Mekka()._consolidate(
+        {"title": "X", "area": "risk", "impact": "HIGH", "source": "risk_scanner",
+         "description": "d", "evidence": "e"},
+        None,  # no premortem → SURVIVES
+    )
+    assert rec.domain == "trading-ops"
+    assert rec.decision == "RECOMMEND"
+    assert rec.priority == "P1"  # HIGH + not rejected
+    assert rec.source == "risk_scanner"
