@@ -6055,13 +6055,15 @@ class MekkaDashboardServer:
                 {"nodes": [], "links": [], "error": str(exc)}, status=200,
             )
 
-    async def _handle_improvements_get(self, _: web.Request) -> web.Response:
-        """GET /api/improvements — run the Mekka improvement council.
+    async def _handle_improvements_get(self, request: web.Request) -> web.Response:
+        """GET /api/improvements[?fresh=1] — run the Mekka improvement council.
 
         Returns consolidated recommendations (Beast proposals + curated inbox,
         each premortem-ed by Galactus and consolidated by Mekka) with the
-        operator's persisted accept/reject status. Read-only.
+        operator's persisted accept/reject status. ``fresh=1`` bypasses the
+        TTL cache (operator clicked "Buscar melhorias agora").
         """
+        fresh = request.rel_url.query.get("fresh") in ("1", "true", "yes")
         try:
             import time as _time
             from src.agents.mekka import Mekka
@@ -6070,7 +6072,7 @@ class MekkaDashboardServer:
             # making the UI feel frozen. Cache the report dict + the fresh recs.
             now = _time.monotonic()
             cached = getattr(self, "_impr_cache", None)
-            if cached and (now - cached[0]) < 20.0:
+            if not fresh and cached and (now - cached[0]) < 20.0:
                 return web.json_response(cached[1], status=200)
             report = await Mekka().run(period_days=7)
             report_dict = report.to_dict()

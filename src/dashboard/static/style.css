@@ -4435,6 +4435,20 @@ body[data-theme="light"] .page-nav-sub a { color: var(--muted); }
   font-weight: 700; cursor: pointer; transition: box-shadow var(--t-base);
 }
 .impr-refresh-btn:hover { box-shadow: var(--accent-glow); }
+.impr-header-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+/* Primary action — "Buscar melhorias agora" (como o botão de executar trade) */
+.impr-scan-btn {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border: 1px solid var(--accent); color: #04101a;
+  border-radius: var(--r-sm); padding: 8px 16px;
+  font-weight: 800; cursor: pointer; letter-spacing: 0.01em;
+  transition: box-shadow var(--t-base), filter var(--t-base);
+}
+.impr-scan-btn:hover { box-shadow: var(--accent-glow); filter: brightness(1.08); }
+.impr-scan-btn:disabled { opacity: 0.7; cursor: progress; }
+.impr-scan-btn.scanning { animation: imprScanPulse 1s ease-in-out infinite; }
+@keyframes imprScanPulse { 0%,100% { box-shadow: 0 0 0 0 var(--accent-dim); } 50% { box-shadow: 0 0 16px 2px var(--accent-dim); } }
+.impr-scan-result { margin: 8px 0 4px; font-size: 0.84rem; min-height: 1.1em; }
 
 .impr-summary { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0; }
 .impr-stat {

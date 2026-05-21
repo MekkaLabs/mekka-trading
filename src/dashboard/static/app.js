@@ -6160,12 +6160,13 @@ const _IMPR_DECISION_BADGE = {
 };
 const _IMPR_VERDICT_EMOJI = { SURVIVES: '🟢', NEEDS_HARDENING: '🟡', DEVOURED: '🔴' };
 
-async function _imprLoad() {
+async function _imprLoad(fresh = false) {
   const list = document.getElementById('impr-list');
   const sum  = document.getElementById('impr-summary');
   if (list) list.innerHTML = '<div class="muted-line">Carregando conselho…</div>';
   try {
-    const res = await fetch('/api/improvements', { cache: 'no-store' });
+    const url = fresh ? '/api/improvements?fresh=1' : '/api/improvements';
+    const res = await fetch(url, { cache: 'no-store' });
     const data = await res.json();
     if (data.error) {
       if (list) list.innerHTML = `<div class="trade-result-fail">❌ ${escapeHtml(data.error)}</div>`;
@@ -6449,9 +6450,37 @@ function _bootInlineButtons() {
   });
 }
 
+// "Buscar melhorias agora" — força os agentes (Beast→Galactus→Mekka) a rodar
+// o conselho na hora (bypassa o cache) e dá feedback como o botão de trade.
+async function _imprScan() {
+  const btn = document.getElementById('impr-scan');
+  const out = document.getElementById('impr-scan-result');
+  const prevPending = (_imprData || []).filter(r => (r.status || 'pending') === 'pending').length;
+  if (btn) { btn.disabled = true; btn.classList.add('scanning'); btn.textContent = '🔎 Buscando…'; }
+  if (out) out.innerHTML = '<span class="muted-line">Beast varre os trades → Galactus faz o premortem → Mekka consolida…</span>';
+  try {
+    await _imprLoad(true);   // fresh=1 → conselho roda agora
+    const pending = (_imprData || []).filter(r => (r.status || 'pending') === 'pending').length;
+    const total = (_imprData || []).length;
+    // Mostra as novas e dá o resultado.
+    _imprViewFilter = 'novas';
+    document.querySelectorAll('.impr-view').forEach(b => b.classList.toggle('active', b.dataset.view === 'novas'));
+    _imprRender();
+    if (out) {
+      out.innerHTML = `<span class="trade-result-success">✅ Conselho concluído — ${total} recomendações, ${pending} pendentes${pending > prevPending ? ` (${pending - prevPending} nova(s)!)` : ''}.</span>`;
+    }
+  } catch (e) {
+    if (out) out.innerHTML = `<span class="trade-result-fail">❌ Falha ao buscar melhorias: ${escapeHtml(e && e.message ? e.message : String(e))}</span>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.classList.remove('scanning'); btn.textContent = '🔎 Buscar melhorias agora'; }
+  }
+}
+
 function _bootImprovements() {
   const refresh = document.getElementById('impr-refresh');
-  if (refresh) refresh.addEventListener('click', _imprLoad);
+  if (refresh) refresh.addEventListener('click', () => _imprLoad(false));
+  const scan = document.getElementById('impr-scan');
+  if (scan) scan.addEventListener('click', _imprScan);
 
   // Delegated click handler — inline onclick attributes are blocked by the
   // dashboard's strict CSP (script-src has no 'unsafe-inline'), which is why
