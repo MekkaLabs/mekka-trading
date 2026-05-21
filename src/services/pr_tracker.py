@@ -196,6 +196,25 @@ def get_pr_status() -> dict[str, dict]:
     return result
 
 
+def mark_merged(rec_id: str) -> dict:
+    """Mark a recommendation's PR as merged/delivered (dev_state='merged').
+
+    Used in the local-only deployment where there's no remote PR to merge via
+    gh: the operator's approval in the dashboard IS the delivery gate (the code
+    was already committed at dev time). Never raises.
+    """
+    rec_id = str(rec_id or "").strip()
+    if not rec_id:
+        return {"ok": False, "error": "missing rec_id"}
+    store = _load_store()
+    entry = store.get(rec_id) or {}
+    entry["dev_state"] = "merged"
+    entry["merged_at"] = _now()
+    store[rec_id] = entry
+    ok = _save_store(store)
+    return {"ok": bool(ok)}
+
+
 def set_pr(
     rec_id: str,
     pr_number: int,

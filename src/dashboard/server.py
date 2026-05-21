@@ -6160,6 +6160,13 @@ class MekkaDashboardServer:
         try:
             from src.services import pr_tracker
             result = pr_tracker.approve_pr(rec_id, pr_number, do_merge=do_merge)
+            # Local-only deployment: there's no remote PR to merge via gh, so the
+            # operator's approval is the delivery gate → mark merged so the
+            # kanban completes to "Entregue". (Code was committed at dev time.)
+            if result.get("ok") and not result.get("merged"):
+                pr_tracker.mark_merged(rec_id)
+            # The council cache must refresh so the panel/kanban reflect it.
+            self._impr_cache = None
             await MekkaRepository.log_event(
                 agent="Dashboard",
                 event="IMPROVEMENT_PR_APPROVED",
