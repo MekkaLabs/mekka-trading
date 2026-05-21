@@ -6297,8 +6297,36 @@ async function _imprLoad(fresh = false) {
       `;
     }
     _imprRender();
+    _imprLoadKpi();
   } catch (err) {
     if (list) list.innerHTML = `<div class="trade-result-fail">❌ Erro: ${escapeHtml(String(err))}</div>`;
+  }
+}
+
+// Department KPI tile (Sage) — throughput + latest measurement snapshot.
+async function _imprLoadKpi() {
+  const el = document.getElementById('impr-kpi');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/improvements/kpi', { cache: 'no-store' });
+    if (!res.ok) { el.innerHTML = ''; return; }
+    const data = await res.json();
+    const k = data.kpi || {};
+    const snap = data.latest_snapshot || null;
+    const accRate = (k.acceptance_rate != null) ? `${k.acceptance_rate}%` : '—';
+    const wr = (snap && snap.win_rate != null) ? `${snap.win_rate}%` : '—';
+    const errs = (snap && snap.errors_24h != null) ? snap.errors_24h : '—';
+    el.innerHTML = `
+      <div class="impr-kpi-title">📐 KPI do Departamento <span class="muted-line">(Sage)</span></div>
+      <div class="impr-kpi-row">
+        <div class="impr-kpi-stat"><b>${k.accepted || 0}</b><span>aceitas</span></div>
+        <div class="impr-kpi-stat"><b>${k.rejected || 0}</b><span>reprovadas</span></div>
+        <div class="impr-kpi-stat"><b>${accRate}</b><span>taxa de aceitação</span></div>
+        <div class="impr-kpi-stat"><b>${wr}</b><span>win rate (último)</span></div>
+        <div class="impr-kpi-stat"><b>${errs}</b><span>erros 24h</span></div>
+      </div>`;
+  } catch (_e) {
+    el.innerHTML = '';
   }
 }
 

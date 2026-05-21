@@ -559,6 +559,7 @@ class MekkaDashboardServer:
         r.add_post("/api/improvements/decision", self._handle_improvements_decision)
         r.add_get("/api/improvements/pr-status", self._handle_improvements_pr_status)
         r.add_post("/api/improvements/approve-pr", self._handle_improvements_approve_pr)
+        r.add_get("/api/improvements/kpi", self._handle_improvements_kpi)
 
     def _register_backtest_debate_routes(self, r) -> None:
         r.add_post("/api/backtest/run", self._handle_backtest_run)
@@ -6450,6 +6451,25 @@ class MekkaDashboardServer:
         except Exception as exc:  # noqa: BLE001
             logger.error("pr-status failed: %s", exc, exc_info=True)
             return web.json_response({}, status=200)
+
+    async def _handle_improvements_kpi(self, _: web.Request) -> web.Response:
+        """GET /api/improvements/kpi — department KPI from Sage.
+
+        Returns operator throughput (accepted/rejected/acceptance rate) plus the
+        latest measurement snapshot (win rate, errors_24h). Read-only,
+        fail-silent — always 200 with whatever could be computed.
+        """
+        out: dict = {"kpi": {}, "latest_snapshot": None}
+        try:
+            from src.agents.sage import Sage  # noqa: WPS433
+            sage = Sage()
+            out["kpi"] = sage.kpi()
+            history = sage._load_history()
+            if history:
+                out["latest_snapshot"] = history[-1]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("improvements kpi failed: %s", exc)
+        return web.json_response(out, status=200)
 
     async def _handle_improvements_approve_pr(self, request: web.Request) -> web.Response:
         """POST /api/improvements/approve-pr — operator approves a rec's PR.

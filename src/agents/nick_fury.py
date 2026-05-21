@@ -181,6 +181,91 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 "assets": settings.trading_assets,
             },
         )
+
+        # [Boot reconciliation + SL guardian] In live mode, a restart must not
+        # leave an open position unprotected for up to a full monitor interval.
+        # Reconcile immediately: discover open positions on the venue and ensure
+        # each has a live reduce-only stop (re-placing any missing). This is the
+        # SL guardian run once at boot, before the main loop starts.
+        if not settings.paper_trading:
+            try:
+                from src.agents.iron_man import IronMan  # noqa: WPS433
+                recon = await IronMan().ensure_stops_for_open_positions()
+                replaced = recon.get("replaced") or []
+                errors = recon.get("errors") or []
+                self._log.info(
+                    f"[NickFury] Boot reconciliation: checked={recon.get('checked')} "
+                    f"protected={recon.get('protected')} replaced={len(replaced)} "
+                    f"errors={len(errors)}"
+                )
+                await MekkaRepository.log_event(
+                    agent="NickFury",
+                    event="BOOT_RECONCILE",
+                    severity="WARNING" if (replaced or errors) else "INFO",
+                    message=(
+                        f"Reconciliação no boot: {recon.get('checked')} posição(ões) "
+                        f"verificada(s), {len(replaced)} SL recolocado(s), {len(errors)} erro(s)."
+                    ),
+                    payload=recon,
+                )
+                if errors:
+                    try:
+                        await self._telegram.alert(
+                            event="BOOT_RECONCILE_ERRORS",
+                            severity="CRITICAL",
+                            agent="NickFury",
+                            message=(
+                                "🚨 Reconciliação no boot: posição(ões) sem SL que NÃO "
+                                "puderam ser protegidas — verificar manualmente."
+                            ),
+                            payload={"errors": errors},
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+            except Exception as _exc:  # noqa: BLE001
+                self._log.warning(f"[NickFury] Boot reconciliation skipped: {_exc}")
+
+        # [Mainnet first-week guard] On Binance mainnet (live, non-testnet), warn
+        # LOUDLY if risk limits exceed the conservative first-week caps from
+        # docs/MAINNET-AUTHORIZATION.md. This never silently changes limits (the
+        # operator owns risk config) — it surfaces an actionable warning + alert
+        # so loose limits can't slip into the first week of real-money trading.
+        _binance_mainnet = (
+            not settings.paper_trading
+            and settings.active_exchange == "binance"
+            and not bool(getattr(settings, "binance_testnet", False))
+        )
+        if _binance_mainnet:
+            caps = {
+                "max_position_size_pct": 0.001,
+                "max_leverage": 2,
+                "max_trades_per_day": 3,
+                "max_open_positions": 2,
+                "max_daily_drawdown_pct": 0.05,
+            }
+            exceeded = []
+            for field, cap in caps.items():
+                val = getattr(settings, field, None)
+                if val is not None and val > cap:
+                    exceeded.append(f"{field}={val} (cap {cap})")
+            if exceeded:
+                msg = (
+                    "⚠️ MAINNET 1ª SEMANA: limites acima do recomendado conservador — "
+                    + "; ".join(exceeded)
+                )
+                self._log.warning(f"[NickFury] {msg}")
+                await MekkaRepository.log_event(
+                    agent="NickFury", event="MAINNET_FIRSTWEEK_LIMITS",
+                    severity="WARNING", message=msg, payload={"exceeded": exceeded, "caps": caps},
+                )
+                try:
+                    await self._telegram.alert(
+                        event="MAINNET_FIRSTWEEK_LIMITS", severity="WARNING",
+                        agent="NickFury", message=msg, payload={"exceeded": exceeded},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
         self._log.info("[NickFury] Pipeline initialized")
 
     def reset_breakers(self) -> None:

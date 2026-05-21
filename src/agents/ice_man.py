@@ -37,8 +37,12 @@ logger = logging.getLogger("mekka.ice_man")
 _WATCHED = ("ccxt", "pydantic", "aiohttp", "pandas-ta", "openai", "anthropic")
 _CRITICAL = {"ccxt"}  # outdated → HIGH (exchange API drift)
 _PYPI_URL = "https://pypi.org/pypi/{pkg}/json"
+# GitHub repos to watch for breaking-change/security release notes.
+_GITHUB_REPOS = {"ccxt": "ccxt/ccxt"}
+_GITHUB_RELEASES_URL = "https://api.github.com/repos/{repo}/releases?per_page=5"
+_BREAKING_HINTS = ("breaking", "security", "deprecat", "removed", "vulnerab", "cve")
 _HTTP_TIMEOUT_S = 8.0
-_OVERALL_TIMEOUT_S = 12.0
+_OVERALL_TIMEOUT_S = 14.0
 
 
 def _installed_version(pkg: str) -> str | None:
@@ -61,13 +65,74 @@ class IceMan:
 
     async def scan(self) -> list[ImprovementProposal]:
         try:
-            return await asyncio.wait_for(self._scan_dependencies(), timeout=_OVERALL_TIMEOUT_S)
+            return await asyncio.wait_for(self._scan_all(), timeout=_OVERALL_TIMEOUT_S)
         except asyncio.TimeoutError:
-            logger.warning("[IceMan] dependency research timed out — skipping this cycle")
+            logger.warning("[IceMan] research timed out — skipping this cycle")
             return []
         except Exception as exc:  # noqa: BLE001
             logger.warning("[IceMan] scan failed: %s", exc)
             return []
+
+    async def _scan_all(self) -> list[ImprovementProposal]:
+        out: list[ImprovementProposal] = []
+        for fn in (self._scan_dependencies, self._scan_github_releases):
+            try:
+                out.extend(await fn())
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[IceMan] %s failed: %s", getattr(fn, "__name__", fn), exc)
+        return out
+
+    async def _scan_github_releases(self) -> list[ImprovementProposal]:
+        """Check recent GitHub releases of critical deps for breaking/security
+        notes. Read-only, fail-silent. Only proposes when the installed version
+        is behind AND a recent release mentions breaking/security changes."""
+        try:
+            import aiohttp  # noqa: WPS433
+        except ImportError:
+            return []
+        out: list[ImprovementProposal] = []
+        timeout = aiohttp.ClientTimeout(total=_HTTP_TIMEOUT_S)
+        headers = {"Accept": "application/vnd.github+json", "User-Agent": "mekka-iceman"}
+        try:
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as sess:
+                for pkg, repo in _GITHUB_REPOS.items():
+                    cur = _installed_version(pkg)
+                    if not cur:
+                        continue
+                    try:
+                        async with sess.get(_GITHUB_RELEASES_URL.format(repo=repo)) as resp:
+                            if resp.status != 200:
+                                continue
+                            releases = await resp.json()
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if not isinstance(releases, list):
+                        continue
+                    cur_t = _parse_ver(cur)
+                    flagged: list[str] = []
+                    for rel in releases[:5]:
+                        tag = str((rel or {}).get("tag_name") or "").lstrip("v")
+                        body = str((rel or {}).get("body") or "").lower()
+                        if not tag or _parse_ver(tag) <= cur_t:
+                            continue  # not newer than installed
+                        if any(h in body for h in _BREAKING_HINTS):
+                            flagged.append(tag)
+                    if flagged:
+                        out.append(ImprovementProposal(
+                            title=f"{pkg}: releases novas com breaking/segurança ({', '.join(flagged[:3])})",
+                            description=(
+                                f"Há releases de `{pkg}` mais novas que a instalada ({cur}) cujas "
+                                "notas mencionam breaking changes/segurança/deprecação. Revisar o "
+                                "changelog antes de atualizar e validar em testnet."
+                            ),
+                            impact="MEDIUM",
+                            area="research",
+                            evidence=f"github.com/{repo}/releases — versões {', '.join(flagged[:5])} > instalada {cur}.",
+                            suggested_story=f"Revisar breaking changes de {pkg} e atualizar",
+                        ))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[IceMan] GitHub releases fetch failed: %s", exc)
+        return out
 
     async def _scan_dependencies(self) -> list[ImprovementProposal]:
         try:

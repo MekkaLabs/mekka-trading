@@ -128,14 +128,18 @@ class RiskScanner:
         for r in events:
             if (r.event or "").upper() != "RISK_REJECTED":
                 continue
-            total += 1
             payload = r.payload or {}
             rs = payload.get("breached") or payload.get("reasons") or payload.get("reason")
-            if isinstance(rs, list):
-                for x in rs:
-                    reasons[str(x)] += 1
-            elif rs:
-                reasons[str(rs)] += 1
+            items = rs if isinstance(rs, list) else ([rs] if rs else [])
+            # A HOLD signal is NOT execution friction — Batman correctly does
+            # not execute HOLDs. Skip those so they don't masquerade as a risk
+            # gate problem (they dominate the count and produce a false signal).
+            real = [str(x) for x in items if "HOLD" not in str(x).upper()]
+            if not real:
+                continue
+            total += 1
+            for x in real:
+                reasons[x] += 1
         if total < 5 or not reasons:
             return []
         top, top_n = reasons.most_common(1)[0]
