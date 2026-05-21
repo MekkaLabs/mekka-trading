@@ -1,9 +1,19 @@
 # 🤝 Mekka Trading — Handoff para o próximo chat
 
-> **Data**: 2026-05-20 (sessão 4 — longa)
-> **Branch**: `main` — **38 commits ahead** de `origin/main`, nada pushed (push é do @devops)
-> **Estado**: ✅ rodando em **Bybit testnet LIVE mode**, dashboard saudável
+> **Data**: 2026-05-20 (sessão 4 — longa) · atualizado fim da sessão
+> **Branch**: `main` — **44 commits ahead** de `origin/main`, nada pushed (push é do @devops)
+> **Estado**: ✅ rodando em **Bybit testnet LIVE mode**, dashboard saudável (porta 8787)
 > **Próximo chat**: cole este arquivo como contexto inicial.
+
+## 🆕 Últimos itens desta sessão (continuar a partir daqui)
+- **Office v4 (novo design) é o office padrão** em `/office-v4/` e no iframe da Visão Geral. Ajustado para ocupar **largura total** + aspect-ratio 2000/1200 (estava pequeno). Arquivos: `src/dashboard/static/office_v4/`.
+- **Sprites v4 no roster + página de Agentes**: `renderAgentsRoster` agora usa `window.SPRITES_V3` (22 personagens animados). Para **adicionar novo agente**: inclua-o em `sprites-v3-factory.js` (lista `ALL_V3`/config) → aparece no roster automaticamente; para ele aparecer NO OFFICE também, adicione uma `STATION` em `office_v4/office-v4-app.jsx` (array `STATIONS`).
+- **Botão Aceitar (melhorias) — RESOLVIDO de vez**: a causa era o GET `/api/improvements` levar 6–10s (Beast+Galactus) e o accept re-rodar tudo (card sumia). Agora: cache TTL 20s no backend (0.1s) + update local instantâneo no front. (commit 507274d)
+
+### ⏭️ Próximas implementações (pedidas, ainda PENDENTES)
+1. **Wire de dados reais no Office v4** — hoje usa MOCK do protótipo (tickers/PnL/eventos falsos). Ligar aos feeds reais: `/api/overview`, `/ws` (broadcast), sinais do Vision, posições, e disparar os "powers" L1→L2→L3→L4 em eventos de trade reais. É o próximo passo natural do office.
+2. **Sprites v4 em QUALQUER outro local** que ainda use sprite antigo (auditar; roster + agents page já feitos).
+3. **Verificação visual** geral no navegador (preview do ambiente instável).
 
 ---
 
