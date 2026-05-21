@@ -19,6 +19,14 @@ export const AGENTS = [
   // Beast (Story 248 / codex M40) — read-only continuous-improvement
   // analyst. Sits in L4 (analyst tier) alongside Wolverine and PortfolioManager.
   { id: 'beast', name: 'Beast', layer: 'L4', role: 'Continuous Improvement', color: '#38bdf8', outfit: 'blue_fur_labcoat' },
+  // Continuous-Improvement squad scanners (read-only). Cypher/Domino/Forge are
+  // the hero codenames for the CodeAuditor/RiskScanner/OpsScanner agents; Ice
+  // Man = ExternalResearcher; Sage = measurement loop.
+  { id: 'cypher', name: 'Cypher', layer: 'L4', role: 'Code Auditor', color: '#10b981', outfit: 'green_black' },
+  { id: 'domino', name: 'Domino', layer: 'L4', role: 'Risk Scanner', color: '#cbd5e1', outfit: 'black_white' },
+  { id: 'forge', name: 'Forge', layer: 'L4', role: 'Ops Scanner', color: '#fb923c', outfit: 'red_tech' },
+  { id: 'ice_man', name: 'Ice Man', layer: 'L4', role: 'External Research', color: '#7dd3fc', outfit: 'ice_blue' },
+  { id: 'sage', name: 'Sage', layer: 'L4', role: 'Measurement / KPI', color: '#06b6d4', outfit: 'data_shades' },
 ];
 
 export const STATIONS = [
@@ -40,6 +48,12 @@ export const STATIONS = [
   // Row 4 — newer arrivals: Cyclops (monitor) and Beast (analyst).
   { id: 'cyclops', x: 230, y: 355 },
   { id: 'beast', x: 410, y: 355 },
+  // Row 5 — Continuous-Improvement squad scanners.
+  { id: 'cypher', x: 50, y: 445 },
+  { id: 'domino', x: 140, y: 445 },
+  { id: 'forge', x: 230, y: 445 },
+  { id: 'ice_man', x: 320, y: 445 },
+  { id: 'sage', x: 410, y: 445 },
 ];
 
 export const AGENT_ID_MAP = {
@@ -67,6 +81,19 @@ export const AGENT_ID_MAP = {
   deadpool: 'deadpool',
   cyclops: 'cyclops',
   beast: 'beast',
+  cypher: 'cypher',
+  codeauditor: 'cypher',
+  code_auditor: 'cypher',
+  domino: 'domino',
+  riskscanner: 'domino',
+  risk_scanner: 'domino',
+  forge: 'forge',
+  opsscanner: 'forge',
+  ops_scanner: 'forge',
+  iceman: 'ice_man',
+  ice_man: 'ice_man',
+  externalresearcher: 'ice_man',
+  sage: 'sage',
 };
 
 export function normalizeAgentId(raw) {

@@ -702,6 +702,78 @@ const AGENTS = [
                a:"#a78bfa", A:"#7c3aed", p:"#5b21b6", P:"#3b0764" },
     overlay: { sprite: "HELMET", palette: { A:"#7c3aed", a:"#a78bfa", e:"#e6ccff" } },
   },
+  {
+    // Cypher (CodeAuditor) — reads every language, including source code.
+    // Terminal-green dev. Improvement squad / dev-squad scanner.
+    id: "cypher",
+    name: "Cypher",
+    role: "Code Auditor",
+    layer: "L4",
+    color: "#10b981",
+    summary: "Lê o repositório como linguagem — arquivos grandes, TODO/FIXME, testes ausentes, ruff.",
+    task: "Auditando o código — server.py 6710 linhas flagado",
+    palette: { k:"#04140a", h:"#1f2a24", H:"#0f1a14", s:"#e8d9b5", S:"#c8b890",
+               e:"#10b981", m:"#7a5a3a", c:"#0f3d2a", C:"#08251a",
+               a:"#34d399", A:"#10b981", p:"#0f3d2a", P:"#08251a" },
+    overlay: { sprite: "GLASSES", palette: { A:"#0a0a0a", a:"#10b981" } },
+  },
+  {
+    // Domino (RiskScanner) — probability/luck = risk. Black spot over eye.
+    id: "domino",
+    name: "Domino",
+    role: "Risk Scanner",
+    layer: "L4",
+    color: "#cbd5e1",
+    summary: "Lê a postura de risco — kill switch, drawdown, concentração, rejeições do Batman.",
+    task: "Varrendo risco — drawdown e gates sob observação",
+    palette: { k:"#0a0a0a", h:"#1a1a1a", H:"#0a0a0a", s:"#e8d9c0", S:"#c8b8a0",
+               e:"#1a1a1a", m:"#7a5a4a", c:"#1c1c1c", C:"#0a0a0a",
+               a:"#e5e7eb", A:"#9ca3af", p:"#1c1c1c", P:"#0a0a0a" },
+    overlay: { sprite: "MASK", palette: { A:"#0a0a0a", a:"#0a0a0a", e:"#e5e7eb" } },
+  },
+  {
+    // Forge (OpsScanner) — mutant engineer; fixes and monitors systems/infra.
+    id: "forge",
+    name: "Forge",
+    role: "Ops Scanner",
+    layer: "L4",
+    color: "#fb923c",
+    summary: "Lê a saúde operacional — erros recorrentes, CYCLE_ERROR por agente, exceções no log.",
+    task: "Monitorando infra — clusters de erro sob análise",
+    palette: { k:"#1a0a04", h:"#2a1a0a", H:"#1a0a04", s:"#a86b4a", S:"#7a4a30",
+               e:"#fb923c", m:"#5a3a2a", c:"#7f1d1d", C:"#4a0f0f",
+               a:"#fb923c", A:"#ea580c", p:"#3a2a1a", P:"#1a0a04" },
+    overlay: { sprite: "VISOR", palette: { A:"#1c1c1c", a:"#fb923c", e:"#fb923c" } },
+  },
+  {
+    // Ice Man (ExternalResearcher) — projects outward; researches the outside
+    // world (deps/CVEs/GitHub). Icy blue body.
+    id: "ice_man",
+    name: "Ice Man",
+    role: "External Research",
+    layer: "L4",
+    color: "#7dd3fc",
+    summary: "Pesquisa fora do sistema — versões/CVEs de dependências (ccxt etc.) via PyPI/GitHub.",
+    task: "Pesquisando deps — ccxt 4.5.52→4.5.54 disponível",
+    palette: { k:"#0a1a2a", h:"#bae6fd", H:"#7dd3fc", s:"#d8eefc", S:"#a8d8f0",
+               e:"#0ea5e9", m:"#5a8aaa", c:"#38bdf8", C:"#0ea5e9",
+               a:"#e0f2fe", A:"#7dd3fc", p:"#0ea5e9", P:"#0369a1" },
+    overlay: { sprite: "GLASSES", palette: { A:"#7dd3fc", a:"#0ea5e9" } },
+  },
+  {
+    // Sage (Measurement) — living computer that computes statistics. Shades.
+    id: "sage",
+    name: "Sage",
+    role: "Measurement / KPI",
+    layer: "L4",
+    color: "#06b6d4",
+    summary: "Mede o impacto — baseline antes/depois (win rate, erros), regressões e KPI do depto.",
+    task: "Medindo regressões — baseline atualizado",
+    palette: { k:"#0a1418", h:"#0a0a0a", H:"#000000", s:"#d8b89a", S:"#b89878",
+               e:"#06b6d4", m:"#7a5a4a", c:"#155e75", C:"#0e3a4a",
+               a:"#22d3ee", A:"#06b6d4", p:"#155e75", P:"#0e3a4a" },
+    overlay: { sprite: "GLASSES", palette: { A:"#0a0a0a", a:"#06b6d4" } },
+  },
 ];
 
 // Visor overlay — Cyclops style horizontal red band across eyes

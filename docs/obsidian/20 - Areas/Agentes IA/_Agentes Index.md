@@ -48,11 +48,11 @@ updated: 2026-05-20
 - [x] [[Mekka]] — 👑 Commander & consolidador (lidera o conselho; `/Melhorias`)
 - [x] [[Galactus]] — 🪐 Premortem / devorador de ideias (hunger score + failure modes)
 - [x] [[Beast]] — 🐺 Scanner trading-ops (trades, gates, latência, qualidade de sinal)
-- [x] CodeAuditor — 🔍 Scanner dev (`src/agents/code_auditor.py`: arquivos grandes, TODO/FIXME, testes ausentes, ruff)
-- [x] RiskScanner — ⚠️ Scanner trading-ops (`src/agents/risk_scanner.py`: kill switch, drawdown, rejeições Batman)
-- [x] OpsScanner — 🛠️ Scanner infra (`src/agents/ops_scanner.py`: erros recorrentes, CYCLE_ERROR, exceções no log)
+- [x] [[Cypher]] — 🔍 CodeAuditor (`code_auditor.py`: arquivos grandes, TODO/FIXME, testes ausentes, ruff)
+- [x] [[Domino]] — ⚠️ RiskScanner (`risk_scanner.py`: kill switch, drawdown, rejeições Batman)
+- [x] [[Forge]] — 🛠️ OpsScanner (`ops_scanner.py`: erros recorrentes, CYCLE_ERROR, exceções no log)
 - [x] [[Jean Grey]] — 🧠 MemoryScanner (vault: links quebrados/duplicatas/órfãs → propostas) + memória/vault
-- [x] [[Ice Man]] — 🧊 ExternalResearcher (deps/CVEs via PyPI; pesquisa fora do sistema)
+- [x] [[Ice Man]] — 🧊 ExternalResearcher (deps/CVEs via PyPI/GitHub; pesquisa fora do sistema)
 - [x] [[Sage]] — 📐 Measurement loop (baseline antes/depois + KPI do departamento)
 
 > Cyclops, Wolverine **e todo o Improvement Council** (Mekka, Beast, Jean Grey,
