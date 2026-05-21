@@ -6148,8 +6148,51 @@ async function _imprLoad() {
   }
 }
 
+// Kanban: bucket recommendations into pendente / aprovada / em dev / entregue.
+// Column derives from decision status + dev lifecycle (pr-status dev_state).
+function _imprColumn(r) {
+  const dev = (_imprPrStatus[r.id] || {}).dev_state || null;
+  if (dev === 'merged') return 'entregue';
+  if (dev === 'in_dev' || dev === 'pr_open') return 'dev';
+  if (r.status === 'accepted') return 'aprovada';
+  if (r.status === 'rejected') return 'reprovada';
+  return 'pendente';
+}
+
+function _imprRenderKanban() {
+  const kb = document.getElementById('impr-kanban');
+  if (!kb) return;
+  const cols = [
+    { key: 'pendente',  label: '🕓 Pendente',         cls: 'pendente' },
+    { key: 'aprovada',  label: '✅ Aprovada',          cls: 'aprovada' },
+    { key: 'dev',       label: '🛠️ Em desenvolvimento', cls: 'dev' },
+    { key: 'entregue',  label: '🚀 Entregue',          cls: 'entregue' },
+  ];
+  const buckets = { pendente: [], aprovada: [], dev: [], entregue: [], reprovada: [] };
+  (_imprData || []).forEach(r => { (buckets[_imprColumn(r)] || buckets.pendente).push(r); });
+  kb.innerHTML = cols.map(c => {
+    const items = buckets[c.key] || [];
+    const cards = items.length
+      ? items.map(r => {
+          const dev = (_imprPrStatus[r.id] || {});
+          const pr = dev.pr && dev.pr.number ? `<span class="impr-kb-pr">PR #${dev.pr.number}</span>` : '';
+          return `<div class="impr-kb-card impr-kb-${escapeHtml(r.priority || 'P3')}" title="${escapeHtml(r.title || '')}">
+            <span class="impr-kb-dom">${r.domain === 'trading-ops' ? '⚔️' : '🧑‍💻'}</span>
+            <span class="impr-kb-ttl">${escapeHtml((r.title || '').slice(0, 60))}</span>
+            ${pr}
+          </div>`;
+        }).join('')
+      : '<div class="impr-kb-empty">—</div>';
+    return `<div class="impr-kb-col impr-kb-col-${c.cls}">
+      <div class="impr-kb-head">${c.label} <span class="impr-kb-count">${items.length}</span></div>
+      <div class="impr-kb-body">${cards}</div>
+    </div>`;
+  }).join('');
+}
+
 function _imprRender() {
   const list = document.getElementById('impr-list');
+  _imprRenderKanban();
   if (!list) return;
   const rows = _imprData.filter(r => _imprDomainFilter === 'all' || r.domain === _imprDomainFilter);
   if (!rows.length) {

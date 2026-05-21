@@ -4446,6 +4446,51 @@ body[data-theme="light"] .page-nav-sub a { color: var(--muted); }
 .impr-stat-ok b { color: var(--good); }
 .impr-stat-bad b { color: var(--bad); }
 
+/* Kanban — improvement lifecycle board */
+.impr-kanban-title { margin: 16px 0 8px; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.impr-kanban {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.impr-kb-col {
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  border-top: 2px solid var(--muted);
+  border-radius: var(--r-sm, 6px);
+  padding: 8px;
+  min-height: 70px;
+}
+.impr-kb-col-pendente { border-top-color: var(--warn); }
+.impr-kb-col-aprovada { border-top-color: var(--accent); }
+.impr-kb-col-dev      { border-top-color: var(--accent-2); }
+.impr-kb-col-entregue { border-top-color: var(--good); }
+.impr-kb-head {
+  font-size: 0.74rem; font-weight: 700; color: var(--text-2);
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  margin-bottom: 8px;
+}
+.impr-kb-count {
+  background: var(--accent-dim); color: var(--accent);
+  border-radius: var(--r-pill, 999px); padding: 0 7px; font-size: 0.7rem; font-family: var(--font-mono);
+}
+.impr-kb-body { display: flex; flex-direction: column; gap: 6px; }
+.impr-kb-card {
+  display: flex; align-items: flex-start; gap: 5px;
+  background: var(--bg-3); border: 1px solid var(--glass-border);
+  border-left: 3px solid var(--muted);
+  border-radius: 4px; padding: 6px 8px; font-size: 0.74rem; line-height: 1.25;
+}
+.impr-kb-P1 { border-left-color: var(--bad); }
+.impr-kb-P2 { border-left-color: var(--warn); }
+.impr-kb-P3 { border-left-color: var(--accent); }
+.impr-kb-dom { flex-shrink: 0; }
+.impr-kb-ttl { flex: 1; }
+.impr-kb-pr { font-family: var(--font-mono); font-size: 0.66rem; color: var(--good); white-space: nowrap; }
+.impr-kb-empty { color: var(--muted); font-size: 0.8rem; text-align: center; padding: 6px 0; }
+@media (max-width: 900px) { .impr-kanban { grid-template-columns: repeat(2, 1fr); } }
+
 .impr-filters { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
 .impr-filter {
   background: var(--bg-3); border: 1px solid var(--border); color: var(--muted);
