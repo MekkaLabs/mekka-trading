@@ -350,141 +350,167 @@ class MekkaDashboardServer:
         return self._app
 
     def _configure_routes(self) -> None:
-        self._app.router.add_get("/", self._handle_index)
-        self._app.router.add_get("/api/health", self._handle_health)
-        self._app.router.add_get("/api/overview", self._handle_overview)
-        self._app.router.add_get("/api/signals", self._handle_signals)
-        self._app.router.add_get("/api/trades", self._handle_trades)
-        self._app.router.add_get("/api/audit", self._handle_audit)
-        self._app.router.add_get("/api/replay", self._handle_replay)
-        self._app.router.add_get("/api/replay/snapshots", self._handle_replay_snapshots)
-        self._app.router.add_get("/api/replay/export", self._handle_replay_export)
-        self._app.router.add_get("/api/replay/compare", self._handle_replay_compare)
-        self._app.router.add_get("/api/replay/incident/latest", self._handle_incident_latest)
-        self._app.router.add_get(
-            "/api/replay/incident/latest/download", self._handle_incident_download
-        )
-        self._app.router.add_get("/api/replay/incidents", self._handle_incidents_list)
-        self._app.router.add_get(
-            "/api/replay/incident/download", self._handle_incident_download_named
-        )
-        self._app.router.add_get("/api/replay/timeseries", self._handle_replay_timeseries)
-        self._app.router.add_get("/api/incidents/queue", self._handle_incidents_queue)
-        self._app.router.add_get("/api/incidents/export", self._handle_incidents_export)
-        self._app.router.add_get("/api/incidents/detail", self._handle_incident_detail)
-        self._app.router.add_get("/api/market/funding", self._handle_funding_rates)
-        self._app.router.add_get("/api/market/candles", self._handle_market_candles)
-        self._app.router.add_get("/api/market/depth", self._handle_market_depth)
-        self._app.router.add_get("/api/market/trades", self._handle_market_trades)
-        self._app.router.add_get("/api/market/diagnostics", self._handle_market_diagnostics)
-        self._app.router.add_get("/api/market/status", self._handle_market_status)
-        self._app.router.add_get("/api/pnl/series", self._handle_pnl_series)
-        self._app.router.add_get("/api/pnl/summary", self._handle_pnl_summary)
-        self._app.router.add_get("/api/pnl/benchmark", self._handle_pnl_benchmark)
-        self._app.router.add_get("/api/pnl/equity-curve", self._handle_equity_curve)  # Story 077
-        self._app.router.add_get("/api/performance", self._handle_performance)
-        self._app.router.add_get("/api/trades/timeline", self._handle_trades_timeline)
-        self._app.router.add_get("/api/killswitch/status", self._handle_killswitch_status)
-        self._app.router.add_post("/api/killswitch/engage", self._handle_killswitch_engage)
-        self._app.router.add_post("/api/killswitch/release", self._handle_killswitch_release)
+        """Register all HTTP/WS routes, grouped by domain (IMP-33f2fe698672 —
+        refactor server.py em routers por domínio, passo 1: agrupamento do
+        registro). Todas as rotas são caminhos/prefixos distintos, então a
+        ordem entre grupos é irrelevante."""
+        r = self._app.router
+        self._register_core_routes(r)
+        self._register_replay_incident_routes(r)
+        self._register_market_routes(r)
+        self._register_pnl_perf_routes(r)
+        self._register_risk_routes(r)
+        self._register_system_routes(r)
+        self._register_trade_routes(r)
+        self._register_agents_memory_routes(r)
+        self._register_improvement_routes(r)
+        self._register_backtest_debate_routes(r)
+        self._register_kernel_obs_routes(r)
+        self._register_realtime_static_office_routes(r)
+
+    # ── Domain route groups ───────────────────────────────────────────────
+    def _register_core_routes(self, r) -> None:
+        r.add_get("/", self._handle_index)
+        r.add_get("/api/health", self._handle_health)
+        r.add_get("/api/overview", self._handle_overview)
+        r.add_get("/api/signals", self._handle_signals)
+        r.add_get("/api/signals/export", self._handle_signals_export)
+        r.add_get("/api/trades", self._handle_trades)
+        r.add_get("/api/audit", self._handle_audit)
+        r.add_get("/api/env", self._handle_env)
+        r.add_get("/api/today-summary", self._handle_today_summary)
+        r.add_get("/api/prefs", self._handle_prefs_get)
+        r.add_post("/api/prefs", self._handle_prefs_set)
+        r.add_get("/api/settings", self._handle_settings_get)
+        r.add_post("/api/settings", self._handle_settings_set)
+        r.add_post("/api/auth/login", self._handle_auth_login)
+        r.add_post("/api/auth/logout", self._handle_auth_logout)
+        r.add_get("/api/auth/me", self._handle_auth_me)
+        r.add_get("/metrics", self._handle_metrics)
+
+    def _register_replay_incident_routes(self, r) -> None:
+        r.add_get("/api/replay", self._handle_replay)
+        r.add_get("/api/replay/snapshots", self._handle_replay_snapshots)
+        r.add_get("/api/replay/export", self._handle_replay_export)
+        r.add_get("/api/replay/compare", self._handle_replay_compare)
+        r.add_get("/api/replay/incident/latest", self._handle_incident_latest)
+        r.add_get("/api/replay/incident/latest/download", self._handle_incident_download)
+        r.add_get("/api/replay/incidents", self._handle_incidents_list)
+        r.add_get("/api/replay/incident/download", self._handle_incident_download_named)
+        r.add_get("/api/replay/timeseries", self._handle_replay_timeseries)
+        r.add_get("/api/incidents/queue", self._handle_incidents_queue)
+        r.add_get("/api/incidents/export", self._handle_incidents_export)
+        r.add_get("/api/incidents/detail", self._handle_incident_detail)
+
+    def _register_market_routes(self, r) -> None:
+        r.add_get("/api/market/funding", self._handle_funding_rates)
+        r.add_get("/api/market/candles", self._handle_market_candles)
+        r.add_get("/api/market/depth", self._handle_market_depth)
+        r.add_get("/api/market/trades", self._handle_market_trades)
+        r.add_get("/api/market/diagnostics", self._handle_market_diagnostics)
+        r.add_get("/api/market/status", self._handle_market_status)
+        r.add_get("/api/hl/candles", self._handle_hl_candles)
+
+    def _register_pnl_perf_routes(self, r) -> None:
+        r.add_get("/api/pnl/series", self._handle_pnl_series)
+        r.add_get("/api/pnl/summary", self._handle_pnl_summary)
+        r.add_get("/api/pnl/benchmark", self._handle_pnl_benchmark)
+        r.add_get("/api/pnl/equity-curve", self._handle_equity_curve)
+        r.add_get("/api/pnl/heatmap", self._handle_pnl_heatmap)
+        r.add_get("/api/pnl/hourly", self._handle_pnl_hourly)
+        r.add_get("/api/performance", self._handle_performance)
+        r.add_get("/api/performance/rolling", self._handle_perf_rolling)
+        r.add_get("/api/performance/divergence", self._handle_perf_divergence)
+        r.add_get("/api/trades/timeline", self._handle_trades_timeline)
+        r.add_get("/api/trades/export", self._handle_trades_export)
+        r.add_get("/api/trades/calendar", self._handle_trades_calendar)
+        r.add_get("/api/leaderboard", self._handle_leaderboard)
+        r.add_get("/api/session/stats", self._handle_session_stats)
+        r.add_get("/api/gates/timeline", self._handle_gates_timeline)
+
+    def _register_risk_routes(self, r) -> None:
+        r.add_get("/api/killswitch/status", self._handle_killswitch_status)
+        r.add_post("/api/killswitch/engage", self._handle_killswitch_engage)
+        r.add_post("/api/killswitch/release", self._handle_killswitch_release)
+        r.add_get("/api/risk/panel", self._handle_risk_panel)
+        r.add_get("/api/risk/batman-timeline", self._handle_batman_timeline)
+        r.add_get("/api/risk/regime-heatmap", self._handle_regime_heatmap)
+        r.add_get("/api/risk/concentration", self._handle_concentration)
+
+    def _register_system_routes(self, r) -> None:
         # Runtime control plane (liga/desliga/reinicia o loop de trading).
-        self._app.router.add_get("/api/system/status", self._handle_system_status)
-        self._app.router.add_post("/api/system/start", self._handle_system_start)
-        self._app.router.add_post("/api/system/stop", self._handle_system_stop)
-        self._app.router.add_post("/api/system/reboot", self._handle_system_reboot)
-        self._app.router.add_get("/api/mode", self._handle_mode_get)
-        self._app.router.add_post("/api/mode", self._handle_mode_set)
-        self._app.router.add_get("/api/env", self._handle_env)
-        self._app.router.add_get("/api/report/daily", self._handle_report_daily)
-        self._app.router.add_get("/api/report/weekly", self._handle_report_weekly)  # Story 090
-        self._app.router.add_get("/api/positions", self._handle_positions)
-        self._app.router.add_post("/api/positions/close", self._handle_positions_close)
-        self._app.router.add_get("/api/settings", self._handle_settings_get)
-        self._app.router.add_post("/api/settings", self._handle_settings_set)
-        self._app.router.add_get("/api/agents/tasks", self._handle_agents_tasks)
-        self._app.router.add_get("/api/audit/feed", self._handle_audit_feed)
-        self._app.router.add_get("/api/memory/stats", self._handle_memory_stats)  # Story 064
-        self._app.router.add_get("/api/risk/panel", self._handle_risk_panel)      # Story 073
-        self._app.router.add_get("/api/leaderboard", self._handle_leaderboard)   # Story 079
-        self._app.router.add_get("/api/trades/export", self._handle_trades_export)      # Story 082
-        self._app.router.add_get("/api/pnl/heatmap", self._handle_pnl_heatmap)          # Story 089
-        self._app.router.add_get("/api/trades/calendar", self._handle_trades_calendar) # Story 107
-        self._app.router.add_get("/api/pnl/hourly", self._handle_pnl_hourly)           # Story 109
-        self._app.router.add_get("/api/gates/timeline", self._handle_gates_timeline)   # Story 112
-        self._app.router.add_get("/api/signals/export", self._handle_signals_export)    # Story 093
-        self._app.router.add_get("/api/session/stats", self._handle_session_stats)      # Story 092
-        self._app.router.add_post("/api/trade/analyze", self._handle_trade_analyze)
-        self._app.router.add_post("/api/trade/execute", self._handle_trade_execute)
-        self._app.router.add_post("/api/trade/manual", self._handle_trade_manual)
-        self._app.router.add_post("/api/trade/manual-analyze", self._handle_trade_manual_analyze)
-        self._app.router.add_get("/api/jean/health-report", self._handle_jean_health_report)
-        self._app.router.add_get("/api/jean/graph", self._handle_jean_graph)
-        self._app.router.add_get("/api/improvements", self._handle_improvements_get)
-        self._app.router.add_post("/api/improvements/decision", self._handle_improvements_decision)
-        self._app.router.add_get("/api/improvements/pr-status", self._handle_improvements_pr_status)
-        self._app.router.add_post("/api/improvements/approve-pr", self._handle_improvements_approve_pr)
-        self._app.router.add_get("/api/prefs", self._handle_prefs_get)
-        self._app.router.add_post("/api/prefs", self._handle_prefs_set)
-        self._app.router.add_post("/api/auth/login", self._handle_auth_login)
-        self._app.router.add_post("/api/auth/logout", self._handle_auth_logout)
-        self._app.router.add_get("/api/auth/me", self._handle_auth_me)
-        self._app.router.add_get("/metrics", self._handle_metrics)
-        self._app.router.add_get("/api/cost", self._handle_cost)          # Story 147
-        self._app.router.add_get("/api/benchmarks", self._handle_benchmarks)  # Story 151
-        self._app.router.add_get("/api/kernel", self._handle_kernel)      # Story 153
-        self._app.router.add_post("/api/kernel/invoke", self._handle_kernel_invoke)  # Story 153
-        self._app.router.add_get("/api/events", self._handle_events)          # Story 154
-        self._app.router.add_get("/api/events/stream", self._handle_events_stream)  # Story 172
-        self._app.router.add_get("/api/step-guard", self._handle_step_guard)  # Story 155
-        self._app.router.add_get("/api/microagents", self._handle_microagents)  # Story 156
-        self._app.router.add_get("/api/context-window", self._handle_context_window)    # Story 159
-        self._app.router.add_get("/api/signal-validator", self._handle_signal_validator)  # Story 158
-        self._app.router.add_get("/api/repo-map", self._handle_repo_map)              # Story 160
-        self._app.router.add_get("/api/signal-changelog", self._handle_signal_changelog)  # Story 162
-        self._app.router.add_get("/api/obs/{tool_name}", self._handle_obs_tool)           # Story 175
-        self._app.router.add_get("/api/context-window/live", self._handle_context_window_live)  # Story 177
-        self._app.router.add_get("/api/cycle-sop", self._handle_cycle_sop)                    # Story 185
-        self._app.router.add_get("/api/working-memory", self._handle_working_memory)          # Story 183
-        self._app.router.add_get("/api/incremental-guard", self._handle_incremental_guard)    # Story 187
-        # ── Milestone 36 — Backtesting Dashboard (Stories 224-228) ──────────
-        self._app.router.add_post("/api/backtest/run",    self._handle_backtest_run)     # Story 224
-        self._app.router.add_get("/api/backtest/result",  self._handle_backtest_result)  # Story 224
-        self._app.router.add_get("/api/backtest/history", self._handle_backtest_history) # Story 228
-        # ── Milestone 37 — Live Performance Tracking (Stories 229-233) ──────
-        self._app.router.add_get("/api/performance/rolling", self._handle_perf_rolling)  # Story 232
-        self._app.router.add_get("/api/performance/divergence", self._handle_perf_divergence) # Story 231
-        # ── Milestone 38 — Risk Dashboard Avançado (Stories 234-238) ────────
-        self._app.router.add_get("/api/risk/batman-timeline",  self._handle_batman_timeline)   # Story 235
-        self._app.router.add_get("/api/risk/regime-heatmap",   self._handle_regime_heatmap)    # Story 236
-        self._app.router.add_get("/api/risk/concentration",    self._handle_concentration)     # Story 238
-        # ── Milestone 39 — Multiagent Debate (Stories 239-243) ───────────────
-        self._app.router.add_get("/api/debate/history",  self._handle_debate_history)  # Story 242
-        self._app.router.add_post("/api/debate/run",     self._handle_debate_run)      # Story 239
-        # ── Today Summary Widget — Overview simplificado ──────────────────────
-        self._app.router.add_get("/api/today-summary", self._handle_today_summary)
-        self._app.router.add_get("/ws", self._handle_ws)
-        self._app.router.add_get("/api/hl/candles", self._handle_hl_candles)
-        self._app.router.add_get("/ws/live", self._handle_ws_live)
-        self._app.router.add_static("/static", path=STATIC_DIR)
-        # Office v2 (React + Babel-standalone) lives in static/office_v2/.
-        # Exposing it under its own prefix keeps the asset paths inside the
-        # HTML (relative `tweaks-panel.jsx` etc.) resolving cleanly without
-        # touching the index.html shipped by Claude Design.
+        r.add_get("/api/system/status", self._handle_system_status)
+        r.add_post("/api/system/start", self._handle_system_start)
+        r.add_post("/api/system/stop", self._handle_system_stop)
+        r.add_post("/api/system/reboot", self._handle_system_reboot)
+        r.add_get("/api/mode", self._handle_mode_get)
+        r.add_post("/api/mode", self._handle_mode_set)
+        r.add_get("/api/report/daily", self._handle_report_daily)
+        r.add_get("/api/report/weekly", self._handle_report_weekly)
+
+    def _register_trade_routes(self, r) -> None:
+        r.add_post("/api/trade/analyze", self._handle_trade_analyze)
+        r.add_post("/api/trade/execute", self._handle_trade_execute)
+        r.add_post("/api/trade/manual", self._handle_trade_manual)
+        r.add_post("/api/trade/manual-analyze", self._handle_trade_manual_analyze)
+        r.add_get("/api/positions", self._handle_positions)
+        r.add_post("/api/positions/close", self._handle_positions_close)
+
+    def _register_agents_memory_routes(self, r) -> None:
+        r.add_get("/api/agents/tasks", self._handle_agents_tasks)
+        r.add_get("/api/audit/feed", self._handle_audit_feed)
+        r.add_get("/api/memory/stats", self._handle_memory_stats)
+        r.add_get("/api/working-memory", self._handle_working_memory)
+        r.add_get("/api/cycle-sop", self._handle_cycle_sop)
+        r.add_get("/api/incremental-guard", self._handle_incremental_guard)
+
+    def _register_improvement_routes(self, r) -> None:
+        r.add_get("/api/jean/health-report", self._handle_jean_health_report)
+        r.add_get("/api/jean/graph", self._handle_jean_graph)
+        r.add_get("/api/improvements", self._handle_improvements_get)
+        r.add_post("/api/improvements/decision", self._handle_improvements_decision)
+        r.add_get("/api/improvements/pr-status", self._handle_improvements_pr_status)
+        r.add_post("/api/improvements/approve-pr", self._handle_improvements_approve_pr)
+
+    def _register_backtest_debate_routes(self, r) -> None:
+        r.add_post("/api/backtest/run", self._handle_backtest_run)
+        r.add_get("/api/backtest/result", self._handle_backtest_result)
+        r.add_get("/api/backtest/history", self._handle_backtest_history)
+        r.add_get("/api/debate/history", self._handle_debate_history)
+        r.add_post("/api/debate/run", self._handle_debate_run)
+
+    def _register_kernel_obs_routes(self, r) -> None:
+        r.add_get("/api/cost", self._handle_cost)
+        r.add_get("/api/benchmarks", self._handle_benchmarks)
+        r.add_get("/api/kernel", self._handle_kernel)
+        r.add_post("/api/kernel/invoke", self._handle_kernel_invoke)
+        r.add_get("/api/events", self._handle_events)
+        r.add_get("/api/events/stream", self._handle_events_stream)
+        r.add_get("/api/step-guard", self._handle_step_guard)
+        r.add_get("/api/microagents", self._handle_microagents)
+        r.add_get("/api/context-window", self._handle_context_window)
+        r.add_get("/api/context-window/live", self._handle_context_window_live)
+        r.add_get("/api/signal-validator", self._handle_signal_validator)
+        r.add_get("/api/signal-changelog", self._handle_signal_changelog)
+        r.add_get("/api/repo-map", self._handle_repo_map)
+        r.add_get("/api/obs/{tool_name}", self._handle_obs_tool)
+
+    def _register_realtime_static_office_routes(self, r) -> None:
+        r.add_get("/ws", self._handle_ws)
+        r.add_get("/ws/live", self._handle_ws_live)
+        r.add_static("/static", path=STATIC_DIR)
+        # Office v2 (React + Babel-standalone) em static/office_v2/.
         office_v2_dir = STATIC_DIR / "office_v2"
         if office_v2_dir.exists():
-            self._app.router.add_get(
-                "/office-v2", self._handle_office_v2_index
-            )
-            self._app.router.add_get(
-                "/office-v2/", self._handle_office_v2_index
-            )
-            self._app.router.add_static("/office-v2/", path=office_v2_dir)
-        # Office v4 — novo design (living floor 2000×1200). Mesmo esquema do v2.
+            r.add_get("/office-v2", self._handle_office_v2_index)
+            r.add_get("/office-v2/", self._handle_office_v2_index)
+            r.add_static("/office-v2/", path=office_v2_dir)
+        # Office v4 — novo design (living floor 2000×1200).
         office_v4_dir = STATIC_DIR / "office_v4"
         if office_v4_dir.exists():
-            self._app.router.add_get("/office-v4", self._handle_office_v4_index)
-            self._app.router.add_get("/office-v4/", self._handle_office_v4_index)
-            self._app.router.add_static("/office-v4/", path=office_v4_dir)
+            r.add_get("/office-v4", self._handle_office_v4_index)
+            r.add_get("/office-v4/", self._handle_office_v4_index)
+            r.add_static("/office-v4/", path=office_v4_dir)
 
     async def _on_startup(self, _: web.Application) -> None:
         await MekkaRepository.initialize()
