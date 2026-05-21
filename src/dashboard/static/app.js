@@ -720,9 +720,67 @@ function enhanceTitlesWithHelp() {
   });
 }
 
+// Office v4 sprite roster — renders window.SPRITES_V3.list (the new pixel-art
+// characters) into the roster/agents page. One shared RAF loop animates every
+// visible canvas in idle mode. Returns true on success, false if v4 sprites
+// aren't loaded (caller then falls back to the v2 engine).
+let _v4RosterRaf = null;
+function _renderRosterFromV4(root) {
+  const V3 = window.SPRITES_V3;
+  if (!V3 || !Array.isArray(V3.list) || !V3.list.length) return false;
+  const SIZE = V3.size || 64;
+  const SCALE = 2;            // 64 → 128px card sprite
+  const list = V3.list;
+
+  root.innerHTML = list.map((a, i) => `
+    <div class="agent-card agent-card-v4" data-agent-id="${escapeHtml(a.id || '')}">
+      <canvas class="sprite-v4" data-i="${i}" width="${SIZE}" height="${SIZE}"
+              style="width:${SIZE * SCALE}px;height:${SIZE * SCALE}px;image-rendering:pixelated"
+              title="${escapeHtml((a.codename || '') + ' · ' + (a.role || ''))}"></canvas>
+      <div class="agent-name">${escapeHtml(a.name || a.id || '')}</div>
+      <div class="agent-role muted-line">${escapeHtml(a.codename || '')}${a.role ? ' · ' + escapeHtml(a.role) : ''}</div>
+    </div>
+  `).join('');
+
+  const canvases = Array.from(root.querySelectorAll('canvas.sprite-v4')).map(c => ({
+    ctx: c.getContext('2d'),
+    draw: list[Number(c.dataset.i)].draw,
+  }));
+  canvases.forEach(c => { if (c.ctx) c.ctx.imageSmoothingEnabled = false; });
+
+  if (_v4RosterRaf) cancelAnimationFrame(_v4RosterRaf);
+  let frame = 0;
+  const tick = () => {
+    // Stop animating if the roster left the DOM (page swap re-renders it).
+    if (!document.body.contains(root) || !root.querySelector('canvas.sprite-v4')) {
+      _v4RosterRaf = null; return;
+    }
+    const t = performance.now();
+    for (const c of canvases) {
+      if (!c.ctx || typeof c.draw !== 'function') continue;
+      try {
+        c.ctx.clearRect(0, 0, SIZE, SIZE);
+        c.draw(c.ctx, frame, 'idle', t);
+      } catch (_) { /* one bad sprite shouldn't kill the loop */ }
+    }
+    frame = (frame + 1) % 60;
+    _v4RosterRaf = requestAnimationFrame(tick);
+  };
+  // ~20fps is plenty for idle bobbing and keeps CPU low.
+  _v4RosterRaf = requestAnimationFrame(function loop() {
+    tick();
+  });
+  return true;
+}
+
 function renderAgentsRoster() {
   const root = document.getElementById('agents-roster');
   if (!root) return;
+
+  // Prefer the new Office v4 pixel-art sprites (window.SPRITES_V3) everywhere
+  // the roster shows — Overview + Agents page. Falls back to the v2 engine,
+  // then the legacy totem sprites.
+  if (_renderRosterFromV4(root)) return;
 
   // P0.6 (HANDOFF 2026-05-20): prefer the Office v2 sprite engine when
   // /static/agents-sprites.js is loaded. It exposes window.AGENTS (22+

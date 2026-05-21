@@ -1376,6 +1376,15 @@
     </div>
 
     <script src="/static/i18n.js" defer></script>
+    <!-- Office v4 sprite engine (plain JS, same-origin → CSP 'self'): exposes
+         window.PX / FX / SPRITES_V3 so the roster + agents page can render the
+         new pixel-art characters. Order: engine → effects → sprite lists. -->
+    <script src="/office-v4/pixel-engine.js" defer></script>
+    <script src="/office-v4/pixel-engine-v3.js" defer></script>
+    <script src="/office-v4/effects.js" defer></script>
+    <script src="/office-v4/sprites.js" defer></script>
+    <script src="/office-v4/sprites-v3.js" defer></script>
+    <script src="/office-v4/sprites-v3-factory.js" defer></script>
     <!-- agents-sprites.js exposes window.AGENTS / drawAgent / drawSprite
          so the main dashboard Agents Roster renders the same pixel art
          the Pixel Office uses (P0.6, HANDOFF 2026-05-20). MUST load
