@@ -4493,6 +4493,29 @@ body[data-theme="light"] .page-nav-sub a { color: var(--muted); }
 .impr-kb-empty { color: var(--muted); font-size: 0.8rem; text-align: center; padding: 6px 0; }
 @media (max-width: 900px) { .impr-kanban { grid-template-columns: repeat(2, 1fr); } }
 
+/* Status view tabs */
+.impr-views {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  margin: 4px 0 12px; padding-bottom: 8px;
+  border-bottom: 1px solid var(--glass-border);
+}
+.impr-view {
+  background: transparent; color: var(--muted);
+  border: 1px solid transparent; border-bottom: 2px solid transparent;
+  border-radius: var(--r-sm, 6px) var(--r-sm, 6px) 0 0;
+  padding: 6px 12px; font-size: 0.82rem; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px;
+  transition: color var(--t-base), border-color var(--t-base), background var(--t-base);
+}
+.impr-view:hover { color: var(--text-2); }
+.impr-view.active { color: var(--accent); border-bottom-color: var(--accent); background: var(--accent-dim); }
+.impr-view-n {
+  background: var(--glass); color: var(--muted);
+  border: 1px solid var(--glass-border); border-radius: var(--r-pill, 999px);
+  padding: 0 7px; font-size: 0.7rem; font-family: var(--font-mono);
+}
+.impr-view.active .impr-view-n { color: var(--accent); border-color: var(--accent); }
+
 .impr-filters { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
 .impr-filter {
   background: var(--bg-3); border: 1px solid var(--border); color: var(--muted);

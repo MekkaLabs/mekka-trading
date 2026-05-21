@@ -6139,6 +6139,7 @@ function _cmdSetStatus(msg, type = 'info') {
 // ============================================================
 let _imprData = [];
 let _imprDomainFilter = 'all';
+let _imprViewFilter = 'novas';   // aba de status: novas | andamento | fechadas | todas
 // Feature D — dev lifecycle / PR status keyed by rec id (from
 // /api/improvements/pr-status). Empty when the endpoint is unavailable.
 let _imprPrStatus = {};
@@ -6239,13 +6240,37 @@ function _imprRenderKanban() {
   }).join('');
 }
 
+// Map a recommendation to a status VIEW: novas (pendente) / andamento
+// (aprovada+em dev) / fechadas (entregue+reprovada). Reuses _imprColumn.
+function _imprViewOf(r) {
+  const col = _imprColumn(r);
+  if (col === 'pendente') return 'novas';
+  if (col === 'entregue' || col === 'reprovada') return 'fechadas';
+  return 'andamento'; // aprovada, dev
+}
+
+function _imprUpdateViewCounts() {
+  const counts = { novas: 0, andamento: 0, fechadas: 0, todas: (_imprData || []).length };
+  (_imprData || []).forEach(r => { counts[_imprViewOf(r)]++; });
+  document.querySelectorAll('.impr-view-n').forEach(el => {
+    const k = el.dataset.n; if (k in counts) el.textContent = counts[k];
+  });
+}
+
 function _imprRender() {
   const list = document.getElementById('impr-list');
   _imprRenderKanban();
+  _imprUpdateViewCounts();
   if (!list) return;
-  const rows = _imprData.filter(r => _imprDomainFilter === 'all' || r.domain === _imprDomainFilter);
+  const rows = _imprData.filter(r =>
+    (_imprDomainFilter === 'all' || r.domain === _imprDomainFilter) &&
+    (_imprViewFilter === 'todas' || _imprViewOf(r) === _imprViewFilter)
+  );
   if (!rows.length) {
-    list.innerHTML = '<div class="muted-line">Nenhuma recomendação neste filtro. O conselho roda sobre trades fechados (Beast) + o inbox curado (data/improvement_inbox.json).</div>';
+    const msg = _imprViewFilter === 'novas'
+      ? 'Nenhuma sugestão nova — todas já foram decididas. Veja "Em andamento" ou "Fechadas".'
+      : 'Nenhuma recomendação nesta visualização.';
+    list.innerHTML = `<div class="muted-line">${msg}</div>`;
     return;
   }
   list.innerHTML = rows.map(r => {
@@ -6451,6 +6476,14 @@ function _bootImprovements() {
     btn.addEventListener('click', () => {
       _imprDomainFilter = btn.dataset.domain || 'all';
       document.querySelectorAll('.impr-filter').forEach(b => b.classList.toggle('active', b === btn));
+      _imprRender();
+    });
+  });
+  // Status view tabs (Novas / Em andamento / Fechadas / Todas).
+  document.querySelectorAll('.impr-view').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _imprViewFilter = btn.dataset.view || 'novas';
+      document.querySelectorAll('.impr-view').forEach(b => b.classList.toggle('active', b === btn));
       _imprRender();
     });
   });

@@ -1123,6 +1123,14 @@
         <h3 class="impr-kanban-title">📋 Quadro de Status</h3>
         <div class="impr-kanban" id="impr-kanban"></div>
 
+        <!-- Abas de visualização por status (não polui com tudo de uma vez) -->
+        <div class="impr-views" id="impr-views">
+          <button type="button" class="impr-view active" data-view="novas">🆕 Novas <span class="impr-view-n" data-n="novas">0</span></button>
+          <button type="button" class="impr-view" data-view="andamento">🛠️ Em andamento <span class="impr-view-n" data-n="andamento">0</span></button>
+          <button type="button" class="impr-view" data-view="fechadas">📦 Fechadas <span class="impr-view-n" data-n="fechadas">0</span></button>
+          <button type="button" class="impr-view" data-view="todas">Todas <span class="impr-view-n" data-n="todas">0</span></button>
+        </div>
+
         <div class="impr-filters">
           <button type="button" class="impr-filter active" data-domain="all">Todos</button>
           <button type="button" class="impr-filter" data-domain="trading-ops">⚔️ Trading/Ops</button>
