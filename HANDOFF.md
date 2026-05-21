@@ -76,6 +76,7 @@ TELEGRAM_INBOUND_ENABLED=false  ⚠️ ver gotcha #1
 
 - **#21 fino**: padronizar o resto das mensagens do Telegram (tom/formato) — subjetivo, alinhar com operador.
 - **i18n EN completo (d)**: hoje só nav+topbar traduzem (`applyLanguage`); resto é PT hardcoded. Baixo valor (operador usa PT).
+- **Office v4 (novo design)** integrado em `/office-v4/` e já é o iframe da Visão Geral (commit 079f52a). Living floor 2000×1200, 22 agentes, salas, pathfinding, sprites pixel-art. ⏳ **Pendente**: (a) verificação visual no navegador; (b) **wire de dados reais** — hoje usa o mock do protótipo (tickers/PnL falsos); ligar ao trading real (sinais Vision, posições, PnL) é o próximo passo do office. Arquivos em `src/dashboard/static/office_v4/`. v2 antigo permanece em `/office-v2/`.
 - **Verificação visual** de tudo da sessão (preview estava quebrado).
 - **Consumidor do improvement-queue**: sessão Claude Code (manual/headless) que lê `docs/improvement-queue/`, roda o SDC do AIOS e registra o PR via `pr_tracker.set_pr` → painel mostra o PR p/ aprovar.
 - **Fase 3 — status atualizado nesta sessão:**
