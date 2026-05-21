@@ -614,10 +614,16 @@ async function _bootNeuralGraph() {
       .nodeVal((n) => 1 + (n.degree || 0))
       .linkColor(() => 'rgba(120,160,220,0.18)')
       .linkWidth(0.5)
+      // Synapses firing: animated particles travel along the wikilinks.
       .linkDirectionalParticles(0)
+      .linkDirectionalParticleWidth(2.2)
+      .linkDirectionalParticleSpeed(0.012)
+      .linkDirectionalParticleColor(() => '#5be8f5')
       .cooldownTicks(120);
     _neuralGraph.onEngineStop(() => { try { _neuralGraph.zoomToFit(400, 30); } catch (_) {} });
+    _neuralLinks = links;
     _neuralBooted = true;
+    _neuralStartFiring();
   } catch (e) {
     console.error('[neural] render failed', e);
     el.innerHTML = '<p class="muted-line" style="padding:18px">Erro ao renderizar o grafo.</p>';
@@ -634,6 +640,49 @@ function _ensureNeuralGraphBooted() {
     return;
   }
   _bootNeuralGraph().catch((e) => console.error('[neural] boot error', e));
+}
+
+// ── Synapse firing: the second brain "thinks" in real time ──────────────────
+// Ambient heartbeat fires a few synapses continuously; a real Nick Fury cycle
+// (cycles count increments) fires a big burst — the brain reacting to the
+// system's actions. Uses force-graph's emitParticle along the wikilinks.
+let _neuralLinks = [];
+let _neuralFireTimer = null;
+let _neuralStatusTimer = null;
+let _neuralLastCycles = -1;
+
+function _neuralFire(n) {
+  if (!_neuralGraph || !_neuralLinks.length) return;
+  const k = Math.min(n, _neuralLinks.length);
+  for (let i = 0; i < k; i++) {
+    const link = _neuralLinks[Math.floor(Math.random() * _neuralLinks.length)];
+    try { _neuralGraph.emitParticle(link); } catch (_) { /* ignore */ }
+  }
+}
+
+function _neuralStartFiring() {
+  if (_neuralFireTimer) clearInterval(_neuralFireTimer);
+  if (_neuralStatusTimer) clearInterval(_neuralStatusTimer);
+  // Ambient activity — pause when the graph isn't visible to save CPU.
+  _neuralFireTimer = setInterval(() => {
+    const el = document.getElementById('neural-graph');
+    const sec = document.getElementById('sec-neural-graph');
+    if (!el || (sec && sec.classList.contains('page-section-hidden')) || document.hidden) return;
+    _neuralFire(2 + Math.floor(Math.random() * 3));   // 2–4 ambient synapses
+  }, 1800);
+  // Real sync — a big burst when the system completes a trading cycle.
+  _neuralStatusTimer = setInterval(async () => {
+    try {
+      const r = await fetch('/api/system/status', { cache: 'no-store' });
+      const d = await r.json();
+      if (typeof d.cycles === 'number') {
+        if (_neuralLastCycles >= 0 && d.cycles > _neuralLastCycles) {
+          _neuralFire(10 + Math.floor(Math.random() * 8));  // cycle burst
+        }
+        _neuralLastCycles = d.cycles;
+      }
+    } catch (_) { /* offline → just keep the ambient heartbeat */ }
+  }, 5000);
 }
 
 function _initOfficeAutoResize() {
