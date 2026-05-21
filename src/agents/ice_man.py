@@ -38,7 +38,11 @@ _WATCHED = ("ccxt", "pydantic", "aiohttp", "pandas-ta", "openai", "anthropic")
 _CRITICAL = {"ccxt"}  # outdated → HIGH (exchange API drift)
 _PYPI_URL = "https://pypi.org/pypi/{pkg}/json"
 # GitHub repos to watch for breaking-change/security release notes.
-_GITHUB_REPOS = {"ccxt": "ccxt/ccxt"}
+_GITHUB_REPOS = {
+    "ccxt": "ccxt/ccxt",
+    "pydantic": "pydantic/pydantic",
+    "aiohttp": "aio-libs/aiohttp",
+}
 _GITHUB_RELEASES_URL = "https://api.github.com/repos/{repo}/releases?per_page=5"
 _BREAKING_HINTS = ("breaking", "security", "deprecat", "removed", "vulnerab", "cve")
 _HTTP_TIMEOUT_S = 8.0

@@ -46,7 +46,8 @@ class OpsScanner:
 
     async def scan(self, period_days: int = 7) -> list[ImprovementProposal]:
         out: list[ImprovementProposal] = []
-        for fn in (self._scan_audit_errors, self._scan_agent_failures, self._scan_log_exceptions):
+        for fn in (self._scan_audit_errors, self._scan_agent_failures,
+                   self._scan_log_exceptions, self._scan_slow_stages):
             try:
                 out.extend(await fn(period_days))
             except Exception as exc:  # noqa: BLE001
@@ -108,6 +109,42 @@ class OpsScanner:
             area="backend",
             evidence=f"{agent}: {n} CYCLE_ERROR em {period_days}d.",
             suggested_story=f"Estabilizar {agent} contra CYCLE_ERROR",
+        )]
+
+    async def _scan_slow_stages(self, period_days: int) -> list[ImprovementProposal]:
+        """Read the pipeline benchmark and flag cycle stages whose p95 latency
+        is high (performance bottleneck). period_days is accepted for signature
+        symmetry but unused (the benchmark is a rolling in-process window)."""
+        try:
+            from src.services.pipeline_benchmark import get_pipeline_benchmark  # noqa: WPS433
+            data = get_pipeline_benchmark().to_dict()
+        except Exception:  # noqa: BLE001
+            return []
+        stages = (data or {}).get("latency_by_stage") or {}
+        if not stages:
+            return []
+        # Threshold: half the slow-cycle alert budget, but at least 8s.
+        thr_s = max(8.0, float((data.get("config") or {}).get("alert_threshold_s", 30.0)) / 2.0)
+        slow: list[tuple[str, float, int]] = []
+        for stage, st in stages.items():
+            p95_ms = float((st or {}).get("p95", 0.0))
+            count = int((st or {}).get("count", 0))
+            if count >= 10 and p95_ms / 1000.0 >= thr_s:
+                slow.append((stage, p95_ms / 1000.0, count))
+        if not slow:
+            return []
+        slow.sort(key=lambda t: -t[1])
+        stage, p95_s, count = slow[0]
+        return [ImprovementProposal(
+            title=f"Estágio lento: {stage} (p95 {p95_s:.1f}s)",
+            description=(
+                f"O estágio '{stage}' do ciclo tem p95 de {p95_s:.1f}s (limite {thr_s:.0f}s) "
+                f"em {count} amostras. Gargalo de performance — investigar e otimizar."
+            ),
+            impact="MEDIUM" if p95_s < thr_s * 2 else "HIGH",
+            area="infra",
+            evidence=f"{stage}: p95={p95_s:.1f}s, n={count} (threshold {thr_s:.0f}s).",
+            suggested_story=f"Otimizar latência do estágio {stage}",
         )]
 
     async def _scan_log_exceptions(self, period_days: int) -> list[ImprovementProposal]:

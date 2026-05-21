@@ -6347,176 +6347,28 @@ class MekkaDashboardServer:
                 {"nodes": [], "links": [], "error": str(exc)}, status=200,
             )
 
+    # Continuous-Improvement endpoints — bodies live in
+    # src/dashboard/routers/improvements.py (extracted from this file). These
+    # thin forwarders keep the route registration unchanged.
     async def _handle_improvements_get(self, request: web.Request) -> web.Response:
-        """GET /api/improvements[?fresh=1] — run the Mekka improvement council.
-
-        Returns consolidated recommendations (Beast proposals + curated inbox,
-        each premortem-ed by Galactus and consolidated by Mekka) with the
-        operator's persisted accept/reject status. ``fresh=1`` bypasses the
-        TTL cache (operator clicked "Buscar melhorias agora").
-        """
-        fresh = request.rel_url.query.get("fresh") in ("1", "true", "yes")
-        try:
-            import time as _time
-            from src.agents.mekka import Mekka
-            # TTL cache (20s): the council (Beast+Galactus) takes 6–10s; without
-            # this every panel open/refresh and the Telegram push re-ran it,
-            # making the UI feel frozen. Cache the report dict + the fresh recs.
-            now = _time.monotonic()
-            cached = getattr(self, "_impr_cache", None)
-            if not fresh and cached and (now - cached[0]) < 20.0:
-                return web.json_response(cached[1], status=200)
-            report = await Mekka().run(period_days=7)
-            report_dict = report.to_dict()
-            self._impr_cache = (now, report_dict)
-            # Push NEW pending proposals to Telegram once (operator can approve
-            # there with /aprovar — synced with this dashboard). In-memory dedup.
-            try:
-                if not hasattr(self, "_impr_notified"):
-                    self._impr_notified = set()
-                pend = [r for r in (getattr(report, "recommendations", []) or [])
-                        if getattr(r, "status", "pending") == "pending"]
-                fresh = [r for r in pend if getattr(r, "id", None) and r.id not in self._impr_notified]
-                if fresh:
-                    from src.services.telegram_alerter import TelegramAlerter as _TA
-                    alerter = _TA()
-                    for r in fresh[:5]:
-                        self._impr_notified.add(r.id)
-                        asyncio.create_task(alerter.improvement_proposed(r))
-            except Exception as _push_exc:  # noqa: BLE001
-                logger.debug("improvement Telegram push skipped: %s", _push_exc)
-            return web.json_response(report_dict, status=200)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("improvements council failed: %s", exc, exc_info=True)
-            return web.json_response(
-                {"error": f"Falha ao montar o conselho de melhorias: {exc}",
-                 "recommendations": [], "summary": {}},
-                status=200,
-            )
+        from src.dashboard.routers import improvements as _impr
+        return await _impr.handle_get(self, request)
 
     async def _handle_improvements_decision(self, request: web.Request) -> web.Response:
-        """POST /api/improvements/decision — operator accepts/rejects a rec.
+        from src.dashboard.routers import improvements as _impr
+        return await _impr.handle_decision(self, request)
 
-        Body: { id: str, status: "accepted"|"rejected"|"pending" }
-        """
-        body = await self._safe_json_body(request) or {}
-        rec_id = str(body.get("id") or "").strip()[:64]
-        status = str(body.get("status") or "").strip().lower()
-        if not rec_id or status not in ("accepted", "rejected", "pending"):
-            return web.json_response(
-                {"ok": False, "reason": "Parâmetros inválidos (id + status accepted|rejected|pending)."},
-                status=400,
-            )
-        # The frontend sends the full recommendation object it already rendered
-        # (body.rec) so we can enqueue the dev brief WITHOUT re-running the
-        # (expensive) Mekka council on every accept — that was making the
-        # accept button hang/fail under load.
-        rec_payload = body.get("rec") if isinstance(body.get("rec"), dict) else None
-        # Invalidate the council cache so a fresh GET reflects the new status.
-        self._impr_cache = None
-        try:
-            from src.agents.mekka import Mekka
-            queued_path: str | None = None
-            ok = Mekka().record_decision(rec_id, status)
-            if status == "accepted" and rec_payload is not None:
-                from src.services import improvement_queue
-                # ensure the id is present for the brief filename
-                rec_payload.setdefault("id", rec_id)
-                queued_path = improvement_queue.enqueue_brief(rec_payload) or None
-            await MekkaRepository.log_event(
-                agent="Dashboard",
-                event="IMPROVEMENT_DECISION",
-                severity="INFO",
-                message=f"Operador {status} recomendação {rec_id}",
-                payload={"id": rec_id, "status": status, "ok": ok, "queued": queued_path},
-            )
-            return web.json_response(
-                {"ok": ok, "id": rec_id, "status": status, "queued": queued_path},
-                status=200,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error("improvement decision failed: %s", exc, exc_info=True)
-            return web.json_response({"ok": False, "reason": str(exc)}, status=200)
+    async def _handle_improvements_pr_status(self, request: web.Request) -> web.Response:
+        from src.dashboard.routers import improvements as _impr
+        return await _impr.handle_pr_status(self, request)
 
-    async def _handle_improvements_pr_status(self, _: web.Request) -> web.Response:
-        """GET /api/improvements/pr-status — dev/PR lifecycle per recommendation.
-
-        Maps rec_id → {dev_state, pr:{...}} so the panel can show the
-        Fila → Em dev → PR aberto → Mergeado lifecycle and an approve button.
-        Read-only; degrades gracefully if `gh` is unavailable.
-        """
-        try:
-            from src.services import pr_tracker
-            return web.json_response(pr_tracker.get_pr_status(), status=200)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("pr-status failed: %s", exc, exc_info=True)
-            return web.json_response({}, status=200)
-
-    async def _handle_improvements_kpi(self, _: web.Request) -> web.Response:
-        """GET /api/improvements/kpi — department KPI from Sage.
-
-        Returns operator throughput (accepted/rejected/acceptance rate) plus the
-        latest measurement snapshot (win rate, errors_24h). Read-only,
-        fail-silent — always 200 with whatever could be computed.
-        """
-        out: dict = {"kpi": {}, "latest_snapshot": None}
-        try:
-            from src.agents.sage import Sage  # noqa: WPS433
-            sage = Sage()
-            out["kpi"] = sage.kpi()
-            history = sage._load_history()
-            if history:
-                out["latest_snapshot"] = history[-1]
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("improvements kpi failed: %s", exc)
-        return web.json_response(out, status=200)
+    async def _handle_improvements_kpi(self, request: web.Request) -> web.Response:
+        from src.dashboard.routers import improvements as _impr
+        return await _impr.handle_kpi(self, request)
 
     async def _handle_improvements_approve_pr(self, request: web.Request) -> web.Response:
-        """POST /api/improvements/approve-pr — operator approves a rec's PR.
-
-        Body: { rec_id, pr_number, confirm: "APPROVE", merge?: bool }
-        By default this RECORDS the operator's approval (do_merge=False) — the
-        actual merge to main stays a deliberate @devops action. Pass
-        merge=true to also run `gh pr merge --squash`.
-        """
-        body = await self._safe_json_body(request) or {}
-        rec_id = str(body.get("rec_id") or "").strip()[:64]
-        confirm = str(body.get("confirm") or "").strip().upper()
-        try:
-            pr_number = int(body.get("pr_number"))
-        except (TypeError, ValueError):
-            pr_number = 0
-        if not rec_id or pr_number <= 0:
-            return web.json_response(
-                {"ok": False, "reason": "rec_id e pr_number são obrigatórios."},
-                status=400,
-            )
-        if confirm != "APPROVE":
-            return web.json_response(
-                {"ok": False, "reason": "confirm=APPROVE obrigatório."}, status=400,
-            )
-        do_merge = bool(body.get("merge", False))
-        try:
-            from src.services import pr_tracker
-            result = pr_tracker.approve_pr(rec_id, pr_number, do_merge=do_merge)
-            # Local-only deployment: there's no remote PR to merge via gh, so the
-            # operator's approval is the delivery gate → mark merged so the
-            # kanban completes to "Entregue". (Code was committed at dev time.)
-            if result.get("ok") and not result.get("merged"):
-                pr_tracker.mark_merged(rec_id)
-            # The council cache must refresh so the panel/kanban reflect it.
-            self._impr_cache = None
-            await MekkaRepository.log_event(
-                agent="Dashboard",
-                event="IMPROVEMENT_PR_APPROVED",
-                severity="INFO",
-                message=f"Operador aprovou PR #{pr_number} ({rec_id}) merge={do_merge}",
-                payload={"rec_id": rec_id, "pr_number": pr_number, **result},
-            )
-            return web.json_response({"ok": result.get("ok", False), **result}, status=200)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("approve-pr failed: %s", exc, exc_info=True)
-            return web.json_response({"ok": False, "reason": str(exc)}, status=200)
+        from src.dashboard.routers import improvements as _impr
+        return await _impr.handle_approve_pr(self, request)
 
     def _prune_snapshot_dir(self) -> None:
         """Keep only the most recent ``SNAPSHOT_RETENTION_MINUTES`` snapshots

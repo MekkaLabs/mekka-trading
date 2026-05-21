@@ -37,6 +37,9 @@ logger = logging.getLogger("mekka.sage")
 _DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 _BASELINES_FILE = _DATA_DIR / "sage_baselines.json"
 _DECISIONS_FILE = _DATA_DIR / "improvement_decisions.json"
+# Sage v2 — per-improvement before/after attribution.
+_IMPROVEMENT_BASELINES_FILE = _DATA_DIR / "sage_improvement_baselines.json"
+_IMPROVEMENT_WINRATE_REGRESSION_PP = 8.0  # win-rate drop after a delivery → regression
 _MAX_SNAPSHOTS = 200
 _WINRATE_DROP_PP = 10.0     # percentage points
 _ERROR_SPIKE_MULT = 2.0     # current errors >= mult × baseline mean
@@ -62,9 +65,112 @@ class Sage:
             return []
         history = self._load_history()
         proposals = self._detect_regressions(snap, history)
+        # Sage v2 — per-improvement before/after attribution.
+        try:
+            proposals.extend(self._track_deliveries(snap))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Sage] delivery tracking failed: %s", exc)
         # Persist AFTER comparing so we compare against prior runs only.
         self._append(history, snap)
         return proposals
+
+    # ------------------------------------------------------------------
+    # Sage v2 — measure the impact of each DELIVERED improvement
+    # ------------------------------------------------------------------
+    def _track_deliveries(self, snap: dict) -> list[ImprovementProposal]:
+        """For each accepted improvement, snapshot a baseline at first sight and
+        compare current metrics later — classifying it effective/neutral/
+        regression. Only a regression emits a council proposal (low noise);
+        all verdicts are stored for ``improvement_evaluations()``."""
+        decisions = self._load_decisions_raw()
+        accepted = {
+            rid: d for rid, d in decisions.items()
+            if (d or {}).get("status") == "accepted"
+        }
+        if not accepted:
+            return []
+        baselines = self._load_improvement_baselines()
+        out: list[ImprovementProposal] = []
+        changed = False
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        for rid, d in accepted.items():
+            rec = baselines.get(rid)
+            if rec is None:
+                # First time we see this delivery → capture baseline.
+                baselines[rid] = {
+                    "captured_at": now_iso,
+                    "win_rate": snap.get("win_rate"),
+                    "errors_24h": snap.get("errors_24h", 0),
+                    "verdict": "pending",
+                }
+                changed = True
+                continue
+            # Evaluate against the captured baseline (only if we have win rates).
+            base_wr = rec.get("win_rate")
+            cur_wr = snap.get("win_rate")
+            if base_wr is not None and cur_wr is not None and snap.get("closed_trades", 0) >= _MIN_CLOSED_FOR_WR:
+                delta = cur_wr - base_wr
+                if delta <= -_IMPROVEMENT_WINRATE_REGRESSION_PP:
+                    verdict = "regression"
+                elif delta >= _IMPROVEMENT_WINRATE_REGRESSION_PP:
+                    verdict = "effective"
+                else:
+                    verdict = "neutral"
+                if rec.get("verdict") != verdict:
+                    rec["verdict"] = verdict
+                    rec["evaluated_at"] = now_iso
+                    rec["delta_win_rate"] = round(delta, 2)
+                    changed = True
+                if verdict == "regression":
+                    out.append(ImprovementProposal(
+                        title=f"Melhoria entregue coincide com regressão (rec {rid[:8]})",
+                        description=(
+                            "Após esta melhoria ser aceita/entregue, o win rate caiu vs. o "
+                            "baseline capturado na entrega. Avaliar se a mudança causou regressão "
+                            "ou se foi fator externo."
+                        ),
+                        impact="MEDIUM",
+                        area="measurement",
+                        evidence=f"rec {rid[:8]}: win rate {base_wr:.1f}% → {cur_wr:.1f}% (Δ{delta:+.1f}pp).",
+                        suggested_story=f"Investigar regressão pós-entrega (rec {rid[:8]})",
+                    ))
+        if changed:
+            self._save_improvement_baselines(baselines)
+        return out
+
+    def improvement_evaluations(self) -> dict:
+        """Per-improvement effectiveness verdicts (for dashboards/KPI)."""
+        baselines = self._load_improvement_baselines()
+        counts = {"effective": 0, "neutral": 0, "regression": 0, "pending": 0}
+        for rec in baselines.values():
+            v = (rec or {}).get("verdict", "pending")
+            if v in counts:
+                counts[v] += 1
+        return {"counts": counts, "tracked": len(baselines)}
+
+    def _load_decisions_raw(self) -> dict:
+        try:
+            if _DECISIONS_FILE.exists():
+                return json.loads(_DECISIONS_FILE.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            pass
+        return {}
+
+    def _load_improvement_baselines(self) -> dict:
+        try:
+            if _IMPROVEMENT_BASELINES_FILE.exists():
+                return json.loads(_IMPROVEMENT_BASELINES_FILE.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            pass
+        return {}
+
+    def _save_improvement_baselines(self, data: dict) -> None:
+        try:
+            _DATA_DIR.mkdir(parents=True, exist_ok=True)
+            _IMPROVEMENT_BASELINES_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Sage] could not persist improvement baselines: %s", exc)
 
     # ------------------------------------------------------------------
     # Metric snapshot

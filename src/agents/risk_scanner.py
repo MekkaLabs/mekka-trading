@@ -39,7 +39,8 @@ class RiskScanner:
 
     async def scan(self, period_days: int = 7) -> list[ImprovementProposal]:
         out: list[ImprovementProposal] = []
-        for fn in (self._scan_kill_switch, self._scan_drawdown, self._scan_batman_rejections):
+        for fn in (self._scan_kill_switch, self._scan_drawdown,
+                   self._scan_batman_rejections, self._scan_concentration):
             try:
                 out.extend(await fn(period_days))
             except Exception as exc:  # noqa: BLE001
@@ -93,6 +94,61 @@ class RiskScanner:
                 area="risk",
                 evidence=f"{len(ks_events)} eventos de kill switch no período.",
                 suggested_story="Revisar calibração dos gatilhos de kill switch",
+            )]
+        return []
+
+    async def _scan_concentration(self, period_days: int) -> list[ImprovementProposal]:
+        """Flag risk concentration: too much equity in one symbol, or high
+        aggregate gross exposure vs equity. Read-only snapshot via Portfolio
+        Manager; fail-silent (skips if snapshot unavailable)."""
+        try:
+            from src.agents.portfolio_manager import PortfolioManager  # noqa: WPS433
+            snap = await PortfolioManager().run()
+        except Exception:  # noqa: BLE001
+            return []
+        equity = float(getattr(snap, "equity_usd", 0.0) or 0.0)
+        positions = list(getattr(snap, "positions", []) or [])
+        if equity <= 0 or not positions:
+            return []
+
+        notionals: list[tuple[str, float]] = []
+        for p in positions:
+            notional = abs(float(getattr(p, "size", 0.0) or 0.0)) * float(getattr(p, "entry_price", 0.0) or 0.0)
+            if notional > 0:
+                notionals.append((getattr(p, "symbol", "?"), notional))
+        if not notionals:
+            return []
+
+        gross = sum(n for _, n in notionals)
+        top_sym, top_n = max(notionals, key=lambda t: t[1])
+        top_pct = top_n / equity * 100.0
+        gross_pct = gross / equity * 100.0
+
+        # Single-symbol concentration > 50% of equity, or gross exposure > 150%.
+        if top_pct >= 50.0:
+            return [ImprovementProposal(
+                title=f"Concentração: {top_sym} = {top_pct:.0f}% do equity",
+                description=(
+                    f"A posição em {top_sym} representa {top_pct:.0f}% do equity "
+                    f"(${top_n:,.0f} / ${equity:,.0f}). Concentração elevada amplia o "
+                    "risco idiossincrático — avaliar diversificação ou redução."
+                ),
+                impact="HIGH" if top_pct >= 80 else "MEDIUM",
+                area="risk",
+                evidence=f"{top_sym} notional ${top_n:,.0f} = {top_pct:.1f}% do equity ${equity:,.0f}.",
+                suggested_story="Revisar concentração de posição por símbolo",
+            )]
+        if gross_pct >= 150.0:
+            return [ImprovementProposal(
+                title=f"Exposição bruta alta: {gross_pct:.0f}% do equity",
+                description=(
+                    f"Exposição agregada (${gross:,.0f}) é {gross_pct:.0f}% do equity. "
+                    "Alavancagem efetiva elevada — avaliar redução de tamanho/posições."
+                ),
+                impact="MEDIUM",
+                area="risk",
+                evidence=f"gross ${gross:,.0f} / equity ${equity:,.0f} = {gross_pct:.0f}%.",
+                suggested_story="Revisar exposição bruta agregada",
             )]
         return []
 
