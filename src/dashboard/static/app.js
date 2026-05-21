@@ -724,7 +724,6 @@ function enhanceTitlesWithHelp() {
 // characters) into the roster/agents page. One shared RAF loop animates every
 // visible canvas in idle mode. Returns true on success, false if v4 sprites
 // aren't loaded (caller then falls back to the v2 engine).
-let _v4RosterRaf = null;
 function _renderRosterFromV4(root) {
   const V3 = window.SPRITES_V3;
   if (!V3 || !Array.isArray(V3.list) || !V3.list.length) return false;
@@ -732,43 +731,30 @@ function _renderRosterFromV4(root) {
   const SCALE = 2;            // 64 → 128px card sprite
   const list = V3.list;
 
+  // Use the REAL hero name (codename: FLASH, IRONMAN…) as the card title; the
+  // internal nickname (name: Velox…) goes in the subline for reference.
   root.innerHTML = list.map((a, i) => `
     <div class="agent-card agent-card-v4" data-agent-id="${escapeHtml(a.id || '')}">
       <canvas class="sprite-v4" data-i="${i}" width="${SIZE}" height="${SIZE}"
               style="width:${SIZE * SCALE}px;height:${SIZE * SCALE}px;image-rendering:pixelated"
-              title="${escapeHtml((a.codename || '') + ' · ' + (a.role || ''))}"></canvas>
-      <div class="agent-name">${escapeHtml(a.name || a.id || '')}</div>
-      <div class="agent-role muted-line">${escapeHtml(a.codename || '')}${a.role ? ' · ' + escapeHtml(a.role) : ''}</div>
+              title="${escapeHtml((a.codename || a.name || '') + (a.role ? ' · ' + a.role : ''))}"></canvas>
+      <div class="agent-name">${escapeHtml(a.codename || a.name || a.id || '')}</div>
+      <div class="agent-role muted-line">${escapeHtml(a.role || a.name || '')}</div>
     </div>
   `).join('');
 
-  const canvases = Array.from(root.querySelectorAll('canvas.sprite-v4')).map(c => ({
-    ctx: c.getContext('2d'),
-    draw: list[Number(c.dataset.i)].draw,
-  }));
-  canvases.forEach(c => { if (c.ctx) c.ctx.imageSmoothingEnabled = false; });
-
-  if (_v4RosterRaf) cancelAnimationFrame(_v4RosterRaf);
-  let frame = 0;
-  const tick = () => {
-    // Stop animating if the roster left the DOM (page swap re-renders it).
-    if (!document.body.contains(root) || !root.querySelector('canvas.sprite-v4')) {
-      _v4RosterRaf = null; return;
-    }
-    const t = performance.now();
-    for (const c of canvases) {
-      if (!c.ctx || typeof c.draw !== 'function') continue;
-      try {
-        c.ctx.clearRect(0, 0, SIZE, SIZE);
-        c.draw(c.ctx, frame, 'idle', t);
-      } catch (_) { /* one bad sprite shouldn't kill the loop */ }
-    }
-    frame = (frame + 1) % 60;
-    _v4RosterRaf = requestAnimationFrame(tick);
-  };
-  // ~20fps is plenty for idle bobbing and keeps CPU low.
-  _v4RosterRaf = requestAnimationFrame(function loop() {
-    tick();
+  // STATIC render — draw a single idle frame (frame 0). No RAF loop, so the
+  // sprites don't jitter/shake in the roster (operator request).
+  root.querySelectorAll('canvas.sprite-v4').forEach((c) => {
+    const ctx = c.getContext('2d');
+    if (!ctx) return;
+    ctx.imageSmoothingEnabled = false;
+    const draw = list[Number(c.dataset.i)].draw;
+    if (typeof draw !== 'function') return;
+    try {
+      ctx.clearRect(0, 0, SIZE, SIZE);
+      draw(ctx, 0, 'idle', 0);
+    } catch (_) { /* one bad sprite shouldn't break the grid */ }
   });
   return true;
 }

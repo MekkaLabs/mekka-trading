@@ -44,6 +44,13 @@ const STATIONS = [
 
 const STATIONS_BY_ID = STATIONS.reduce((m, s) => { m[s.id] = s; return m; }, {});
 
+/* Real hero names on the floor labels. SPRITES_V3 entries carry the actual
+   hero codename (FLASH, IRONMAN, SUPERMAN…); the station ids are internal
+   nicknames (velox, aegis, nimbus…). Show the real hero name to the operator. */
+const _SPRITE_BY_ID = (((window.SPRITES_V3 || {}).list) || [])
+  .reduce((m, s) => { m[s.id] = s; return m; }, {});
+const HERO_NAME = (id) => (_SPRITE_BY_ID[id] && _SPRITE_BY_ID[id].codename) || id;
+
 /* ════════ ROOMS + DOORS — for pathfinding ════════ */
 /* Door positions chosen so each room exits cleanly into a hallway.
    HALL_Y = main horizontal corridor below all rooms (y=970).
@@ -303,7 +310,7 @@ function Agent({ trader, state, fireKey, bubble, onClick }) {
         fontFamily: 'JetBrains Mono, monospace',
         textTransform: 'uppercase', fontWeight: 600,
         whiteSpace: 'nowrap',
-      }}>{trader.id}</div>
+      }}>{HERO_NAME(trader.id)}</div>
 
       {/* Speech / thought bubble */}
       {bubble && <Bubble bubble={bubble} accent={zAccent} />}
@@ -499,7 +506,7 @@ function StationDesk({ station }) {
         <div style={{
           fontSize: 7, color: zAccent, letterSpacing: 1, fontWeight: 700,
           fontFamily: 'JetBrains Mono, monospace',
-        }}>{station.id}</div>
+        }}>{HERO_NAME(station.id)}</div>
         <MiniSpark seed={seed} color={zAccent} />
       </div>
 
