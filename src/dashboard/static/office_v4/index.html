@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<base href="/office-v4/" />
+<title>Mekka Trading — Office v4 · Living Floor</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #020812; overflow: hidden; }
+  body { font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace; }
+  canvas { image-rendering: pixelated; }
+  ::selection { background: #1a3a5c; color: #e7f0fb; }
+  button:hover { filter: brightness(1.2); }
+</style>
+
+<!-- React/ReactDOM served locally (same-origin, no CDN/SRI). React 18.3.1
+     matches what office-v4-app.jsx expects (ReactDOM.createRoot). -->
+<script src="react.js"></script>
+<script src="react-dom.js"></script>
+<!-- Babel from unpkg (allowed by the relaxed /office-v4 CSP). Babel-standalone
+     auto-transforms the static type="text/babel" scripts at DOMContentLoaded. -->
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- Plain JS engines/sprites — expose window.PX / FX / SPRITES / SPRITES_V3 -->
+<script src="pixel-engine.js"></script>
+<script src="pixel-engine-v3.js"></script>
+<script src="effects.js"></script>
+<script src="sprites.js"></script>
+<script src="sprites-v3.js"></script>
+<script src="sprites-v3-factory.js"></script>
+<!-- JSX (transpiled in-browser by Babel-standalone) -->
+<script type="text/babel" src="sprite-canvas.jsx"></script>
+<script type="text/babel" src="office-v4-app.jsx"></script>
+</body>
+</html>

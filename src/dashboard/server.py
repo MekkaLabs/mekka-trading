@@ -140,7 +140,7 @@ async def _security_headers_middleware(
     # uses `Function`/`eval` on parsed source. The strict CSP would block
     # that, so we relax `script-src` to include `unsafe-eval` ONLY for
     # paths under `/office-v2/`. The main dashboard keeps the strict CSP.
-    if request.path.startswith("/office-v2"):
+    if request.path.startswith("/office-v2") or request.path.startswith("/office-v4"):
         relaxed = _DASHBOARD_CSP.replace(
             "script-src 'self'",
             "script-src 'self' 'unsafe-eval' 'unsafe-inline'",
@@ -479,6 +479,12 @@ class MekkaDashboardServer:
                 "/office-v2/", self._handle_office_v2_index
             )
             self._app.router.add_static("/office-v2/", path=office_v2_dir)
+        # Office v4 — novo design (living floor 2000×1200). Mesmo esquema do v2.
+        office_v4_dir = STATIC_DIR / "office_v4"
+        if office_v4_dir.exists():
+            self._app.router.add_get("/office-v4", self._handle_office_v4_index)
+            self._app.router.add_get("/office-v4/", self._handle_office_v4_index)
+            self._app.router.add_static("/office-v4/", path=office_v4_dir)
 
     async def _on_startup(self, _: web.Application) -> None:
         await MekkaRepository.initialize()
@@ -1562,6 +1568,10 @@ class MekkaDashboardServer:
     async def _handle_office_v2_index(self, _: web.Request) -> web.FileResponse:
         """Serve the Office v2 single-page app entrypoint."""
         return web.FileResponse(STATIC_DIR / "office_v2" / "index.html")
+
+    async def _handle_office_v4_index(self, _: web.Request) -> web.FileResponse:
+        """Serve the Office v4 (new living-floor design) entrypoint."""
+        return web.FileResponse(STATIC_DIR / "office_v4" / "index.html")
 
     # ------------------------------------------------------------------
     # Auth flow (login / logout / whoami)
