@@ -1413,8 +1413,10 @@ function OfficeV4App() {
   useEffect(() => {
     const update = () => {
       const w = window.innerWidth;
-      const h = window.innerHeight - 50;
-      setScale(Math.min(w / 2000, h / 1200, 1));
+      const h = window.innerHeight;
+      // Fill the available space (allow up to 1.5x upscale so the floor isn't
+      // tiny inside a wide embed). Container aspect ≈ 2000/1200 → minimal gaps.
+      setScale(Math.min(w / 2000, h / 1200, 1.5));
     };
     update();
     window.addEventListener('resize', update);

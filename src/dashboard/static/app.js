@@ -529,6 +529,9 @@ function remountOfficeV2Panel() {
 function _sizeOfficeFrame(rawHeight) {
   const frame = document.getElementById('office-v2-frame');
   if (!frame) return;
+  // Office v4 self-scales to its container (aspect-ratio in CSS) — the v2
+  // scrollHeight-based auto-resize would fight it, so skip entirely for v4.
+  if ((frame.getAttribute('src') || '').includes('office-v4')) return;
   const sec = document.getElementById('sec-office');
   if (sec && sec.classList.contains('page-section-hidden')) return; // hidden → skip
   let h = rawHeight;
