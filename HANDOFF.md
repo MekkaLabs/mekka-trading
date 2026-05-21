@@ -1,116 +1,103 @@
-# 🤝 Mekka Trading — Handoff para o próximo chat
+# 🤝 Mekka Trading — Handoff (sessão longa) para o próximo chat
 
-> **Data**: 2026-05-20 (sessão 4 — longa) · atualizado fim da sessão
-> **Branch**: `main` — **44 commits ahead** de `origin/main`, nada pushed (push é do @devops)
-> **Estado**: ✅ rodando em **Bybit testnet LIVE mode**, dashboard saudável (porta 8787)
-> **Próximo chat**: cole este arquivo como contexto inicial.
-
-## 🆕 Últimos itens desta sessão (continuar a partir daqui)
-- **Office v4 (novo design) é o office padrão** em `/office-v4/` e no iframe da Visão Geral. Ajustado para ocupar **largura total** + aspect-ratio 2000/1200 (estava pequeno). Arquivos: `src/dashboard/static/office_v4/`.
-- **Sprites v4 no roster + página de Agentes**: `renderAgentsRoster` agora usa `window.SPRITES_V3` (22 personagens animados). Para **adicionar novo agente**: inclua-o em `sprites-v3-factory.js` (lista `ALL_V3`/config) → aparece no roster automaticamente; para ele aparecer NO OFFICE também, adicione uma `STATION` em `office_v4/office-v4-app.jsx` (array `STATIONS`).
-- **Botão Aceitar (melhorias) — RESOLVIDO de vez**: a causa era o GET `/api/improvements` levar 6–10s (Beast+Galactus) e o accept re-rodar tudo (card sumia). Agora: cache TTL 20s no backend (0.1s) + update local instantâneo no front. (commit 507274d)
-
-### ⏭️ Próximas implementações (pedidas, ainda PENDENTES)
-1. **Wire de dados reais no Office v4** — hoje usa MOCK do protótipo (tickers/PnL/eventos falsos). Ligar aos feeds reais: `/api/overview`, `/ws` (broadcast), sinais do Vision, posições, e disparar os "powers" L1→L2→L3→L4 em eventos de trade reais. É o próximo passo natural do office.
-2. **Sprites v4 em QUALQUER outro local** que ainda use sprite antigo (auditar; roster + agents page já feitos).
-3. **Verificação visual** geral no navegador (preview do ambiente instável).
+> **Data**: 2026-05-21
+> **Branch**: `main` — **~56 commits ahead** de `origin/main`, **nada pushed** (push é do @devops)
+> **Estado**: ✅ rodando em **Bybit testnet LIVE mode**, dashboard saudável (todos endpoints 200)
+> **Próximo foco**: construir o **Departamento de Melhoria Contínua** (design em `docs/CONTINUOUS-IMPROVEMENT-DEPARTMENT.md`).
+> **Como retomar**: cole este arquivo + leia `docs/CONTINUOUS-IMPROVEMENT-DEPARTMENT.md`.
 
 ---
 
-## 1. Como o sistema está rodando
-
-- Processo `run.py --dashboard` na **porta 8787** · Python `.venv313/bin/python` (3.13)
-- Dashboard: http://localhost:8787 · Office: http://localhost:8787/office-v2/ · Log: `/tmp/mekka_dashboard.log`
-
-### ⚠️ Subir SEMPRE com env limpa (gotcha histórico)
-O shell tem `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` vazios que sobrepõem o `.env`:
+## 1. Como rodar (gotcha histórico — env limpa!)
+O shell tem `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` **vazios** que sobrepõem o `.env`. Suba SEMPRE assim:
 ```bash
+cd /Users/gustavovicente/Documents/Mekka-Trading
 lsof -ti tcp:8787 | xargs kill -9 2>/dev/null; sleep 1
 env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY \
   nohup .venv313/bin/python run.py --dashboard > /tmp/mekka_dashboard.log 2>&1 &
-# boot ~25s (roda 1 ciclo completo). Aguardar com:
 until curl -s --max-time 5 http://localhost:8787/api/system/status >/dev/null; do sleep 3; done
 ```
+- Dashboard http://localhost:8787 · Office novo http://localhost:8787/office-v4/ · Python `.venv313`.
+- Boot ~25s (1º ciclo trava o event loop; `get_overview timed out` no log é **benigno**).
+- **Preview MCP do ambiente é instável** → validei tudo por `curl`/código. **Verificação visual no navegador ainda pendente** (hard refresh Cmd+Shift+R).
 
-### `.env` ativo
-```
-ACTIVE_EXCHANGE=bybit · BYBIT_TESTNET=true · PAPER_TRADING=false · LIVE_TRADING_CONFIRMED=true
-TRADING_ASSETS=BTC · MAX_POSITION_SIZE_PCT=0.005 · MAX_LEVERAGE=2 · max_total_notional_usd=$100
-ANTHROPIC_API_KEY presente (OPENAI vazio → Vision usa Anthropic)
-TELEGRAM_INBOUND_ENABLED=false  ⚠️ ver gotcha #1
-```
+`.env` ativo: `ACTIVE_EXCHANGE=bybit · BYBIT_TESTNET=true · PAPER_TRADING=false · LIVE_TRADING_CONFIRMED=true · TRADING_ASSETS=BTC · MAX_POSITION_SIZE_PCT=0.005 · MAX_LEVERAGE=2 · max_total_notional_usd=$100 · TELEGRAM_INBOUND_ENABLED=false`.
 
 ---
 
-## 2. ✅ Entregue nesta sessão (35 commits — destaques)
-
-### Dashboard / Visão Geral
-- **Power control no topbar** (LIGADO/DESLIGADO/Reboot) via `RuntimeController` em processo. Desligar **cancela o loop** → para trading e **gasto de tokens**; dashboard segue vivo como control plane. Endpoints `/api/system/{status,start,stop,reboot}`.
-- **Office sem scroll interno** (auto-resize do iframe) + **Layer Map + Roster** ao lado do office + **Central de Comandos** do operador.
-- **Office com 24 agentes** (Mekka/Galactus/Beast/Jean Grey ganharam mesa em L4).
-- **🧠 Grafo de Conexões Neurais (segundo cérebro)**: force-graph do vault (88 notas/176 links). `JeanGrey.build_graph()` + `GET /api/jean/graph`. Lib `force-graph` via CDN (CSP já permite).
-- **Memória em tempo real**: bloco "Memória de Trabalho" (`/api/working-memory`), feed "Últimas Atualizações", refresh 12s, indicador "🟢 ao vivo · há Xs".
-- **Página de Configurações** reformulada: grupos por categoria, busca, presets (mostrar/ocultar/restaurar), toggle-all, contador.
-- **Tema claro** agora clareia sidebar/menus/chrome (eram cores hardcoded).
-- **Logo da sidebar branco** (escuro) / slate (claro).
-- **Tooltips "?" em 100% dos painéis** (39/39) com explicação leiga + responsável.
-
-### Bugs corrigidos
-- **Aceitar (melhorias)**: travava porque rodava o conselho no backend a cada accept. Agora o front envia o rec → enfileira direto (0.05s). (`3de043e`)
-- **Executar trade**: Modo Deus não forçava de verdade (IronMan pulava approval REJECTED). Agora monta approval executável e **envia a ordem**. Bloqueio restante é da **Bybit (retCode 10024 KYC/regulatório)** — exchange-side; mensagem clara. **Para abrir posição sem KYC: paper trading.** (`c62b794`)
-- **Gráfico live em branco**: shim de compat com lightweight-charts v5. (`19754b1`)
-- **Bugs latentes**: `_hl_prices`→`_mark_prices`; TDZ `_tsSummaryTimer`.
-
-### Telegram (frente nova)
-- **Poller no control plane** (sobrevive a stop/start). Comandos: `/sistema /ligar /desligar /reboot`, `/melhorias /aprovar <id> /reprovar <id>` (sincronizado com a Central de Melhorias do dashboard — mesma `record_decision`).
-- **Outbound**: `improvement_proposed` (push de propostas pendentes, dedup), `system_state` (liga/desliga/reboot), kill switch engage/release notificam o Telegram.
-
-### Pipeline melhorias → dev → PR
-- Aceitar enfileira `docs/improvement-queue/IMP-<id>.md` (brief com premortem do Galactus). `pr_tracker` + `/api/improvements/{pr-status,approve-pr}`. Painel com ciclo Fila→Em dev→PR aberto→Mergeado e botão Aprovar PR.
-- Brief já na fila: `IMP-office-full-noscroll.md`.
+## 2. ⚠️ Flags que o operador precisa ativar (decisão dele; não mexi no .env)
+1. `TELEGRAM_INBOUND_ENABLED=true` → liga os comandos inbound do Telegram (`/sistema /ligar /desligar /reboot /melhorias /aprovar /reprovar`). Código pronto; poller só inicia com a flag.
+2. `MEKKA_DASHBOARD_TOKEN=...` → tranca os POSTs do dashboard (auth já existe no `_auth_middleware`).
+3. `PAPER_TRADING=true` → para ver posição abrindo sem o bloqueio **KYC da Bybit** (retCode 10024).
 
 ---
 
-## 3. ⚠️ Gotchas / pendências importantes
+## 3. ✅ Entregue nesta sessão (destaques)
+**Dashboard / UX**
+- **Office v4** (novo design do zip): living floor 2000×1200 em `/office-v4/` (React local + Babel unpkg, CSP estendida). Largura total na Overview + aspect-ratio (sem margens). **Nomes reais dos heróis** no floor (FLASH/IRONMAN/SUPERMAN/MEKKA via `HERO_NAME`). Roster **estático** (sem tremer).
+- **Power control** no topbar (LIGADO/DESLIGADO/Reboot) via `RuntimeController`; desligar para o loop → **para gasto de tokens**; dashboard sempre vivo. `/api/system/{status,start,stop,reboot}`.
+- **Tooltips "?"** 100% dos painéis (fix: CSS lia `attr(title)`, JS setava `data-tip`; agora abaixo do "?" com z-index 9999 — não some atrás do menu).
+- **Configurações**: customizador com grupos por categoria, busca, presets, contador.
+- **Tema claro**: sidebar/menus/chrome + contraste AA (melhoria entregue do conselho).
+- **Memória em tempo real**: bloco "Memória de Trabalho", feed "Últimas Atualizações", refresh 12s, "🟢 ao vivo".
+- **Grafo neural (segundo cérebro)** na Overview: force-graph do vault (`/api/jean/graph`).
 
-1. **`TELEGRAM_INBOUND_ENABLED=false`** → os comandos inbound do Telegram (ligar/desligar/melhorias/etc.) **não rodam** até o operador setar `=true` no `.env`. O código está pronto; o poller só inicia com a flag ligada. Outbound (alertas/push) já funciona com `telegram_enabled`.
-2. **Bybit testnet bloqueia ordens (retCode 10024 KYC)** — não é bug. Para ver posição abrir: ativar `PAPER_TRADING=true` (decisão do operador) ou concluir KYC/trocar exchange.
-3. **Boot ~25s** trava o event loop no 1º ciclo (DB `get_overview` dá timeout benigno — "serving last known payload"). Não é erro real.
-4. **Preview MCP do ambiente está instável** — toda a verificação foi por `curl`/código. **Falta verificação visual no navegador** (hard refresh Cmd+Shift+R): logo branco, Configurações nova, grafo neural, memória ao vivo, tema claro, office sem scroll.
-5. **Nada pushed** (35 commits). Push/PR é tarefa do @devops.
-6. `MAX_POSITION_SIZE_PCT=0.005` + cap `$100` → Batman rejeita trades default por notional; Modo Deus contorna em paper/testnet.
+**Melhorias (a área foco)**
+- **Aceitar/Reprovar funcionam** (bug raiz: CSP bloqueava `onclick` inline → migrado para event delegation; idem os 10 onclicks do index.html).
+- **Kanban** (Pendente→Aprovada→Em dev→Entregue→Reprovada) + **abas de status** (Novas/Em andamento/Fechadas/Todas, default Novas) + **contadores**.
+- **Ciclo completo**: aceitar → enfileira brief `docs/improvement-queue/IMP-<id>.md` → desenvolvido → card de PR → **Aprovar PR** → **Entregue** (`mark_merged` local).
+- **Botão "🔎 Buscar melhorias agora"** → roda o conselho na hora (`?fresh=1` bypassa cache 20s) com feedback estilo executar-trade.
+- **As 2 melhorias aprovadas foram desenvolvidas e entregues**: contraste do modo claro + **server.py passo 1** (registro de rotas agrupado em 12 domínios; 107 rotas íntegras, boot OK).
+- Sincronizado com **Telegram** (push de propostas + `/aprovar`/`/reprovar`).
+
+**Trade / segurança**
+- Modo Deus agora **executa de fato** (IronMan submetia REJECTED → skip; agora monta approval executável). Bloqueio restante = **Bybit KYC** (exchange-side; mensagem clara).
+- Alertas Telegram de **kill switch** (engage/release) e **Modo Deus**.
+
+**Bugs corrigidos de quebra**: `_hl_prices`→`_mark_prices`; TDZ `_tsSummaryTimer`; gráfico live (shim lightweight-charts v5); poll do power com retry.
 
 ---
 
-## 4. 🎯 Backlog restante
+## 4. 🧠 A ÁREA FOCO: Departamento de Melhoria Contínua
+**Leia `docs/CONTINUOUS-IMPROVEMENT-DEPARTMENT.md`** — tem a metodologia atual, o papel da Jean Grey e o **design-alvo completo**.
 
-- **#21 fino**: padronizar o resto das mensagens do Telegram (tom/formato) — subjetivo, alinhar com operador.
-- **i18n EN completo (d)**: hoje só nav+topbar traduzem (`applyLanguage`); resto é PT hardcoded. Baixo valor (operador usa PT).
-- **Office v4 (novo design)** integrado em `/office-v4/` e já é o iframe da Visão Geral (commit 079f52a). Living floor 2000×1200, 22 agentes, salas, pathfinding, sprites pixel-art. ⏳ **Pendente**: (a) verificação visual no navegador; (b) **wire de dados reais** — hoje usa o mock do protótipo (tickers/PnL falsos); ligar ao trading real (sinais Vision, posições, PnL) é o próximo passo do office. Arquivos em `src/dashboard/static/office_v4/`. v2 antigo permanece em `/office-v2/`.
-- **Verificação visual** de tudo da sessão (preview estava quebrado).
-- **Consumidor do improvement-queue**: sessão Claude Code (manual/headless) que lê `docs/improvement-queue/`, roda o SDC do AIOS e registra o PR via `pr_tracker.set_pr` → painel mostra o PR p/ aprovar.
-- **Fase 3 — status atualizado nesta sessão:**
-  - ✅ **Black Panther já é on-chain REAL** (não é stub): busca funding/OI/whale-flow da Hyperliquid (`metaAndAssetCtxs` + trades). Verificado (funding≈0.00013, OI real). Um "Iceman" com DeFi on-chain profundo exigiria provider externo pago (Arkham/Nansen) — fora de escopo sem API key.
-  - ✅ **Cybersec**: `_auth_middleware` já exige auth em todos os POSTs quando `MEKKA_DASHBOARD_TOKEN` ou `MEKKA_DASHBOARD_PASSWORD` está setado (hoje vazio = dev aberto → **setar `MEKKA_DASHBOARD_TOKEN` no `.env` para ativar**). Alertas Telegram de kill switch e Modo Deus adicionados.
-  - ⏳ **Refactor `server.py` (~6k linhas) → routers por domínio**: ÚNICO item grande restante. Risco alto num sistema live — recomendado fazer via SDC dedicado (@architect→@dev→@qa) com testes, NÃO ad-hoc. Já é a 1ª recomendação do conselho de melhorias.
+**Resumo do pedido do operador:** a área deve melhorar **tudo** (agentes de trade, frontend, backend, infra, memória) e **buscar conhecimento fora** (repo/GitHub, internet, bases de trading), como um departamento de melhoria contínua de empresa, sob medida pro projeto.
+
+**Como funciona HOJE** (ao clicar "Buscar melhorias"): Beast varre 4 fontes de runtime de trade (trades/gates/latência/qualidade de sinal) + inbox manual → Galactus faz premortem (hunger 0-100 + verdito) → Mekka consolida/ranqueia → operador decide. **Jean Grey** só audita o vault (não propõe ainda).
+
+**Plano-alvo (próximo épico, via SDC):**
+1. **CodeAuditor** (novo) — audita repo (arquivos grandes, TODO/FIXME, testes ausentes, ruff/mypy) → propostas dev **automáticas** (front/back).
+2. **RiskScanner** + **OpsScanner** — kill switch/drawdown/exposição + erros/logs recorrentes.
+3. **Jean Grey → MemoryScanner** — passa a **propor** (vault + padrões de decisão).
+4. **ExternalResearcher** — WebSearch/WebFetch + GitHub (changelog/CVEs) + MCPs financeiros (LSEG/bigdata) para técnicas de trading.
+5. **Loop de medição** (baseline antes/depois) + KPI do departamento.
+6. UI: filtrar por fonte/scanner; aba "Pesquisa externa".
+
+Guard-rails: scanners **read-only/fail-silent**; humano aprova; **nunca** auto-merge nem toca `settings.py`/kill switch (L1-L4 + deny rules).
 
 ---
 
-## 5. 🛠️ Health check rápido
+## 5. Arquivos-chave
+- Conselho: `src/agents/{beast,galactus,mekka,jean_grey}.py` (+ novos scanners no épico).
+- Orquestração: `Mekka._beast_proposals` → generalizar para agregar todos os scanners.
+- API: `src/dashboard/server.py` (rotas agrupadas em `_register_*_routes`; endpoints improvements/jean/system).
+- Fila/PR: `src/services/{improvement_queue,pr_tracker}.py` (`enqueue_brief`, `set_pr`, `approve_pr`, `mark_merged`).
+- UI: `src/dashboard/static/{app.js,index.html,style.css}` (`_imprLoad/_imprRender/_imprScan/_imprRenderKanban`, abas, grafo neural).
+- Office novo: `src/dashboard/static/office_v4/` (servido em `/office-v4/`).
+- Runtime control: `src/runtime_controller.py`. Telegram: `src/services/telegram_{alerter,inbound}.py`.
+
+## 6. Health check
 ```bash
 lsof -nP -iTCP:8787 -sTCP:LISTEN
-curl -s localhost:8787/api/system/status        # estado do runtime
+curl -s localhost:8787/api/system/status
+curl -s "localhost:8787/api/improvements?fresh=1" | python3 -c "import sys,json;d=json.load(sys.stdin);print(len(d.get('recommendations',[])),'recs')"
 curl -s localhost:8787/api/jean/graph | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['total_notes'],'notas',d['total_links'],'links')"
-grep -iE "Traceback|AttributeError" /tmp/mekka_dashboard.log | grep -v "get_overview\|wait_for\|_broadcast_loop\|_collect_payload\|with_traceback"  # deve ser vazio
 ```
 
-## 6. Arquivos-chave tocados
-- `src/runtime_controller.py` (lifecycle on/off/reboot + attach_poller + notify)
-- `src/dashboard/server.py` (endpoints system/jean-graph/improvements + telegram hooks)
-- `src/services/telegram_inbound.py` (comandos sistema+conselho, poller control-plane)
-- `src/services/telegram_alerter.py` (improvement_proposed, system_state)
-- `src/services/{improvement_queue,pr_tracker}.py` (fila → PR)
-- `src/agents/{jean_grey,mekka}.py` (build_graph, record_decision)
-- `src/dashboard/static/{app.js,index.html,style.css}` (todo o frontend)
+## 7. Backlog (depois do épico de melhoria contínua)
+- **Wiring de dados reais no Office v4** (hoje usa mock do protótipo: tickers/P&L/sinais/eventos).
+- **server.py passo 2**: extrair handlers para módulos por domínio (mixins) — reduzir as 6,4k linhas.
+- i18n EN completo (baixo valor — operador usa PT).
+- Verificação visual de tudo (preview do ambiente estava quebrado).
 
 **Fim do handoff.**
