@@ -464,6 +464,7 @@ class MekkaDashboardServer:
         r.add_get("/api/trades", self._handle_trades)
         r.add_get("/api/audit", self._handle_audit)
         r.add_get("/api/env", self._handle_env)
+        r.add_get("/api/mainnet-readiness", self._handle_mainnet_readiness)
         r.add_get("/api/today-summary", self._handle_today_summary)
         r.add_get("/api/prefs", self._handle_prefs_get)
         r.add_post("/api/prefs", self._handle_prefs_set)
@@ -3438,6 +3439,33 @@ class MekkaDashboardServer:
 
         logger.info("Active exchange changed to '%s' via dashboard API", ex)
         return web.json_response({"ok": True, **summary()})
+
+    async def _handle_mainnet_readiness(self, _: web.Request) -> web.Response:
+        """GET /api/mainnet-readiness — run the mainnet preflight and return its
+        per-gate verdicts so the operator can see go-live readiness in the
+        dashboard (no CLI). Read-only, fail-silent, time-boxed."""
+        import sys as _sys
+        from pathlib import Path as _Path
+        repo_root = str(_Path(__file__).resolve().parents[2])
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                _sys.executable, "scripts/preflight_mainnet.py", "--json",
+                cwd=repo_root,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                out, _err = await asyncio.wait_for(proc.communicate(), timeout=25.0)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                return web.json_response({"ok": False, "error": "preflight timed out"}, status=200)
+            data = json.loads(out.decode("utf-8") or "{}")
+            return web.json_response({"ok": True, **data}, status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("mainnet-readiness failed: %s", exc)
+            return web.json_response({"ok": False, "error": str(exc)}, status=200)
 
     async def _handle_env(self, _: web.Request) -> web.Response:
         """GET /api/env — environment & safety posture for the UI badge.

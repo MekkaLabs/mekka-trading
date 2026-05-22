@@ -53,7 +53,7 @@ Este é o vault de conhecimento do projeto: arquitetura, decisões, agentes, run
 > Atalhos diretos para notas operacionais e de área (mantém o grafo conectado).
 - **Projetos:** [[Departamento de Melhoria Contínua]]
 - **Arquitetura:** [[Nick Fury Runtime Cycles]]
-- **Operacional:** [[Kill Switch - Operação]] · [[Paper Trading vs Live]] · [[Review Semanal]]
+- **Operacional:** [[Kill Switch - Operação]] · [[Paper Trading vs Live]] · [[Review Semanal]] · [[Histórico Testnet (H1)]]
 - **Risco:** [[Batman - Risk Guardian]]
 - **Trading:** [[Backtesting]]
 - **Recursos:** [[Glossário]] · [[Runbook - Iniciar dashboard web]] · [[Runbook - Iniciar runtime do Megazord]]

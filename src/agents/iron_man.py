@@ -786,6 +786,32 @@ class IronMan(BaseAgent[ExecutionResult]):
         use_market = _etype == "market"
         self._log.info(f"[IronMan/{exchange_id}] entry order type={_etype} (testnet={_is_testnet})")
 
+        # Marketable limit price: a plain limit-IOC at signal.entry_price often
+        # fills 0 if it doesn't cross the book. Price it to CROSS by up to
+        # binance_max_entry_slippage_bps so it fills reliably with a slippage cap.
+        limit_price = float(signal.entry_price)
+        if not use_market:
+            try:
+                _bps = float(getattr(settings, "binance_max_entry_slippage_bps", 20.0) or 0.0)
+                ticker = await exchange.fetch_ticker(ccxt_symbol)
+                ask = float(ticker.get("ask") or 0.0)
+                bid = float(ticker.get("bid") or 0.0)
+                if is_buy and ask > 0:
+                    limit_price = ask * (1.0 + _bps / 10_000.0)
+                elif (not is_buy) and bid > 0:
+                    limit_price = bid * (1.0 - _bps / 10_000.0)
+                try:
+                    limit_price = float(exchange.price_to_precision(ccxt_symbol, limit_price))
+                except Exception:  # noqa: BLE001
+                    pass
+                self._log.info(
+                    f"[IronMan/{exchange_id}] marketable limit price {limit_price} "
+                    f"(entry {signal.entry_price}, cap {_bps:.0f}bps)"
+                )
+            except Exception as _tk_exc:  # noqa: BLE001
+                self._log.warning(f"[IronMan/{exchange_id}] ticker for marketable price failed: {_tk_exc}")
+                limit_price = float(signal.entry_price)
+
         order: Any = None
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
@@ -808,7 +834,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                         type="limit",
                         side=ccxt_side,
                         amount=quantity,
-                        price=signal.entry_price,
+                        price=limit_price,
                         params={"timeInForce": "IOC", "reduceOnly": False},
                     )
 

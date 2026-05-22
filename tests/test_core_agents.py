@@ -42,8 +42,14 @@ class _FakeExchange:
     def amount_to_precision(self, sym, q):
         return float(q)
 
+    def price_to_precision(self, sym, p):
+        return float(round(float(p), 2))
+
     async def fetch_time(self):
         return int(time.time() * 1000)
+
+    async def fetch_ticker(self, sym):
+        return {"ask": 70010.0, "bid": 69990.0, "last": 70000.0}
 
     async def set_leverage(self, lev, sym):
         return {"leverage": lev}
@@ -52,7 +58,8 @@ class _FakeExchange:
         return {"USDT": {"free": 1_000_000.0}}
 
     async def create_order(self, symbol, type, side, amount, price=None, params=None):
-        self.calls.append({"type": type, "side": side, "amount": amount, "params": params or {}})
+        self.calls.append({"type": type, "side": side, "amount": amount,
+                           "price": price, "params": params or {}})
         if type == "limit":  # entry — fills fully
             return {"id": "ENTRY1", "filled": amount, "average": price or 0.0}
         if type == "stop_market":
@@ -278,3 +285,64 @@ def test_mekka_consolidate_survives_recommends():
     assert rec.decision == "RECOMMEND"
     assert rec.priority == "P1"  # HIGH + not rejected
     assert rec.source == "risk_scanner"
+
+
+# ---------------------------------------------------------------------------
+# M1 — Batman mainnet first-week HARD CLAMP
+# ---------------------------------------------------------------------------
+
+async def test_batman_mainnet_hard_clamp(monkeypatch):
+    from src.agents.batman import Batman
+    from src.config.settings import settings
+    # Simulate Binance mainnet, live, clamp enabled.
+    monkeypatch.setattr(settings, "paper_trading", False)
+    monkeypatch.setattr(settings, "active_exchange", "binance")
+    monkeypatch.setattr(settings, "binance_testnet", False)
+    monkeypatch.setattr(settings, "mainnet_first_week_hard_clamp", True)
+
+    sig = TradingSignal(
+        symbol="BTC", action=TradeAction.LONG, confidence=0.85,
+        entry_price=100.0, stop_loss=98.0, take_profit=106.0,
+        size_pct=0.05, leverage=5, reasoning="test",
+    )
+    approval = await Batman().run(signal=sig, equity_usd=10_000.0, current_drawdown_pct=0.0)
+    if approval.is_executable:
+        assert approval.adjusted_size_pct <= 0.001 + 1e-9
+        assert approval.adjusted_leverage <= 2
+
+
+async def test_batman_no_clamp_on_testnet(monkeypatch):
+    from src.agents.batman import Batman
+    from src.config.settings import settings
+    monkeypatch.setattr(settings, "paper_trading", False)
+    monkeypatch.setattr(settings, "active_exchange", "binance")
+    monkeypatch.setattr(settings, "binance_testnet", True)  # testnet → no clamp
+    monkeypatch.setattr(settings, "mainnet_first_week_hard_clamp", True)
+
+    sig = TradingSignal(
+        symbol="BTC", action=TradeAction.LONG, confidence=0.85,
+        entry_price=100.0, stop_loss=98.0, take_profit=106.0,
+        size_pct=0.02, leverage=3, reasoning="test",
+    )
+    approval = await Batman().run(signal=sig, equity_usd=10_000.0, current_drawdown_pct=0.0)
+    # On testnet the mainnet clamp must NOT fire.
+    assert "mainnet_first_week_size_clamp" not in (approval.breached_limits or [])
+
+
+# ---------------------------------------------------------------------------
+# M2 — marketable limit entry crosses the book
+# ---------------------------------------------------------------------------
+
+async def test_ironman_marketable_limit_crosses(monkeypatch):
+    from src.agents.iron_man import IronMan
+    from src.config.settings import settings
+    monkeypatch.setattr(settings, "binance_entry_order_type", "limit_ioc")
+    monkeypatch.setattr(settings, "binance_max_entry_slippage_bps", 20.0)
+    im = IronMan(); fake = _FakeExchange(sl_fails=False); im._ccxt_exchange = fake
+    await im._place_ccxt_order(signal=_signal(entry=70000.0), quantity=0.01,
+                               leverage=2, size_pct=0.01, exchange_id="binance")
+    entry_call = fake.calls[0]
+    assert entry_call["type"] == "limit"
+    # Buy entry priced to cross above the ask (70010) by up to 20bps.
+    assert entry_call["price"] > 70010.0
+    assert entry_call["price"] <= 70010.0 * 1.0021  # within the slippage cap

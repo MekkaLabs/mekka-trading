@@ -1332,6 +1332,34 @@ class Batman(BaseAgent[RiskApproval]):
                 self._log.debug("[Batman] Asset classifier gate skipped: %s", _tier_exc)
 
         # ---------------------------------------------------------------
+        # 5b. Mainnet first-week HARD CLAMP (real-money safety)
+        # On Binance mainnet (live, non-testnet), clamp size/leverage DOWN to the
+        # conservative first-week caps so a loose config or a large model-suggested
+        # size cannot risk real money. Only ever tightens; never loosens.
+        # ---------------------------------------------------------------
+        if (
+            getattr(settings, "mainnet_first_week_hard_clamp", True)
+            and not settings.paper_trading
+            and settings.active_exchange == "binance"
+            and not bool(getattr(settings, "binance_testnet", False))
+        ):
+            _cap_size, _cap_lev = 0.001, 2
+            if adjusted_size > _cap_size:
+                reasons.append(
+                    f"Mainnet 1ª semana: size {adjusted_size:.4f}→{_cap_size} (clamp duro)"
+                )
+                adjusted_size = _cap_size
+                if "mainnet_first_week_size_clamp" not in breached:
+                    breached.append("mainnet_first_week_size_clamp")
+            if adjusted_leverage > _cap_lev:
+                reasons.append(
+                    f"Mainnet 1ª semana: lev {adjusted_leverage}→{_cap_lev}x (clamp duro)"
+                )
+                adjusted_leverage = _cap_lev
+                if "mainnet_first_week_lev_clamp" not in breached:
+                    breached.append("mainnet_first_week_lev_clamp")
+
+        # ---------------------------------------------------------------
         # 6. Final verdict
         # ---------------------------------------------------------------
         if adjusted_size <= 0:

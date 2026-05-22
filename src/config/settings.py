@@ -146,6 +146,23 @@ class Settings(BaseSettings):
             "can be tested) and 'limit_ioc' on mainnet (slippage control)."
         ),
     )
+    binance_max_entry_slippage_bps: float = Field(
+        default=20.0,
+        description=(
+            "Max slippage (basis points) for a mainnet limit-IOC entry. The entry "
+            "limit is priced to CROSS the book by up to this much (buy=ask*(1+bps), "
+            "sell=bid*(1-bps)) so it fills reliably while capping slippage. 20 = 0.20%."
+        ),
+    )
+    mainnet_first_week_hard_clamp: bool = Field(
+        default=True,
+        description=(
+            "When True AND running on Binance mainnet (live, non-testnet), Batman "
+            "HARD-CLAMPS size to 0.1% and leverage to 2x (the conservative first-week "
+            "caps) — not just a warning. Only ever tightens risk. Disable after the "
+            "first week once comfortable."
+        ),
+    )
 
     # --------------------------------------------------------------------------
     # Telegram
