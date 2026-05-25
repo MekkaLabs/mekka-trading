@@ -1,3 +1,22 @@
+// ── Timer registry (C1 fix) — MUST be at top to avoid TDZ ─────────
+// Top-level callers like `_registerInterval(setInterval(refreshApiHealth,
+// 30000))` execute very early in this script. Without declaring the Set
+// here, the hoisted function would throw "Cannot access '_registeredTimers'
+// before initialization" and kill the entire boot silently (no console.error
+// — just an exception that aborts the script and leaves all 47 panels
+// visible because _PAGE_SECTIONS never initializes).
+const _registeredTimers = new Set();
+function _registerInterval(handle) {
+  if (handle != null) _registeredTimers.add(handle);
+  return handle;
+}
+function _clearAllRegisteredTimers() {
+  for (const h of _registeredTimers) {
+    try { clearInterval(h); } catch (_) { /* noop */ }
+  }
+  _registeredTimers.clear();
+}
+
 const statusPill = document.getElementById('status-pill');
 const langToggle = document.getElementById('lang-toggle');
 const themeToggleBtn = document.getElementById('theme-toggle');
@@ -3174,26 +3193,12 @@ if (marketRefreshInterval) marketRefreshInterval.addEventListener('change', () =
 // another tab — and immediately fetches fresh data when they come back.
 function _clearTimer(t) { if (t) clearInterval(t); return null; }
 
-/**
- * Timer registry — captura handles de setInterval que não têm variável
- * explícita (refreshApiHealth, refreshAuthState, _mkLoadEnvBadge, etc.),
- * permitindo limpar TODOS no visibilitychange (C1 fix). Sem isso, esses
- * timers continuam rodando indefinidamente mesmo com aba oculta.
- *
- * Uso: _registerInterval(setInterval(fn, ms))
- * Cleanup: _clearAllRegisteredTimers() — chamado no visibilitychange.hidden
- */
-const _registeredTimers = new Set();
-function _registerInterval(handle) {
-  if (handle != null) _registeredTimers.add(handle);
-  return handle;
-}
-function _clearAllRegisteredTimers() {
-  for (const h of _registeredTimers) {
-    try { clearInterval(h); } catch (_) { /* noop */ }
-  }
-  _registeredTimers.clear();
-}
+// Note: `_registeredTimers` (Set) e helpers `_registerInterval` /
+// `_clearAllRegisteredTimers` foram movidos para o TOPO do arquivo (perto
+// das const refs DOM) porque chamadas top-level como `_registerInterval(
+// setInterval(refreshApiHealth, 30000))` na linha 3051 estavam tentando
+// acessar `_registeredTimers` antes da sua inicialização aqui, causando
+// TDZ ReferenceError silencioso que travava o boot do dashboard inteiro.
 
 function bootCharts() {
   loadReplayCharts();
@@ -3316,8 +3321,15 @@ async function _populateTradesTimelineSymbols() {
     tradesTimelineSymbol.dataset.populated = '1';
   } catch (_) { /* noop */ }
 }
-// Populate on boot — env endpoint is fast and cacheable.
-_populateTradesTimelineSymbols();
+// Populate when DOM is ready — defer to avoid running before app boot completes.
+// Top-level call here was causing TDZ on _PAGE_SECTIONS (script execution order
+// matters with const). Wrapping in DOMContentLoaded keeps it safe.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => _populateTradesTimelineSymbols());
+} else {
+  // Already loaded — schedule for next tick so it's after any inline init.
+  setTimeout(() => _populateTradesTimelineSymbols(), 0);
+}
 
 /**
  * Render the read-only risk-config panel on Settings page.
@@ -3372,8 +3384,12 @@ async function _loadRiskConfig() {
     el.innerHTML = '<div class="muted-line">Erro ao carregar configuração de risco.</div>';
   }
 }
-// Carrega ao boot E quando muda para a página Settings.
-_loadRiskConfig();
+// Defer load — top-level call was causing TDZ on _PAGE_SECTIONS below.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => _loadRiskConfig());
+} else {
+  setTimeout(() => _loadRiskConfig(), 0);
+}
 if (filterMode) {
   filterMode.addEventListener('change', () => {
     savePrefs({ filterMode: filterMode.value || 'contains' });
