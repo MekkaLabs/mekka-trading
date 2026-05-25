@@ -120,6 +120,38 @@ async def handle_kpi(server, _: web.Request) -> web.Response:
     return web.json_response(out, status=200)
 
 
+async def handle_claim(server, request: web.Request) -> web.Response:
+    """POST /api/improvements/claim — mark accepted brief as in_dev.
+
+    Body: {"id": "<rec_id>", "claimer": "<name|email>"}
+    Lets the operator/dev signal "I'm implementing this" so the inbox
+    distinguishes work-in-progress from dead-letter queued briefs.
+    """
+    body = await server._safe_json_body(request) or {}
+    rec_id = str(body.get("id") or "").strip()[:64]
+    claimer = str(body.get("claimer") or "dev").strip()[:64]
+    if not rec_id:
+        return web.json_response(
+            {"ok": False, "reason": "id obrigatório."}, status=400
+        )
+    try:
+        from src.services import pr_tracker  # noqa: WPS433
+
+        result = pr_tracker.claim_brief(rec_id, claimer=claimer)
+        server._impr_cache = None
+        await MekkaRepository.log_event(
+            agent="Dashboard",
+            event="IMPROVEMENT_CLAIMED",
+            severity="INFO",
+            message=f"{claimer} reivindicou implementação de {rec_id}",
+            payload={"rec_id": rec_id, "claimer": claimer, **result},
+        )
+        return web.json_response({"ok": result.get("ok", False), **result}, status=200)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("claim failed: %s", exc, exc_info=True)
+        return web.json_response({"ok": False, "reason": str(exc)}, status=200)
+
+
 async def handle_approve_pr(server, request: web.Request) -> web.Response:
     """POST /api/improvements/approve-pr — operator approves a rec's PR."""
     body = await server._safe_json_body(request) or {}

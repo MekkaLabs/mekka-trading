@@ -177,6 +177,94 @@ def _render_brief(rec: dict, rec_id: str, created_at: str) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
+_VALID_BRIEF_STATES = {"queued", "in_dev", "pr_open", "merged"}
+
+
+def update_brief_status(
+    rec_id: str,
+    new_status: str,
+    pr_number: int | None = None,
+    claimer: str | None = None,
+) -> dict:
+    """Sync the YAML frontmatter of an existing brief.md with the live
+    dev_state. Also updates the runtime index ``improvement_queue.json``.
+
+    Closes the gap where briefs were written with ``status: queued``
+    HARDCODED and never reflected the actual progress (in_dev / pr_open /
+    merged). Fail-silent — returns ``{"ok": False, "error": ...}``.
+
+    Optional fields persisted in the index:
+      - pr_number: integer PR number, if known
+      - claimer: who is implementing this brief
+    """
+    rec_id = str(rec_id or "").strip()
+    if not rec_id:
+        return {"ok": False, "error": "missing rec_id"}
+    if new_status not in _VALID_BRIEF_STATES:
+        return {"ok": False, "error": f"invalid status: {new_status}"}
+
+    # 1) Update the YAML frontmatter of the brief markdown.
+    brief_path = _QUEUE_DIR / f"IMP-{rec_id}.md"
+    brief_updated = False
+    if brief_path.exists():
+        try:
+            content = brief_path.read_text(encoding="utf-8")
+            if content.startswith("---"):
+                # Rewrite the `status:` line in the YAML block.
+                lines = content.split("\n")
+                end_idx = None
+                for i in range(1, min(20, len(lines))):
+                    if lines[i].strip() == "---":
+                        end_idx = i
+                        break
+                if end_idx is not None:
+                    rewritten = []
+                    saw_status = False
+                    for i, line in enumerate(lines):
+                        if 0 < i < end_idx and line.startswith("status:"):
+                            rewritten.append(f"status: {new_status}")
+                            saw_status = True
+                        else:
+                            rewritten.append(line)
+                    if not saw_status:
+                        # Insert just before the closing ---
+                        rewritten.insert(end_idx, f"status: {new_status}")
+                    new_content = "\n".join(rewritten)
+                    brief_path.write_text(new_content, encoding="utf-8")
+                    brief_updated = True
+        except OSError as exc:
+            logger.warning(f"[improvement_queue] could not update brief {rec_id}: {exc}")
+
+    # 2) Update the runtime index — only if the rec_id already exists
+    #    OR the brief file existed (avoids creating phantom index entries
+    #    for IDs that don't correspond to a real brief).
+    index_updated = False
+    try:
+        _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        index = _load_index()
+        if rec_id in index or brief_path.exists():
+            entry = index.get(rec_id) or {"path": str(brief_path), "queued_at": _now()}
+            entry["dev_state"] = new_status
+            entry["updated_at"] = _now()
+            if pr_number is not None:
+                entry["pr_number"] = int(pr_number) if str(pr_number).isdigit() or isinstance(pr_number, int) else pr_number
+            if claimer:
+                entry["claimer"] = str(claimer)
+            index[rec_id] = entry
+            _INDEX_FILE.write_text(
+                json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            index_updated = True
+    except (OSError, ValueError) as exc:
+        logger.warning(f"[improvement_queue] could not update index {rec_id}: {exc}")
+
+    return {
+        "ok": brief_updated or index_updated,
+        "brief_updated": brief_updated,
+        "index_updated": index_updated,
+    }
+
+
 def enqueue_brief(rec: dict) -> str:
     """Write a dev brief for an accepted recommendation and index it.
 

@@ -212,7 +212,56 @@ def mark_merged(rec_id: str) -> dict:
     entry["merged_at"] = _now()
     store[rec_id] = entry
     ok = _save_store(store)
+    # Sync brief YAML — fail-silent (brief may not exist for ad-hoc rec_ids)
+    try:
+        from src.services.improvement_queue import update_brief_status  # noqa: WPS433
+
+        update_brief_status(rec_id, "merged")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[pr_tracker] brief sync skipped for {rec_id}: {exc}")
     return {"ok": bool(ok)}
+
+
+def claim_brief(rec_id: str, claimer: str = "dev") -> dict:
+    """Mark a queued brief as ``in_dev`` (someone is implementing it).
+
+    Lets the operator/dev signal intent so the Inbox UI can show what is
+    actively being worked on vs what is still dead-letter. Idempotent —
+    calling twice with the same claimer is a no-op. Never raises.
+
+    Returns ``{"ok": bool, "error"?: str, "dev_state": "in_dev"}``.
+    """
+    rec_id = str(rec_id or "").strip()
+    if not rec_id:
+        return {"ok": False, "error": "missing rec_id"}
+
+    store = _load_store()
+    entry = store.get(rec_id) or {}
+    # Don't downgrade from pr_open/merged back to in_dev
+    current = str(entry.get("dev_state") or "queued")
+    if current in ("pr_open", "merged"):
+        return {
+            "ok": True,
+            "dev_state": current,
+            "note": f"already at {current}, claim no-op",
+        }
+    entry["dev_state"] = "in_dev"
+    entry["claimer"] = str(claimer or "dev")
+    entry["claimed_at"] = _now()
+    store[rec_id] = entry
+    if not _save_store(store):
+        return {"ok": False, "error": "could not persist store"}
+
+    # Sync brief YAML — fail-silent
+    try:
+        from src.services.improvement_queue import update_brief_status  # noqa: WPS433
+
+        update_brief_status(rec_id, "in_dev", claimer=claimer)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[pr_tracker] brief sync skipped on claim for {rec_id}: {exc}")
+
+    logger.info(f"[pr_tracker] {rec_id} claimed by {claimer}")
+    return {"ok": True, "dev_state": "in_dev", "claimer": claimer}
 
 
 def set_pr(
@@ -246,6 +295,13 @@ def set_pr(
     store[rec_id] = entry
     if not _save_store(store):
         return {"ok": False, "error": "could not persist store"}
+    # Sync brief YAML — fail-silent
+    try:
+        from src.services.improvement_queue import update_brief_status  # noqa: WPS433
+
+        update_brief_status(rec_id, "pr_open", pr_number=pr_number)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[pr_tracker] brief sync skipped for {rec_id}: {exc}")
     logger.info(f"[pr_tracker] registered PR #{pr_number} for {rec_id}")
     return {"ok": True}
 
@@ -297,6 +353,15 @@ def approve_pr(rec_id: str, pr_number: int, do_merge: bool = False) -> dict:
     persisted = _save_store(store)
     if not persisted and error is None:
         error = "could not persist store"
+
+    # Sync brief YAML — fail-silent
+    try:
+        from src.services.improvement_queue import update_brief_status  # noqa: WPS433
+
+        _sync_state = "merged" if merged else entry.get("dev_state", "pr_open")
+        update_brief_status(rec_id, _sync_state, pr_number=pr_number)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[pr_tracker] brief sync skipped for {rec_id}: {exc}")
 
     ok = persisted and (error is None or merged)
     out: dict = {"ok": bool(ok and (not do_merge or merged)), "merged": merged}
