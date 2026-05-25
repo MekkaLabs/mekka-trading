@@ -5627,339 +5627,74 @@ class MekkaDashboardServer:
             },
         }, status=200)
 
+    # ──────────────────────────────────────────────────────────────────
+    # _handle_trade_execute — REFACTORED [IMP-5f7cc5696a31]
+    #
+    # Antes: monólito de 359 linhas misturando validação, lookup, gates,
+    # force-execute branching e execução. Difícil de testar isoladamente.
+    #
+    # Depois: orquestrador magro + 4 helpers privados, cada um com 1
+    # responsabilidade. Comportamento externo IDÊNTICO (mesmo contract de
+    # resposta, mesmos audit events, mesmos status codes).
+    #
+    # Helpers (todos prefixados _te_ por "trade_execute"):
+    #   _te_check_gates        — confirmed != true / kill_switch / cached miss / mock
+    #   _te_build_and_approve  — construir TradingSignal + rodar Batman
+    #   _te_handle_blocked     — force_execute branching (override / reject / block)
+    #   _te_execute_and_log    — IronMan run + save_trade + Telegram + audit
+    # ──────────────────────────────────────────────────────────────────
+
     async def _handle_trade_execute(self, request: web.Request) -> web.Response:
         """POST /api/trade/execute — execute a previously recommended trade.
 
-        Body ``{"recommendation_id": "...", "confirmed": true}``
+        Body ``{"recommendation_id": "...", "confirmed": true,
+                "force_execute": false}``
 
         CRITICAL:
           - ``confirmed`` MUST be boolean ``true`` — no execution without it.
           - Guardrails are re-evaluated server-side; client state is not trusted.
+          - ``force_execute`` bypasses Batman ONLY in paper/testnet. Mainnet+live
+            with force=true is hard-rejected.
           - In paper mode, order is flagged as paper and never sent to SDK.
           - Audit events are always written regardless of outcome.
 
-        Response shape
-        --------------
-        {
-          "status": "submitted"|"blocked"|"rejected",
-          "reason": str,
-          "order_id": str|null,
-          "is_paper": bool,
-          "executed_at": str,
-        }
+        Response shape: {status, reason, order_id, is_paper, executed_at}.
         """
-        from src.agents.batman import is_kill_switch_active
         from src.config.settings import settings as _s
 
         executed_at = datetime.now(timezone.utc).isoformat()
-
         body = await self._safe_json_body(request) or {}
         rec_id = str(body.get("recommendation_id") or "").strip()[:64]
         confirmed = body.get("confirmed")
-        # Force-execute override (Story M22.1 — operator escape hatch).
-        # When True, the Batman verdict is treated as advisory: a non-
-        # executable verdict is logged with severity WARNING but the
-        # order is still placed. The override is REJECTED if both
-        # `paper_trading=False` AND `bybit_testnet=False`/`is_mainnet=True`
-        # — i.e. the operator must be in paper mode OR on a testnet to
-        # bypass risk gates. Kill switch is NOT bypassable.
         force_execute = bool(body.get("force_execute") or False)
 
-        # Hard gate: confirmed must be exactly True (boolean)
-        if confirmed is not True:
-            await MekkaRepository.log_event(
-                agent="Dashboard",
-                event="TRADE_NOW_BLOCKED",
-                severity="WARNING",
-                message="TradeNow execute rejected — confirmed != true",
-                payload={"recommendation_id": rec_id, "body_keys": list(body.keys())},
-            )
-            return web.json_response({
-                "status": "rejected",
-                "reason": "Campo 'confirmed' deve ser exatamente true para executar.",
-                "order_id": None,
-                "is_paper": _s.paper_trading,
-                "executed_at": executed_at,
-            }, status=400)
+        # 1. Gates de entrada: confirmed/kill_switch/cached/mock
+        gate_resp, cached_rec = await self._te_check_gates(
+            body, rec_id, confirmed, executed_at, _s
+        )
+        if gate_resp is not None:
+            return gate_resp
 
-        # Re-evaluate critical guardrails server-side
-        if is_kill_switch_active():
-            await MekkaRepository.log_event(
-                agent="Dashboard",
-                event="TRADE_NOW_BLOCKED",
-                severity="WARNING",
-                message="TradeNow execute blocked — kill switch active",
-                payload={"recommendation_id": rec_id},
-            )
-            return web.json_response({
-                "status": "blocked",
-                "reason": "Kill switch ativo — libere antes de executar ordens.",
-                "order_id": None,
-                "is_paper": _s.paper_trading,
-                "executed_at": executed_at,
-            }, status=200)
-
-        # ── Story 041 — Wire IronMan broker adapter ────────────────────
-        # Look up the cached recommendation from _handle_trade_analyze.
-        # The cache survives until server restart or 20-entry FIFO eviction.
-        cached_rec = self._rec_cache.get(rec_id)
-
-        if cached_rec is None:
-            # Recommendation not found — likely server was restarted between
-            # analyze and execute, or the rec_id is stale/forged.
-            await MekkaRepository.log_event(
-                agent="Dashboard",
-                event="TRADE_NOW_BLOCKED",
-                severity="WARNING",
-                message="TradeNow execute blocked — recommendation_id not in cache",
-                payload={"recommendation_id": rec_id},
-            )
-            return web.json_response({
-                "status": "blocked",
-                "reason": (
-                    "Recomendação não encontrada no servidor. "
-                    "Execute /api/trade/analyze novamente (o servidor pode ter sido reiniciado)."
-                ),
-                "order_id": None,
-                "is_paper": _s.paper_trading,
-                "executed_at": executed_at,
-            }, status=200)
-
-        # Block mock recommendations at the server level (belt-and-suspenders;
-        # the frontend already disables the confirm button for mock sources).
-        if cached_rec.get("source") == "mock":
-            await MekkaRepository.log_event(
-                agent="Dashboard",
-                event="TRADE_NOW_BLOCKED",
-                severity="WARNING",
-                message="TradeNow execute blocked — mock recommendation, no real signal",
-                payload={"recommendation_id": rec_id},
-            )
-            return web.json_response({
-                "status": "blocked",
-                "reason": (
-                    "Fonte da recomendação é 'mock' — nenhum sinal real disponível. "
-                    "Aguarde os agentes gerarem um sinal antes de operar."
-                ),
-                "order_id": None,
-                "is_paper": _s.paper_trading,
-                "executed_at": executed_at,
-            }, status=200)
-
-        # ── Build TradingSignal from cached recommendation ──────────────
-        order_id: str | None = None
-        exec_status = "submitted"
-        exec_reason = ""
-
+        # 2. Execução com try/except largo: qualquer exceção interna vira
+        #    audit + resposta "blocked", protege o servidor e o operador.
         try:
-            from src.models.signal import TradingSignal, TradeAction
-            from src.agents.batman import Batman
-            from src.agents.iron_man import IronMan
-            from src.models.risk import RiskVerdict
-
-            direction = cached_rec.get("direction", "LONG").upper()
-            equity_usd = float(cached_rec.get("_equity_usd") or _s.paper_equity_usd or 10_000)
-
-            signal = TradingSignal(
-                symbol=cached_rec["symbol"],
-                action=TradeAction.LONG if direction == "LONG" else TradeAction.SHORT,
-                confidence=float(cached_rec.get("confidence", 0.5)),
-                entry_price=float(cached_rec["entry_price"]),
-                stop_loss=float(cached_rec["stop_loss"]),
-                take_profit=float(cached_rec["take_profit"]),
-                size_pct=float(cached_rec.get("size_pct", 0.01)),
-                leverage=int(cached_rec.get("leverage", 1)),
-                reasoning=str(cached_rec.get("justification", "TradeNow execution"))[:400],
+            signal, approval, equity_usd = await self._te_build_and_approve(
+                cached_rec, _s
             )
 
-            # Batman risk gate
-            batman = Batman()
-            approval = await batman.run(signal=signal, equity_usd=equity_usd)
-
+            # 3. Se Batman não aprovou, lidar com force_execute / block.
             if not approval.is_executable:
-                # ── Force-execute escape hatch (M22.1) ───────────────────
-                # If the operator explicitly opted in via force_execute=true
-                # AND we are in a safe environment (paper mode OR a testnet),
-                # we log the bypass at WARNING and proceed. Otherwise we
-                # block exactly like before.
-                bybit_safe = (
-                    _s.active_exchange == "bybit" and bool(getattr(_s, "bybit_testnet", False))
+                block_resp, approval = await self._te_handle_blocked(
+                    signal, approval, force_execute, rec_id, executed_at, _s
                 )
-                binance_safe = (
-                    _s.active_exchange == "binance" and bool(getattr(_s, "binance_testnet", False))
-                )
-                hl_safe = _s.active_exchange == "hyperliquid" and not _s.is_mainnet
-                env_is_safe_for_bypass = _s.paper_trading or bybit_safe or binance_safe or hl_safe
+                if block_resp is not None:
+                    return block_resp
+                # Caso force_execute && safe env: approval foi reescrito como
+                # APPROVED e seguimos para o passo 4.
 
-                if force_execute and env_is_safe_for_bypass:
-                    # Bypass Batman — log loudly so the audit trail makes it
-                    # impossible to claim later "I didn't know that was overridden".
-                    await MekkaRepository.log_event(
-                        agent="Dashboard",
-                        event="TRADE_NOW_FORCE_EXECUTE",
-                        severity="WARNING",
-                        message=(
-                            f"FORCE_EXECUTE: Batman verdict {approval.verdict.value} OVERRIDDEN by operator. "
-                            f"env: exchange={_s.active_exchange} paper={_s.paper_trading} "
-                            f"bybit_testnet={getattr(_s,'bybit_testnet','-')}"
-                        ),
-                        payload={
-                            "recommendation_id": rec_id,
-                            "verdict": approval.verdict.value,
-                            "reasons": approval.reasons,
-                            "exchange": _s.active_exchange,
-                            "paper_trading": _s.paper_trading,
-                            "bybit_testnet": getattr(_s, "bybit_testnet", None),
-                        },
-                    )
-                    # Build an EXECUTABLE approval so IronMan actually places
-                    # the order. Merely "falling through" kept Batman's REJECTED
-                    # verdict, and IronMan independently SKIPs anything that is
-                    # not is_executable (qty=0). Override with the recommended
-                    # size/leverage (clamped to model bounds). Safe because we
-                    # already gated on paper/testnet above. Mirrors the manual
-                    # trade handler's force path.
-                    from src.models.risk import RiskApproval, RiskVerdict
-                    approval = RiskApproval(
-                        symbol=signal.symbol,
-                        verdict=RiskVerdict.APPROVED,
-                        reasons=["FORCE_EXECUTE (Modo Deus): override do Batman em paper/testnet"]
-                                + list(approval.reasons or []),
-                        adjusted_size_pct=max(0.0001, min(float(signal.size_pct), 0.10)),
-                        adjusted_leverage=max(1, min(int(signal.leverage), 50)),
-                        breached_limits=list(approval.breached_limits or []),
-                        metadata={**(approval.metadata or {}), "force_execute": True},
-                    )
-                elif force_execute and not env_is_safe_for_bypass:
-                    # Operator asked to force on a mainnet/live combo — REJECT.
-                    # This is a hard rule: we never override risk gates against
-                    # real money. The operator must drop to paper or testnet
-                    # first if they want this escape hatch.
-                    exec_status = "rejected"
-                    exec_reason = (
-                        "FORCE_EXECUTE solicitado em ambiente mainnet/live — recusado por "
-                        "regra dura. Para usar este botão, alterne para paper mode "
-                        "ou para uma testnet (bybit_testnet=true, binance_testnet=true, "
-                        "ou hyperliquid_network=testnet)."
-                    )
-                    await MekkaRepository.log_event(
-                        agent="Dashboard",
-                        event="TRADE_NOW_FORCE_EXECUTE_REJECTED",
-                        severity="ERROR",
-                        message=exec_reason,
-                        payload={
-                            "recommendation_id": rec_id,
-                            "exchange": _s.active_exchange,
-                            "paper_trading": _s.paper_trading,
-                            "bybit_testnet": getattr(_s, "bybit_testnet", None),
-                            "is_mainnet": _s.is_mainnet,
-                        },
-                    )
-                    return web.json_response({
-                        "status": "rejected",
-                        "reason": exec_reason,
-                        "order_id": None,
-                        "is_paper": _s.paper_trading,
-                        "executed_at": executed_at,
-                    }, status=200)
-                else:
-                    # No force flag — normal block path.
-                    exec_status = "blocked"
-                    exec_reason = (
-                        f"Batman bloqueou: {approval.verdict.value} — "
-                        + (approval.reasons[0] if approval.reasons else "risco excedido")
-                    )
-                    await MekkaRepository.log_event(
-                        agent="Dashboard",
-                        event="TRADE_NOW_BLOCKED",
-                        severity="WARNING",
-                        message=f"TradeNow blocked by Batman verdict={approval.verdict.value}",
-                        payload={
-                            "recommendation_id": rec_id,
-                            "verdict": approval.verdict.value,
-                            "reasons": approval.reasons,
-                        },
-                    )
-                    return web.json_response({
-                        "status": "blocked",
-                        "reason": exec_reason,
-                        "order_id": None,
-                        "is_paper": _s.paper_trading,
-                        "executed_at": executed_at,
-                    }, status=200)
-
-            # IronMan execution (paper or live depending on settings.paper_trading)
-            iron_man = IronMan()
-            result = await iron_man.run(
-                signal=signal,
-                approval=approval,
-                equity_usd=equity_usd,
-            )
-
-            # Persist trade to DB so it appears in the trades panel and positions
-            try:
-                _signal_id = cached_rec.get("signal_id") if cached_rec else None
-                # Store SL/TP in metadata so positions_provider can surface them on the chart
-                result.metadata = {
-                    **(result.metadata or {}),
-                    "stop_loss": float(cached_rec.get("stop_loss") or 0),
-                    "take_profit": float(cached_rec.get("take_profit") or 0),
-                }
-                _trade_db_id = await MekkaRepository.save_trade(result, signal_id=_signal_id)
-                logger.info(
-                    "trade persisted: db_id=%d order_id=%s symbol=%s",
-                    _trade_db_id, result.order_id, result.symbol,
-                )
-            except Exception as _save_exc:
-                logger.warning("save_trade failed (non-fatal): %s", _save_exc)
-
-            # Telegram — trade_opened para TradeNow (fire-and-forget)
-            try:
-                from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
-                asyncio.create_task(
-                    _TA().trade_opened(execution=result, signal=signal)
-                )
-            except Exception:
-                pass
-
-            order_id = result.order_id
-            # Map IronMan's execution status to the dashboard contract.
-            # FILLED/PARTIAL/PAPER are successes; ERROR/REJECTED/SKIPPED are
-            # failures the operator MUST see — never claim "submitted" when the
-            # venue rejected the order (e.g. notional below min, IOC filled 0).
-            ok_statuses = {"FILLED", "PARTIAL", "PAPER"}
-            exec_ok = result.status.value in ok_statuses
-            err_detail = getattr(result, "error", None)
-            exec_status = "submitted" if exec_ok else "blocked"
-            exec_reason = (
-                f"{'Paper' if result.is_paper else 'Live'} order "
-                f"{result.status.value} | "
-                f"qty={result.quantity} avg={result.avg_price}"
-            )
-            if not exec_ok and err_detail:
-                exec_reason += f" — {err_detail}"
-
-            await MekkaRepository.log_event(
-                agent="Dashboard",
-                event="TRADE_NOW_EXECUTED" if exec_ok else "TRADE_NOW_BLOCKED",
-                severity="INFO" if exec_ok else "WARNING",
-                message=(
-                    f"TradeNow order {result.status.value} "
-                    f"{'(paper)' if result.is_paper else '(LIVE)'} "
-                    f"rec_id={rec_id} order_id={order_id}"
-                ),
-                payload={
-                    "recommendation_id": rec_id,
-                    "order_id": order_id,
-                    "is_paper": result.is_paper,
-                    "status": result.status.value,
-                    "symbol": result.symbol,
-                    "quantity": result.quantity,
-                    "avg_price": result.avg_price,
-                    "notional_usd": result.notional_usd,
-                    "batman_verdict": approval.verdict.value,
-                    "error": err_detail,
-                },
+            # 4. IronMan execute + persist + Telegram + audit
+            return await self._te_execute_and_log(
+                signal, approval, equity_usd, cached_rec, rec_id, executed_at, _s
             )
 
         except Exception as exc:
@@ -5978,6 +5713,328 @@ class MekkaDashboardServer:
                 "is_paper": _s.paper_trading,
                 "executed_at": executed_at,
             }, status=200)
+
+    # ── _handle_trade_execute helpers ────────────────────────────────
+
+    async def _te_check_gates(
+        self,
+        body: dict,
+        rec_id: str,
+        confirmed: Any,
+        executed_at: str,
+        _s: Any,
+    ) -> tuple[Optional[web.Response], Optional[dict]]:
+        """Run all early-exit gates: confirmed, kill_switch, cache, mock source.
+
+        Returns ``(response, cached_rec)``. If ``response`` is non-None the
+        caller MUST return it immediately. If None, ``cached_rec`` is valid
+        and execution should proceed.
+        """
+        from src.agents.batman import is_kill_switch_active
+
+        # Hard gate: confirmed must be exactly True (boolean)
+        if confirmed is not True:
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="TRADE_NOW_BLOCKED",
+                severity="WARNING",
+                message="TradeNow execute rejected — confirmed != true",
+                payload={"recommendation_id": rec_id, "body_keys": list(body.keys())},
+            )
+            return web.json_response({
+                "status": "rejected",
+                "reason": "Campo 'confirmed' deve ser exatamente true para executar.",
+                "order_id": None,
+                "is_paper": _s.paper_trading,
+                "executed_at": executed_at,
+            }, status=400), None
+
+        # Kill switch (NOT bypassable, even with force_execute)
+        if is_kill_switch_active():
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="TRADE_NOW_BLOCKED",
+                severity="WARNING",
+                message="TradeNow execute blocked — kill switch active",
+                payload={"recommendation_id": rec_id},
+            )
+            return web.json_response({
+                "status": "blocked",
+                "reason": "Kill switch ativo — libere antes de executar ordens.",
+                "order_id": None,
+                "is_paper": _s.paper_trading,
+                "executed_at": executed_at,
+            }, status=200), None
+
+        # Look up cached recommendation from /api/trade/analyze
+        cached_rec = self._rec_cache.get(rec_id)
+        if cached_rec is None:
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="TRADE_NOW_BLOCKED",
+                severity="WARNING",
+                message="TradeNow execute blocked — recommendation_id not in cache",
+                payload={"recommendation_id": rec_id},
+            )
+            return web.json_response({
+                "status": "blocked",
+                "reason": (
+                    "Recomendação não encontrada no servidor. "
+                    "Execute /api/trade/analyze novamente (o servidor pode ter sido reiniciado)."
+                ),
+                "order_id": None,
+                "is_paper": _s.paper_trading,
+                "executed_at": executed_at,
+            }, status=200), None
+
+        # Block mock recommendations (belt-and-suspenders — frontend also blocks)
+        if cached_rec.get("source") == "mock":
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="TRADE_NOW_BLOCKED",
+                severity="WARNING",
+                message="TradeNow execute blocked — mock recommendation, no real signal",
+                payload={"recommendation_id": rec_id},
+            )
+            return web.json_response({
+                "status": "blocked",
+                "reason": (
+                    "Fonte da recomendação é 'mock' — nenhum sinal real disponível. "
+                    "Aguarde os agentes gerarem um sinal antes de operar."
+                ),
+                "order_id": None,
+                "is_paper": _s.paper_trading,
+                "executed_at": executed_at,
+            }, status=200), None
+
+        return None, cached_rec
+
+    async def _te_build_and_approve(
+        self, cached_rec: dict, _s: Any
+    ) -> tuple[Any, Any, float]:
+        """Build TradingSignal from cached_rec, run Batman, return triplet.
+
+        Returns ``(signal, approval, equity_usd)``. Raises if construction or
+        Batman fails — caller wraps in try/except.
+        """
+        from src.agents.batman import Batman
+        from src.models.signal import TradingSignal, TradeAction
+
+        direction = cached_rec.get("direction", "LONG").upper()
+        equity_usd = float(cached_rec.get("_equity_usd") or _s.paper_equity_usd or 10_000)
+
+        signal = TradingSignal(
+            symbol=cached_rec["symbol"],
+            action=TradeAction.LONG if direction == "LONG" else TradeAction.SHORT,
+            confidence=float(cached_rec.get("confidence", 0.5)),
+            entry_price=float(cached_rec["entry_price"]),
+            stop_loss=float(cached_rec["stop_loss"]),
+            take_profit=float(cached_rec["take_profit"]),
+            size_pct=float(cached_rec.get("size_pct", 0.01)),
+            leverage=int(cached_rec.get("leverage", 1)),
+            reasoning=str(cached_rec.get("justification", "TradeNow execution"))[:400],
+        )
+
+        approval = await Batman().run(signal=signal, equity_usd=equity_usd)
+        return signal, approval, equity_usd
+
+    async def _te_handle_blocked(
+        self,
+        signal: Any,
+        approval: Any,
+        force_execute: bool,
+        rec_id: str,
+        executed_at: str,
+        _s: Any,
+    ) -> tuple[Optional[web.Response], Any]:
+        """Handle non-executable approval: force_execute override OR block.
+
+        Returns ``(response, approval)``:
+          - response non-None: caller returns it (block or hard-reject path)
+          - response None: approval was rewritten as APPROVED (force on safe env);
+            caller proceeds to IronMan execution
+        """
+        # Decide if the current environment allows force-execute bypass.
+        # Hard rule: NEVER bypass risk gates against real money.
+        bybit_safe = (
+            _s.active_exchange == "bybit" and bool(getattr(_s, "bybit_testnet", False))
+        )
+        binance_safe = (
+            _s.active_exchange == "binance" and bool(getattr(_s, "binance_testnet", False))
+        )
+        hl_safe = _s.active_exchange == "hyperliquid" and not _s.is_mainnet
+        env_is_safe_for_bypass = _s.paper_trading or bybit_safe or binance_safe or hl_safe
+
+        if force_execute and env_is_safe_for_bypass:
+            # Bypass Batman — log loudly so the audit trail is bullet-proof.
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="TRADE_NOW_FORCE_EXECUTE",
+                severity="WARNING",
+                message=(
+                    f"FORCE_EXECUTE: Batman verdict {approval.verdict.value} OVERRIDDEN by operator. "
+                    f"env: exchange={_s.active_exchange} paper={_s.paper_trading} "
+                    f"bybit_testnet={getattr(_s,'bybit_testnet','-')}"
+                ),
+                payload={
+                    "recommendation_id": rec_id,
+                    "verdict": approval.verdict.value,
+                    "reasons": approval.reasons,
+                    "exchange": _s.active_exchange,
+                    "paper_trading": _s.paper_trading,
+                    "bybit_testnet": getattr(_s, "bybit_testnet", None),
+                },
+            )
+            # Rewrite approval as APPROVED so IronMan places the order. Just
+            # "falling through" would keep verdict=REJECTED and IronMan
+            # independently skips qty=0. Mirrors the manual trade handler.
+            from src.models.risk import RiskApproval, RiskVerdict
+            new_approval = RiskApproval(
+                symbol=signal.symbol,
+                verdict=RiskVerdict.APPROVED,
+                reasons=["FORCE_EXECUTE (Modo Deus): override do Batman em paper/testnet"]
+                        + list(approval.reasons or []),
+                adjusted_size_pct=max(0.0001, min(float(signal.size_pct), 0.10)),
+                adjusted_leverage=max(1, min(int(signal.leverage), 50)),
+                breached_limits=list(approval.breached_limits or []),
+                metadata={**(approval.metadata or {}), "force_execute": True},
+            )
+            return None, new_approval
+
+        if force_execute and not env_is_safe_for_bypass:
+            # Mainnet/live + force_execute — HARD REJECT (no real money override).
+            reason = (
+                "FORCE_EXECUTE solicitado em ambiente mainnet/live — recusado por "
+                "regra dura. Para usar este botão, alterne para paper mode "
+                "ou para uma testnet (bybit_testnet=true, binance_testnet=true, "
+                "ou hyperliquid_network=testnet)."
+            )
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="TRADE_NOW_FORCE_EXECUTE_REJECTED",
+                severity="ERROR",
+                message=reason,
+                payload={
+                    "recommendation_id": rec_id,
+                    "exchange": _s.active_exchange,
+                    "paper_trading": _s.paper_trading,
+                    "bybit_testnet": getattr(_s, "bybit_testnet", None),
+                    "is_mainnet": _s.is_mainnet,
+                },
+            )
+            return web.json_response({
+                "status": "rejected",
+                "reason": reason,
+                "order_id": None,
+                "is_paper": _s.paper_trading,
+                "executed_at": executed_at,
+            }, status=200), approval
+
+        # No force flag — normal block path.
+        block_reason = (
+            f"Batman bloqueou: {approval.verdict.value} — "
+            + (approval.reasons[0] if approval.reasons else "risco excedido")
+        )
+        await MekkaRepository.log_event(
+            agent="Dashboard",
+            event="TRADE_NOW_BLOCKED",
+            severity="WARNING",
+            message=f"TradeNow blocked by Batman verdict={approval.verdict.value}",
+            payload={
+                "recommendation_id": rec_id,
+                "verdict": approval.verdict.value,
+                "reasons": approval.reasons,
+            },
+        )
+        return web.json_response({
+            "status": "blocked",
+            "reason": block_reason,
+            "order_id": None,
+            "is_paper": _s.paper_trading,
+            "executed_at": executed_at,
+        }, status=200), approval
+
+    async def _te_execute_and_log(
+        self,
+        signal: Any,
+        approval: Any,
+        equity_usd: float,
+        cached_rec: dict,
+        rec_id: str,
+        executed_at: str,
+        _s: Any,
+    ) -> web.Response:
+        """IronMan execute + persist trade + Telegram alert + audit.
+
+        Returns the final response. Mapping FILLED/PARTIAL/PAPER → 'submitted',
+        ERROR/REJECTED/SKIPPED → 'blocked' (operator MUST see venue rejections;
+        never claim 'submitted' when notional was below min etc).
+        """
+        from src.agents.iron_man import IronMan
+
+        result = await IronMan().run(
+            signal=signal,
+            approval=approval,
+            equity_usd=equity_usd,
+        )
+
+        # Persist trade so it appears in trades panel and positions.
+        try:
+            _signal_id = cached_rec.get("signal_id") if cached_rec else None
+            result.metadata = {
+                **(result.metadata or {}),
+                "stop_loss": float(cached_rec.get("stop_loss") or 0),
+                "take_profit": float(cached_rec.get("take_profit") or 0),
+            }
+            _trade_db_id = await MekkaRepository.save_trade(result, signal_id=_signal_id)
+            logger.info(
+                "trade persisted: db_id=%d order_id=%s symbol=%s",
+                _trade_db_id, result.order_id, result.symbol,
+            )
+        except Exception as _save_exc:  # noqa: BLE001
+            logger.warning("save_trade failed (non-fatal): %s", _save_exc)
+
+        # Telegram — trade_opened para TradeNow (fire-and-forget)
+        try:
+            from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+            asyncio.create_task(_TA().trade_opened(execution=result, signal=signal))
+        except Exception:  # noqa: BLE001
+            pass
+
+        order_id = result.order_id
+        ok_statuses = {"FILLED", "PARTIAL", "PAPER"}
+        exec_ok = result.status.value in ok_statuses
+        err_detail = getattr(result, "error", None)
+        exec_status = "submitted" if exec_ok else "blocked"
+        exec_reason = (
+            f"{'Paper' if result.is_paper else 'Live'} order "
+            f"{result.status.value} | qty={result.quantity} avg={result.avg_price}"
+        )
+        if not exec_ok and err_detail:
+            exec_reason += f" — {err_detail}"
+
+        await MekkaRepository.log_event(
+            agent="Dashboard",
+            event="TRADE_NOW_EXECUTED" if exec_ok else "TRADE_NOW_BLOCKED",
+            severity="INFO" if exec_ok else "WARNING",
+            message=(
+                f"TradeNow order {result.status.value} "
+                f"{'(paper)' if result.is_paper else '(LIVE)'} "
+                f"rec_id={rec_id} order_id={order_id}"
+            ),
+            payload={
+                "recommendation_id": rec_id,
+                "order_id": order_id,
+                "is_paper": result.is_paper,
+                "status": result.status.value,
+                "symbol": result.symbol,
+                "quantity": result.quantity,
+                "avg_price": result.avg_price,
+                "notional_usd": result.notional_usd,
+                "batman_verdict": approval.verdict.value,
+                "error": err_detail,
+            },
+        )
 
         return web.json_response({
             "status": exec_status,
