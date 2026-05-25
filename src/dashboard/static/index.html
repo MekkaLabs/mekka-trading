@@ -714,6 +714,11 @@
             <option value="72">72h</option>
             <option value="168">7d</option>
           </select>
+          <label for="trades-timeline-symbol" style="margin-left:10px">Símbolo:</label>
+          <select id="trades-timeline-symbol" title="Filtra a timeline por símbolo (todos = sem filtro)">
+            <option value="" selected>Todos</option>
+            <!-- Populated dynamically by app.js with the assets from settings -->
+          </select>
           <button id="trades-timeline-refresh" type="button">Atualizar</button>
           <span id="trades-timeline-status" class="muted-line">Aguardando trades...</span>
         </div>
@@ -916,6 +921,19 @@
         <h2>⚙️ Personalizar Dashboard</h2>
         <p class="muted-line">Escolha quais painéis aparecem em cada página. Preferências salvas localmente.</p>
         <div id="widget-customizer" class="widget-customizer"></div>
+      </section>
+
+      <!-- Configuração de risco — read-only display do que está em settings.py.
+           Operator editaria via .env + restart. Edição inline (sliders, whitelist
+           multiselect, time windows) fica para sessão dedicada — exige cabear
+           em runtime_settings.json + override em Batman/NickFury. -->
+      <section class="panel full" id="sec-risk-config" data-page="settings">
+        <h2>🛡️ Configuração de Risco (atual)</h2>
+        <p class="muted-line">Valores efetivos lidos de <code>settings.py</code> + <code>.env</code>.
+        Para editar: ajustar variável correspondente no <code>.env</code> e reiniciar o sistema.</p>
+        <div id="risk-config-cards" class="risk-config-cards">
+          <div class="muted-line">Carregando configuração…</div>
+        </div>
       </section>
 
       <!-- ── Live Trading Panel ──────────────────────────────────────────── -->

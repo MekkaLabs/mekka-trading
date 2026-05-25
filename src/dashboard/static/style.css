@@ -4647,6 +4647,15 @@ body[data-theme="light"] .page-nav-sub a { color: var(--muted); }
 .toast-warn    { border-left-color: var(--warn, #f5a623); }
 .toast-info    { border-left-color: var(--accent, #4a9eff); }
 
+/* Risk config cards — read-only display em Settings */
+.risk-config-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 8px; }
+.risk-config-card { display: flex; flex-direction: column; padding: 10px 12px; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-md); gap: 4px; transition: border-color var(--t-base); }
+.risk-config-card:hover { border-color: var(--accent, #4a9eff); }
+.risk-config-card.is-critical { border-left: 3px solid var(--bad, #e84d4d); background: var(--bad-dim, #3a1414); }
+.risk-config-label { font-size: 0.85em; color: var(--muted); font-weight: 500; }
+.risk-config-value { font-size: 1.1em; font-weight: 700; }
+.risk-config-env { font-family: monospace; font-size: 0.72em; color: var(--muted); background: rgba(0, 0, 0, 0.25); padding: 1px 6px; border-radius: 3px; align-self: flex-start; }
+
 /* Banner de risco no PnL — drawdown elevado próximo do kill switch */
 .pnl-banner {
   grid-column: 1 / -1;

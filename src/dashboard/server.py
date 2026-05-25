@@ -2781,6 +2781,35 @@ class MekkaDashboardServer:
         cfg = self._load_runtime_settings()
         # [Bybit] Expose active exchange so frontend can show it
         cfg.setdefault("active_exchange", settings.active_exchange)
+        # B1 — expor configuração efetiva de RISCO (read-only) para o painel
+        # /settings poder mostrar limites atuais sem precisar abrir .env.
+        # Operator continua editando via .env + restart (segurança).
+        try:
+            cfg["risk_config"] = {
+                "max_position_size_pct": float(getattr(settings, "max_position_size_pct", 0.02)),
+                "max_leverage": int(getattr(settings, "max_leverage", 5)),
+                "max_daily_drawdown_pct": float(getattr(settings, "max_daily_drawdown_pct", 0.10)),
+                "max_total_capital_pct": float(getattr(settings, "max_total_capital_pct", 0.30)),
+                "max_consecutive_exec_errors": int(getattr(settings, "max_consecutive_exec_errors", 3)),
+                "max_consecutive_vision_fallbacks": int(getattr(settings, "max_consecutive_vision_fallbacks", 5)),
+                "trading_assets": list(getattr(settings, "trading_assets", []) or []),
+                "paper_trading": bool(getattr(settings, "paper_trading", True)),
+                "live_trading_confirmed": bool(getattr(settings, "live_trading_confirmed", False)),
+                "phantom_reconciliation_enabled": bool(getattr(settings, "phantom_reconciliation_enabled", True)),
+                "mainnet_first_week_hard_clamp": bool(getattr(settings, "mainnet_first_week_hard_clamp", True)),
+                "llm_cost_aware_routing": bool(getattr(settings, "llm_cost_aware_routing", False)),
+                # Funding rate gate (Story 075) — bloqueia ou reduz tamanho
+                # quando funding rate está em extremo (crowded positioning).
+                "funding_gate_enabled": bool(getattr(settings, "funding_gate_enabled", True)),
+                "funding_long_block_pct": float(getattr(settings, "funding_long_block_pct", 0.10)),
+                "funding_short_block_pct": float(getattr(settings, "funding_short_block_pct", -0.10)),
+                # Trading hours gate (Story 076) — só opera dentro de janela UTC.
+                "trading_hours_enabled": bool(getattr(settings, "trading_hours_enabled", False)),
+                "trading_hours_start_utc": int(getattr(settings, "trading_hours_start_utc", 7)),
+                "trading_hours_end_utc": int(getattr(settings, "trading_hours_end_utc", 23)),
+            }
+        except Exception:  # noqa: BLE001
+            cfg["risk_config"] = {}
         return web.json_response(cfg)
 
     async def _handle_settings_set(self, request: web.Request) -> web.Response:
@@ -3124,6 +3153,11 @@ class MekkaDashboardServer:
         """
         from collections import defaultdict
         hours = _safe_limit(request.query.get("hours"), default=24, max_value=168)
+        # Optional symbol filter (B4): query ?symbol=BTC or comma-separated
+        # ?symbol=BTC,ETH. Empty/missing returns all symbols (legacy behavior).
+        symbol_filter_raw = (request.query.get("symbol") or "").upper().strip()
+        symbol_filter = {s.strip() for s in symbol_filter_raw.split(",") if s.strip()}
+
         try:
             trades = await asyncio.wait_for(
                 MekkaRepository.list_trades_within(hours), timeout=3.0
@@ -3133,6 +3167,9 @@ class MekkaDashboardServer:
         except Exception as exc:  # noqa: BLE001
             logger.warning("trades/timeline query failed: %s", exc)
             return web.json_response({"items": [], "hours": hours})
+
+        if symbol_filter:
+            trades = [t for t in trades if (t.symbol or "").upper() in symbol_filter]
 
         # Aggregate by hour. Status enum from IronMan:
         #   FILLED / PARTIAL / PAPER / SKIPPED / REJECTED / ERROR
@@ -3147,7 +3184,6 @@ class MekkaDashboardServer:
         )
         for t in trades:
             ts = t.timestamp
-            # Truncate to the hour boundary (UTC).
             hour_key = ts.replace(minute=0, second=0, microsecond=0).isoformat()
             label = STATUS_BUCKETS.get(str(t.status or "").upper(), "skipped")
             buckets[hour_key][label] += 1
@@ -3156,7 +3192,12 @@ class MekkaDashboardServer:
         for hour, counts in sorted(buckets.items()):
             total = sum(counts.values())
             items.append({"hour_utc": hour, **counts, "total": total})
-        return web.json_response({"hours": hours, "count": len(items), "items": items})
+        return web.json_response({
+            "hours": hours,
+            "symbol_filter": sorted(symbol_filter) if symbol_filter else None,
+            "count": len(items),
+            "items": items,
+        })
 
     async def _handle_pnl_benchmark(self, request: web.Request) -> web.Response:
         """Normalized benchmark series for the equity-vs-benchmark overlay.
@@ -3556,6 +3597,9 @@ class MekkaDashboardServer:
             "paper_trading": bool(settings.paper_trading),
             "live_confirmed": bool(settings.live_trading_confirmed),
             "mode": mode,
+            # Symbols the system trades — needed by UI dropdowns (filter
+            # tradesTimeline by symbol etc). Always safe to expose.
+            "trading_assets": list(settings.trading_assets or []),
         })
 
     async def _handle_report_daily(self, request: web.Request) -> web.Response:

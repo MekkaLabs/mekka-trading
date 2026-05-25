@@ -88,6 +88,10 @@ class LLMClient:
         anthropic_model: str = "claude-sonnet-4-6",
         temperature: float = 0.2,
         max_tokens: int = 2048,
+        cost_aware_routing: bool = False,
+        synthesis_model_openai: str = "gpt-4o-mini",
+        synthesis_model_anthropic: str = "claude-haiku-4-5-20251001",
+        synthesis_agents: Optional[list[str]] = None,
     ) -> None:
         self._openai_key = openai_key.strip()
         self._openai_model = openai_model
@@ -95,6 +99,12 @@ class LLMClient:
         self._anthropic_model = anthropic_model
         self._temperature = temperature
         self._max_tokens = max_tokens
+        # Cost-aware routing (B3): when True and agent_id is in synthesis_agents,
+        # route to the cheaper model. Default False = legacy behaviour.
+        self._cost_aware_routing = bool(cost_aware_routing)
+        self._synthesis_model_openai = synthesis_model_openai
+        self._synthesis_model_anthropic = synthesis_model_anthropic
+        self._synthesis_agents = set(synthesis_agents or [])
 
         self._openai_client: Optional[AsyncOpenAI] = None
         self._anthropic_client: Optional[AsyncAnthropic] = None
@@ -144,6 +154,18 @@ class LLMClient:
                     await maybe_awaitable
             self._anthropic_client = None
 
+    def _pick_openai_model(self, agent_id: str) -> str:
+        """Decide which OpenAI model to use for this call (B3 cost-aware routing)."""
+        if self._cost_aware_routing and agent_id and agent_id in self._synthesis_agents:
+            return self._synthesis_model_openai
+        return self._openai_model
+
+    def _pick_anthropic_model(self, agent_id: str) -> str:
+        """Decide which Anthropic model to use for this call (B3 cost-aware routing)."""
+        if self._cost_aware_routing and agent_id and agent_id in self._synthesis_agents:
+            return self._synthesis_model_anthropic
+        return self._anthropic_model
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     async def chat(
@@ -173,15 +195,19 @@ class LLMClient:
         _tokens_out = 0
         _content = "{}"
 
+        # B3 cost-aware routing: pick model based on agent_id.
+        _openai_model_eff = self._pick_openai_model(agent_id)
+        _anthropic_model_eff = self._pick_anthropic_model(agent_id)
+
         try:
             # Try OpenAI first
             if self._has_openai:
                 try:
                     _content, _tokens_in, _tokens_out = await self._call_openai(
-                        system_prompt, user_prompt
+                        system_prompt, user_prompt, model_override=_openai_model_eff
                     )
                     _provider = "openai"
-                    _model = self._openai_model
+                    _model = _openai_model_eff
                 except (OpenAIAPIError, OpenAITimeoutError, OpenAIRateLimitError) as exc:
                     logger.warning(
                         f"[LLMClient] OpenAI failed ({type(exc).__name__}: {exc}) "
@@ -190,26 +216,26 @@ class LLMClient:
                     if not self._has_anthropic:
                         raise RuntimeError(f"OpenAI error and no Claude fallback: {exc}") from exc
                     _content, _tokens_in, _tokens_out = await self._call_anthropic(
-                        system_prompt, user_prompt
+                        system_prompt, user_prompt, model_override=_anthropic_model_eff
                     )
                     _provider = "anthropic"
-                    _model = self._anthropic_model
+                    _model = _anthropic_model_eff
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(f"[LLMClient] OpenAI unexpected error: {exc} — trying Claude")
                     if not self._has_anthropic:
                         raise
                     _content, _tokens_in, _tokens_out = await self._call_anthropic(
-                        system_prompt, user_prompt
+                        system_prompt, user_prompt, model_override=_anthropic_model_eff
                     )
                     _provider = "anthropic"
-                    _model = self._anthropic_model
+                    _model = _anthropic_model_eff
             else:
                 # OpenAI not configured — use Anthropic directly
                 _content, _tokens_in, _tokens_out = await self._call_anthropic(
-                    system_prompt, user_prompt
+                    system_prompt, user_prompt, model_override=_anthropic_model_eff
                 )
                 _provider = "anthropic"
-                _model = self._anthropic_model
+                _model = _anthropic_model_eff
 
             return _content
 
@@ -245,12 +271,12 @@ class LLMClient:
         return self._openai_client
 
     async def _call_openai(
-        self, system_prompt: str, user_prompt: str
+        self, system_prompt: str, user_prompt: str, model_override: Optional[str] = None
     ) -> Tuple[str, int, int]:
         """Returns (content, tokens_in, tokens_out)."""
         client = self._get_openai()
         response = await client.chat.completions.create(
-            model=self._openai_model,
+            model=model_override or self._openai_model,
             temperature=self._temperature,
             max_tokens=self._max_tokens,
             response_format={"type": "json_object"},
@@ -273,7 +299,7 @@ class LLMClient:
         return self._anthropic_client
 
     async def _call_anthropic(
-        self, system_prompt: str, user_prompt: str
+        self, system_prompt: str, user_prompt: str, model_override: Optional[str] = None
     ) -> Tuple[str, int, int]:
         """Returns (content, tokens_in, tokens_out)."""
         client = self._get_anthropic()
@@ -286,7 +312,7 @@ class LLMClient:
         )
 
         response = await client.messages.create(
-            model=self._anthropic_model,
+            model=model_override or self._anthropic_model,
             max_tokens=self._max_tokens,
             temperature=self._temperature,
             system=system_with_json,
@@ -457,4 +483,11 @@ def make_llm_client() -> LLMClient:
         anthropic_model=getattr(settings, "anthropic_model", "claude-sonnet-4-6"),
         temperature=getattr(settings, "openai_temperature", 0.2),
         max_tokens=getattr(settings, "openai_max_tokens", 2048),
+        # B3 cost-aware routing — default False; activate via setting.
+        cost_aware_routing=getattr(settings, "llm_cost_aware_routing", False),
+        synthesis_model_openai=getattr(settings, "llm_synthesis_model_openai", "gpt-4o-mini"),
+        synthesis_model_anthropic=getattr(
+            settings, "llm_synthesis_model_anthropic", "claude-haiku-4-5-20251001"
+        ),
+        synthesis_agents=getattr(settings, "llm_synthesis_agents", None),
     )

@@ -74,6 +74,37 @@ class Settings(BaseSettings):
         description="Claude model for Vision fallback (e.g. claude-sonnet-4-6, claude-opus-4-6)",
     )
 
+    # ── Cost-aware LLM routing (B3) ──────────────────────────────────────
+    # Quando ativo, agentes de SÍNTESE (DoctorStrange, Thor) usam um modelo
+    # mais barato (gpt-4o-mini / Haiku), enquanto agentes de DECISÃO (Vision,
+    # VisionCritic) mantêm o modelo principal. Default False = comportamento
+    # legado (todos usam openai_model). Ativar reduz custo ~20-40% sem
+    # impacto significativo na qualidade da decisão final.
+    llm_cost_aware_routing: bool = Field(
+        default=False,
+        description=(
+            "When True, synthesis agents (DoctorStrange, Thor) use a cheaper "
+            "LLM model (default gpt-4o-mini / claude-haiku). Vision and other "
+            "decision-makers continue on the primary model. Reduces cost without "
+            "affecting decision quality. Default False (no behaviour change)."
+        ),
+    )
+    llm_synthesis_model_openai: str = Field(
+        default="gpt-4o-mini",
+        description="OpenAI model for synthesis tasks (when cost-aware routing enabled)",
+    )
+    llm_synthesis_model_anthropic: str = Field(
+        default="claude-haiku-4-5-20251001",
+        description="Anthropic model for synthesis tasks (when cost-aware routing enabled)",
+    )
+    llm_synthesis_agents: list[str] = Field(
+        default_factory=lambda: ["DoctorStrange", "Thor"],
+        description=(
+            "Agents whose LLM calls are routed to the cheap synthesis model "
+            "when llm_cost_aware_routing=True. Match by agent_id (case-sensitive)."
+        ),
+    )
+
     # --------------------------------------------------------------------------
     # Hyperliquid
     # --------------------------------------------------------------------------

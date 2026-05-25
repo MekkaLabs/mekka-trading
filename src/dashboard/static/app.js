@@ -73,6 +73,7 @@ const chartCanvases = {
   trades_timeline: document.getElementById('chart-trades-timeline'),
 };
 const tradesTimelineHours = document.getElementById('trades-timeline-hours');
+const tradesTimelineSymbol = document.getElementById('trades-timeline-symbol');
 const tradesTimelineRefresh = document.getElementById('trades-timeline-refresh');
 const tradesTimelineStatus = document.getElementById('trades-timeline-status');
 const pnlWindowSelect = document.getElementById('pnl-window');
@@ -664,14 +665,14 @@ function _neuralStartFiring() {
   if (_neuralFireTimer) clearInterval(_neuralFireTimer);
   if (_neuralStatusTimer) clearInterval(_neuralStatusTimer);
   // Ambient activity — pause when the graph isn't visible to save CPU.
-  _neuralFireTimer = setInterval(() => {
+  _neuralFireTimer = _registerInterval(setInterval(() => {
     const el = document.getElementById('neural-graph');
     const sec = document.getElementById('sec-neural-graph');
     if (!el || (sec && sec.classList.contains('page-section-hidden')) || document.hidden) return;
     _neuralFire(2 + Math.floor(Math.random() * 3));   // 2–4 ambient synapses
-  }, 1800);
+  }, 1800));
   // Real sync — a big burst when the system completes a trading cycle.
-  _neuralStatusTimer = setInterval(async () => {
+  _neuralStatusTimer = _registerInterval(setInterval(async () => {
     try {
       const r = await fetch('/api/system/status', { cache: 'no-store' });
       const d = await r.json();
@@ -682,7 +683,7 @@ function _neuralStartFiring() {
         _neuralLastCycles = d.cycles;
       }
     } catch (_) { /* offline → just keep the ambient heartbeat */ }
-  }, 5000);
+  }, 5000));
 }
 
 function _initOfficeAutoResize() {
@@ -1792,10 +1793,11 @@ async function loadBenchmarkOverlay(days) {
 async function loadTradesTimeline() {
   if (typeof Chart === 'undefined' || !chartCanvases.trades_timeline) return;
   const hours = Number(tradesTimelineHours?.value || 24) || 24;
+  const symbol = (tradesTimelineSymbol?.value || '').trim();
+  let url = `/api/trades/timeline?hours=${encodeURIComponent(hours)}`;
+  if (symbol) url += `&symbol=${encodeURIComponent(symbol)}`;
   try {
-    const res = await fetch(`/api/trades/timeline?hours=${encodeURIComponent(hours)}`, {
-      cache: 'no-store',
-    });
+    const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) throw new Error('http ' + res.status);
     const data = await res.json();
     const items = data.items || [];
@@ -3046,7 +3048,7 @@ bindSidebarScrollSpy();
 loadReplaySnapshots();
 loadIncidentBundles();
 refreshApiHealth();
-setInterval(refreshApiHealth, 30000);
+_registerInterval(setInterval(refreshApiHealth, 30000));
 riskModalClose.addEventListener('click', closeRiskDrilldown);
 riskModal.addEventListener('click', (e) => {
   if (e.target === riskModal) closeRiskDrilldown();
@@ -3172,6 +3174,27 @@ if (marketRefreshInterval) marketRefreshInterval.addEventListener('change', () =
 // another tab — and immediately fetches fresh data when they come back.
 function _clearTimer(t) { if (t) clearInterval(t); return null; }
 
+/**
+ * Timer registry — captura handles de setInterval que não têm variável
+ * explícita (refreshApiHealth, refreshAuthState, _mkLoadEnvBadge, etc.),
+ * permitindo limpar TODOS no visibilitychange (C1 fix). Sem isso, esses
+ * timers continuam rodando indefinidamente mesmo com aba oculta.
+ *
+ * Uso: _registerInterval(setInterval(fn, ms))
+ * Cleanup: _clearAllRegisteredTimers() — chamado no visibilitychange.hidden
+ */
+const _registeredTimers = new Set();
+function _registerInterval(handle) {
+  if (handle != null) _registeredTimers.add(handle);
+  return handle;
+}
+function _clearAllRegisteredTimers() {
+  for (const h of _registeredTimers) {
+    try { clearInterval(h); } catch (_) { /* noop */ }
+  }
+  _registeredTimers.clear();
+}
+
 function bootCharts() {
   loadReplayCharts();
   chartsAutoRefreshTimer = _clearTimer(chartsAutoRefreshTimer);
@@ -3232,6 +3255,11 @@ document.addEventListener('visibilitychange', () => {
     _lbTimer                       = _clearTimer(_lbTimer);
     _memoryTimer                   = _clearTimer(_memoryTimer);
     _tsSummaryTimer                = _clearTimer(_tsSummaryTimer);
+    // C1 fix: limpar TODOS os timers órfãos registrados via _registerInterval
+    // (refreshApiHealth, refreshAuthState, _mkLoadEnvBadge, _ftbTimer,
+    // loadAndRender, _sysPowerTimer, _memLiveTimer, _neuralFire/StatusTimer).
+    // Sem isso ficavam rodando indefinidamente mesmo com aba oculta.
+    _clearAllRegisteredTimers();
   } else {
     bootCharts();
     bootQueue();
@@ -3257,6 +3285,95 @@ if (tradesTimelineHours) tradesTimelineHours.addEventListener('change', () => {
   savePrefs({ tradesTimelineHours: tradesTimelineHours.value || '24' });
   loadTradesTimeline();
 });
+if (tradesTimelineSymbol) tradesTimelineSymbol.addEventListener('change', () => {
+  savePrefs({ tradesTimelineSymbol: tradesTimelineSymbol.value || '' });
+  loadTradesTimeline();
+});
+
+/**
+ * Populate the trades-timeline symbol dropdown lazily on first use.
+ * Uses /api/env which already exposes settings.trading_assets to the UI.
+ * Fail-silent — dropdown stays with just "Todos" on any error.
+ */
+async function _populateTradesTimelineSymbols() {
+  if (!tradesTimelineSymbol || tradesTimelineSymbol.dataset.populated === '1') return;
+  try {
+    const res = await fetch('/api/env', { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    const assets = data.trading_assets || data.assets || [];
+    if (!Array.isArray(assets) || assets.length === 0) return;
+    const savedSym = (loadPrefs() || {}).tradesTimelineSymbol || '';
+    for (const sym of assets) {
+      const opt = document.createElement('option');
+      opt.value = String(sym).toUpperCase();
+      opt.textContent = String(sym).toUpperCase();
+      tradesTimelineSymbol.appendChild(opt);
+    }
+    if (savedSym) {
+      tradesTimelineSymbol.value = savedSym;
+    }
+    tradesTimelineSymbol.dataset.populated = '1';
+  } catch (_) { /* noop */ }
+}
+// Populate on boot — env endpoint is fast and cacheable.
+_populateTradesTimelineSymbols();
+
+/**
+ * Render the read-only risk-config panel on Settings page.
+ * Pulls /api/settings (risk_config block) and displays each key as a card.
+ * No interactive editing — operator edits .env + restart (intentional, B1).
+ */
+async function _loadRiskConfig() {
+  const el = document.getElementById('risk-config-cards');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/settings', { cache: 'no-store' });
+    if (!res.ok) { el.innerHTML = '<div class="muted-line">Falha ao carregar configuração.</div>'; return; }
+    const data = await res.json();
+    const rc = data.risk_config || {};
+    if (!Object.keys(rc).length) {
+      el.innerHTML = '<div class="muted-line">Configuração de risco não disponível.</div>';
+      return;
+    }
+    // Mapeamento campo → (label, formatter, env var)
+    const fmt = {
+      max_position_size_pct: { label: 'Tamanho máximo / posição', val: v => `${(v*100).toFixed(2)}%`, env: 'MAX_POSITION_SIZE_PCT' },
+      max_leverage: { label: 'Leverage máximo', val: v => `${v}x`, env: 'MAX_LEVERAGE' },
+      max_daily_drawdown_pct: { label: 'Drawdown diário (kill switch)', val: v => `${(v*100).toFixed(1)}%`, env: 'MAX_DAILY_DRAWDOWN_PCT' },
+      max_total_capital_pct: { label: 'Capital total empenhável', val: v => `${(v*100).toFixed(0)}%`, env: 'MAX_TOTAL_CAPITAL_PCT' },
+      max_consecutive_exec_errors: { label: 'Erros consecutivos / pause', val: v => `${v}`, env: 'MAX_CONSECUTIVE_EXEC_ERRORS' },
+      max_consecutive_vision_fallbacks: { label: 'Vision fallbacks / pause', val: v => `${v}`, env: 'MAX_CONSECUTIVE_VISION_FALLBACKS' },
+      trading_assets: { label: 'Ativos negociados', val: v => (Array.isArray(v) ? v.join(', ') : '—'), env: 'TRADING_ASSETS' },
+      paper_trading: { label: 'Paper trading', val: v => v ? '✓ ATIVO' : '✘ OFF', env: 'PAPER_TRADING', critical: v => !v },
+      live_trading_confirmed: { label: 'Live confirmado', val: v => v ? '⚠️ SIM' : '— NÃO', env: 'LIVE_TRADING_CONFIRMED', critical: v => v },
+      phantom_reconciliation_enabled: { label: 'Phantom reconciliation', val: v => v ? '✓ ON' : '✘ OFF', env: 'PHANTOM_RECONCILIATION_ENABLED' },
+      mainnet_first_week_hard_clamp: { label: 'Clamp 1ª semana mainnet', val: v => v ? '✓ ON' : '✘ OFF', env: 'MAINNET_FIRST_WEEK_HARD_CLAMP' },
+      llm_cost_aware_routing: { label: 'LLM cost-aware routing', val: v => v ? '✓ ON' : '✘ OFF', env: 'LLM_COST_AWARE_ROUTING' },
+      funding_gate_enabled: { label: 'Funding rate gate (Batman)', val: v => v ? '✓ ON' : '✘ OFF', env: 'FUNDING_GATE_ENABLED' },
+      funding_long_block_pct: { label: 'Funding LONG block ≥', val: v => `${v.toFixed(2)}%/8h`, env: 'FUNDING_LONG_BLOCK_PCT' },
+      funding_short_block_pct: { label: 'Funding SHORT block ≤', val: v => `${v.toFixed(2)}%/8h`, env: 'FUNDING_SHORT_BLOCK_PCT' },
+      trading_hours_enabled: { label: 'Janelas de operação', val: v => v ? '✓ ON' : '✘ OFF', env: 'TRADING_HOURS_ENABLED' },
+      trading_hours_start_utc: { label: 'Janela início (UTC)', val: v => `${String(v).padStart(2,'0')}:00`, env: 'TRADING_HOURS_START_UTC' },
+      trading_hours_end_utc: { label: 'Janela fim (UTC)', val: v => `${String(v).padStart(2,'0')}:00`, env: 'TRADING_HOURS_END_UTC' },
+    };
+    el.innerHTML = Object.keys(fmt).map(k => {
+      if (!(k in rc)) return '';
+      const f = fmt[k];
+      const v = rc[k];
+      const isCritical = typeof f.critical === 'function' ? f.critical(v) : false;
+      return `<div class="risk-config-card ${isCritical ? 'is-critical' : ''}" title="${escapeHtml(f.env)}">
+        <span class="risk-config-label">${escapeHtml(f.label)}</span>
+        <span class="risk-config-value">${escapeHtml(f.val(v))}</span>
+        <code class="risk-config-env">${escapeHtml(f.env)}</code>
+      </div>`;
+    }).join('');
+  } catch (_e) {
+    el.innerHTML = '<div class="muted-line">Erro ao carregar configuração de risco.</div>';
+  }
+}
+// Carrega ao boot E quando muda para a página Settings.
+_loadRiskConfig();
 if (filterMode) {
   filterMode.addEventListener('change', () => {
     savePrefs({ filterMode: filterMode.value || 'contains' });
@@ -3284,7 +3401,7 @@ if (authModal) authModal.addEventListener('click', (e) => {
   if (e.target === authModal) closeAuthModal();
 });
 refreshAuthState();
-setInterval(refreshAuthState, 60000);
+_registerInterval(setInterval(refreshAuthState, 60000));
 if (killswitchModal) killswitchModal.addEventListener('click', (e) => {
   if (e.target === killswitchModal) closeKillswitchModal();
 });
@@ -3499,12 +3616,12 @@ async function _mkLoadTopBar() {
 function _mkBootTopBar() {
   _mkLoadTopBar();
   if (_ftbTimer) clearInterval(_ftbTimer);
-  _ftbTimer = setInterval(_mkLoadTopBar, 30000);
+  _ftbTimer = _registerInterval(setInterval(_mkLoadTopBar, 30000));
   // The env badge is loaded once at boot and then refreshed lazily every
   // 60s. Changes are rare (operator edits .env and restarts) but a stale
   // badge is dangerous on a mainnet → testnet downgrade so we still poll.
   _mkLoadEnvBadge();
-  setInterval(_mkLoadEnvBadge, 60000);
+  _registerInterval(setInterval(_mkLoadEnvBadge, 60000));
   _mkLoadExchangeSelector();
 }
 
@@ -5232,7 +5349,7 @@ async function _bootGlobalMode() {
   await loadAndRender();
   // Refresh every 30s so a CLI/Telegram-driven mode change reflects in
   // the UI without a page reload.
-  setInterval(loadAndRender, 30000);
+  _registerInterval(setInterval(loadAndRender, 30000));
 }
 
 // ── Global Live WebSocket — sempre conectado (topbar + posições + live page) ──
@@ -5597,7 +5714,7 @@ function _bootSystemPower() {
   if (reboot) reboot.addEventListener('click', _sysPowerReboot);
   _sysPowerFetchStatus();
   if (_sysPowerTimer) clearInterval(_sysPowerTimer);
-  _sysPowerTimer = setInterval(_sysPowerFetchStatus, 5000);
+  _sysPowerTimer = _registerInterval(setInterval(_sysPowerFetchStatus, 5000));
 }
 
 // ── Boot all v2 features ─────────────────────────────────────
@@ -5817,14 +5934,14 @@ async function _loadWorkingMemory() {
 // Live "atualizado há Xs" indicator + faster auto-refresh feel.
 function _bootMemoryLive() {
   if (_memLiveTimer) clearInterval(_memLiveTimer);
-  _memLiveTimer = setInterval(() => {
+  _memLiveTimer = _registerInterval(setInterval(() => {
     const meta = document.getElementById('memory-meta');
     const sec = document.getElementById('sec-memory');
     if (!meta || !sec || sec.classList.contains('page-section-hidden')) return;
     if (!_memLastLoad) return;
     const secs = Math.round((Date.now() - _memLastLoad) / 1000);
     meta.textContent = `🟢 ao vivo · atualizado há ${secs}s`;
-  }, 1000);
+  }, 1000));
 }
 
 // ============================================================
