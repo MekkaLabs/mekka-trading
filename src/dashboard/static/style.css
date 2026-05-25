@@ -4611,6 +4611,7 @@ body[data-theme="light"] .page-nav-sub a { color: var(--muted); }
 .impr-accept { background: var(--good-dim); border-color: var(--good-border); color: var(--good); }
 .impr-reject { background: var(--bad-dim);  border-color: var(--bad-border);  color: var(--bad); }
 .impr-reset  { background: var(--bg-3); color: var(--muted); }
+.impr-claim  { background: var(--warn-dim, #3a2a14); border-color: var(--warn-border, #6b4a1a); color: var(--warn, #f5a623); }
 .page-nav-improvements { color: #7cb342; }
 
 /* MODO DEUS (god mode) — escalation of Force Execute (item c). Prominent

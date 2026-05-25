@@ -2642,6 +2642,21 @@ class NickFury(BaseAgent[list[CycleReport]]):
             except Exception as _exc:  # noqa: BLE001
                 self._log.warning(f"[NickFury] Phantom reconciliation skipped: {_exc}")
 
+        # [C5] Mentor — Charles Xavier: distila resolved outcomes + rejections
+        # + drawdown em ParameterSuggestion. Read-only; só audita se houver
+        # sugestão (zero spam). Roda a cada monitor cycle (~5min) — leve
+        # (~260ms quando há dados, instant quando vazio).
+        mentor_summary: dict = {}
+        try:
+            from src.agents.mentor import Mentor  # noqa: WPS433
+            mentor_report = await Mentor().run()
+            mentor_summary = {
+                "suggestions": len(mentor_report.suggestions),
+                "observation": mentor_report.observation_summary,
+            }
+        except Exception as _exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury] Mentor cycle skipped: {_exc}")
+
         return {
             "status": "halted" if plan.kill_switch_engaged else "ok",
             "positions_monitored": len(plan.positions),
@@ -2651,6 +2666,7 @@ class NickFury(BaseAgent[list[CycleReport]]):
             "cyclops_triggered": cyclops_triggered,
             "sl_guardian": sl_guardian,
             "phantom_recon": phantom_recon,
+            "mentor": mentor_summary,
         }
 
     async def _execute_recovery_plan(

@@ -6501,6 +6501,7 @@ function _imprRender() {
         <div class="impr-actions">
           <button type="button" class="impr-btn impr-accept" data-act="accepted" data-id="${escapeHtml(r.id)}" ${r.status === 'accepted' ? 'disabled' : ''}>✔ Aceitar</button>
           <button type="button" class="impr-btn impr-reject" data-act="rejected" data-id="${escapeHtml(r.id)}" ${r.status === 'rejected' ? 'disabled' : ''}>✘ Reprovar</button>
+          ${r.status === 'accepted' && (!dev || dev.dev_state === 'queued') ? `<button type="button" class="impr-btn impr-claim" data-act="claim" data-id="${escapeHtml(r.id)}" title="Marca este brief como 'em implementação' (dev_state=in_dev)">🛠 Vou implementar</button>` : ''}
           ${r.status !== 'pending' ? `<button type="button" class="impr-btn impr-reset" data-act="pending" data-id="${escapeHtml(r.id)}">↺ Reabrir</button>` : ''}
         </div>
       </div>
@@ -6568,6 +6569,35 @@ async function _imprApprovePr(recId, prNumber) {
     await _imprLoad();
   } catch (e) {
     alert('❌ Falha ao aprovar o PR: ' + (e && e.message ? e.message : e));
+  }
+}
+
+async function _imprClaim(id) {
+  // Mark an accepted brief as in_dev so the operator/team sees what is
+  // actively being worked on vs what is still dead-letter "queued".
+  const claimer = (window.prompt('Quem vai implementar?', 'dev') || 'dev').trim();
+  if (!claimer) return;
+  try {
+    const res = await fetch('/api/improvements/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, claimer }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      // Refresh PR/dev status (the badge update needs it).
+      try {
+        const ps = await fetch('/api/improvements/pr-status');
+        if (ps.ok) {
+          _imprPrStatus = await ps.json();
+        }
+      } catch (_) { /* noop */ }
+      _imprRender();
+    } else {
+      alert('❌ Não foi possível reivindicar: ' + (data.reason || 'erro desconhecido'));
+    }
+  } catch (e) {
+    alert('❌ Falha de conexão ao reivindicar.');
   }
 }
 
@@ -6691,6 +6721,8 @@ function _bootImprovements() {
       if (act === 'approve-pr') {
         const pr = btn.dataset.pr === '' ? null : Number(btn.dataset.pr);
         _imprApprovePr(id, pr);
+      } else if (act === 'claim') {
+        _imprClaim(id);
       } else if (act === 'accepted' || act === 'rejected' || act === 'pending') {
         _imprDecide(id, act);
       }
