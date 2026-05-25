@@ -563,6 +563,7 @@ class MekkaDashboardServer:
         r.add_post("/api/improvements/approve-pr", self._handle_improvements_approve_pr)
         r.add_post("/api/improvements/claim", self._handle_improvements_claim)
         r.add_get("/api/improvements/kpi", self._handle_improvements_kpi)
+        r.add_get("/api/improvements/decision-history", self._handle_improvements_history)
         r.add_get("/api/mentor/suggestions", self._handle_mentor_suggestions)
 
     def _register_backtest_debate_routes(self, r) -> None:
@@ -6458,6 +6459,10 @@ class MekkaDashboardServer:
     async def _handle_improvements_claim(self, request: web.Request) -> web.Response:
         from src.dashboard.routers import improvements as _impr
         return await _impr.handle_claim(self, request)
+
+    async def _handle_improvements_history(self, request: web.Request) -> web.Response:
+        from src.dashboard.routers import improvements as _impr
+        return await _impr.handle_decision_history(self, request)
 
     async def _handle_mentor_suggestions(self, _: web.Request) -> web.Response:
         """GET /api/mentor/suggestions — Charles Xavier proposes parameter deltas."""

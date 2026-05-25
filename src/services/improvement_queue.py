@@ -251,10 +251,9 @@ def update_brief_status(
             if claimer:
                 entry["claimer"] = str(claimer)
             index[rec_id] = entry
-            _INDEX_FILE.write_text(
-                json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-            index_updated = True
+            from src.services.atomic_json import atomic_write_json  # noqa: WPS433
+            if atomic_write_json(_INDEX_FILE, index):
+                index_updated = True
     except (OSError, ValueError) as exc:
         logger.warning(f"[improvement_queue] could not update index {rec_id}: {exc}")
 
@@ -300,9 +299,8 @@ def enqueue_brief(rec: dict) -> str:
             "queued_at": existing.get("queued_at") or created_at,
             "dev_state": "queued",
         }
-        _INDEX_FILE.write_text(
-            json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        from src.services.atomic_json import atomic_write_json  # noqa: WPS433
+        atomic_write_json(_INDEX_FILE, index)
     except (OSError, ValueError) as exc:
         logger.warning(f"[improvement_queue] could not update index {rec_id}: {exc}")
         # Brief was written successfully — still return its path.

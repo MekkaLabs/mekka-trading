@@ -4615,6 +4615,68 @@ body[data-theme="light"] .page-nav-sub a { color: var(--muted); }
 .impr-reject { background: var(--bad-dim);  border-color: var(--bad-border);  color: var(--bad); }
 .impr-reset  { background: var(--bg-3); color: var(--muted); }
 .impr-claim  { background: var(--warn-dim, #3a2a14); border-color: var(--warn-border, #6b4a1a); color: var(--warn, #f5a623); }
+
+/* Inline button spinner — usado em claim e ações async com feedback visual */
+.btn-spinner {
+  display: inline-block; width: 12px; height: 12px;
+  border: 2px solid currentColor; border-right-color: transparent;
+  border-radius: 50%; animation: btn-spin 0.7s linear infinite;
+  vertical-align: -2px; margin-right: 4px;
+}
+@keyframes btn-spin { to { transform: rotate(360deg); } }
+
+/* Toast container — fixo top-right, empilha vertical */
+.toast-container {
+  position: fixed; top: 16px; right: 16px; z-index: 9999;
+  display: flex; flex-direction: column; gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  padding: 10px 16px; border-radius: var(--r-md);
+  font-weight: 600; font-size: 0.9em;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  background: var(--bg-2); color: var(--text);
+  border-left: 4px solid var(--muted);
+  opacity: 0; transform: translateX(20px);
+  transition: opacity 0.28s ease, transform 0.28s ease;
+  pointer-events: auto; max-width: 380px;
+}
+.toast-visible { opacity: 1; transform: translateX(0); }
+.toast-success { border-left-color: var(--good, #2bce6c); }
+.toast-error   { border-left-color: var(--bad, #e84d4d); }
+.toast-warn    { border-left-color: var(--warn, #f5a623); }
+.toast-info    { border-left-color: var(--accent, #4a9eff); }
+
+/* Banner de risco no PnL — drawdown elevado próximo do kill switch */
+.pnl-banner {
+  grid-column: 1 / -1;
+  padding: 10px 14px; border-radius: var(--r-md);
+  font-weight: 600; font-size: 0.95em;
+  margin-bottom: 10px; display: flex; align-items: center; gap: 8px;
+}
+.pnl-banner-warn { background: var(--warn-dim, #3a2a14); color: var(--warn, #f5a623); border-left: 4px solid var(--warn, #f5a623); }
+.pnl-banner-crit { background: var(--bad-dim,  #3a1414); color: var(--bad,  #e84d4d); border-left: 4px solid var(--bad,  #e84d4d); animation: banner-pulse 1.8s ease-in-out infinite; }
+.pnl-banner a { color: inherit; text-decoration: underline; }
+@keyframes banner-pulse { 0%, 100% { box-shadow: 0 0 0 rgba(232, 77, 77, 0); } 50% { box-shadow: 0 0 12px rgba(232, 77, 77, 0.4); } }
+
+/* Audit trail de decisões — collapsable na página Melhorias */
+.impr-history-wrap { margin: 12px 0; padding: 8px 12px; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-md); }
+.impr-history-summary { cursor: pointer; font-weight: 600; padding: 4px 0; user-select: none; }
+.impr-history-summary:hover { color: var(--accent, #4a9eff); }
+.impr-history { margin-top: 10px; max-height: 360px; overflow-y: auto; }
+.impr-history-table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+.impr-history-table th, .impr-history-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.impr-history-table th { font-weight: 600; color: var(--muted); }
+.impr-history-table tr:hover td { background: rgba(255, 255, 255, 0.03); }
+.impr-history-event { font-size: 0.85em; padding: 2px 6px; background: var(--bg-3); border-radius: 4px; white-space: nowrap; }
+
+/* Painel Mentor (Charles Xavier) — sugestões de parâmetro tipadas */
+.impr-mentor { margin: 12px 0; padding: 12px; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-md); }
+.impr-mentor:empty { display: none; }
+.impr-mentor-suggestions { margin-top: 10px; }
+.impr-mentor-card { transition: transform var(--t-base), box-shadow var(--t-base); }
+.impr-mentor-card:hover { transform: translateX(2px); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18); }
+.impr-mentor-card code { background: rgba(0, 0, 0, 0.25); padding: 1px 4px; border-radius: 3px; }
 .page-nav-improvements { color: #7cb342; }
 
 /* MODO DEUS (god mode) — escalation of Force Execute (item c). Prominent

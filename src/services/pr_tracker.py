@@ -65,15 +65,9 @@ def _load_store() -> dict[str, dict]:
 
 
 def _save_store(store: dict[str, dict]) -> bool:
-    try:
-        _DATA_DIR.mkdir(parents=True, exist_ok=True)
-        _PRS_FILE.write_text(
-            json.dumps(store, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        return True
-    except (OSError, ValueError) as exc:
-        logger.warning(f"[pr_tracker] could not persist store: {exc}")
-        return False
+    from src.services.atomic_json import atomic_write_json  # noqa: WPS433
+
+    return atomic_write_json(_PRS_FILE, store)
 
 
 def _gh_pr_view(pr_number: int) -> dict[str, Any] | None:

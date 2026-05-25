@@ -551,9 +551,15 @@ class PortfolioManager(BaseAgent[EquitySnapshot]):
             return default
 
     def _save_cached_snapshot(self, snapshot: EquitySnapshot) -> None:
+        # Atomic write: portfolio cache lê de boot path, corrupção do
+        # arquivo durante crash mid-write fazia o sistema cair em fallback
+        # PAPER mesmo com dados válidos em memória.
         try:
-            _SNAPSHOT_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            _SNAPSHOT_CACHE_FILE.write_text(snapshot.model_dump_json(indent=2))
+            from src.services.atomic_json import atomic_write_json  # noqa: WPS433
+            atomic_write_json(
+                _SNAPSHOT_CACHE_FILE,
+                json.loads(snapshot.model_dump_json()),
+            )
         except Exception:  # noqa: BLE001
             pass
 

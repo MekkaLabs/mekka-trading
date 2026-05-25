@@ -166,11 +166,10 @@ class Sage:
         return {}
 
     def _save_improvement_baselines(self, data: dict) -> None:
-        try:
-            _DATA_DIR.mkdir(parents=True, exist_ok=True)
-            _IMPROVEMENT_BASELINES_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[Sage] could not persist improvement baselines: %s", exc)
+        from src.services.atomic_json import atomic_write_json  # noqa: WPS433
+
+        if not atomic_write_json(_IMPROVEMENT_BASELINES_FILE, data):
+            logger.warning("[Sage] could not persist improvement baselines (atomic write failed)")
 
     # ------------------------------------------------------------------
     # Metric snapshot
@@ -305,7 +304,7 @@ class Sage:
             history.append(snap)
             if len(history) > _MAX_SNAPSHOTS:
                 history = history[-_MAX_SNAPSHOTS:]
-            _DATA_DIR.mkdir(parents=True, exist_ok=True)
-            _BASELINES_FILE.write_text(json.dumps(history, indent=2), encoding="utf-8")
+            from src.services.atomic_json import atomic_write_json  # noqa: WPS433
+            atomic_write_json(_BASELINES_FILE, history)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[Sage] could not persist baseline: %s", exc)

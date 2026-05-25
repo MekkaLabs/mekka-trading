@@ -1683,6 +1683,25 @@ function renderPnlCards(summary) {
   }
   const w = summary.window || {};
   const a = summary.all_time || {};
+
+  // Banner de risco proporcional ao max_drawdown da janela. Limite default do
+  // sistema é 10%/dia (max_daily_drawdown_pct); >=7% = warn, >=9% = critical.
+  // Banner é prepended (vai para fora dos cards) — clique abre o playbook.
+  const ddPct = Math.abs(Number(w.max_drawdown_pct || 0) * 100);
+  let bannerHtml = '';
+  if (ddPct >= 9.0) {
+    bannerHtml = `<div class="pnl-banner pnl-banner-crit" role="alert"
+      title="Drawdown da janela próximo do kill switch (10%/dia). Revisar urgência.">
+      🚨 Drawdown <b>${ddPct.toFixed(2)}%</b> está ≥ 9% — próximo do kill switch (10%/dia).
+      Considere engajar manualmente ou consultar o
+      <a href="#" onclick="alert('Consulte: docs/obsidian/30 - Resources/Runbooks/INCIDENT-PLAYBOOK.md');return false">runbook de incidente</a>.
+    </div>`;
+  } else if (ddPct >= 7.0) {
+    bannerHtml = `<div class="pnl-banner pnl-banner-warn"
+      title="Drawdown elevado — observe próximos trades de perto.">
+      ⚠️ Drawdown <b>${ddPct.toFixed(2)}%</b> está ≥ 7% — atenção elevada, próximos trades sob observação.
+    </div>`;
+  }
   const winRateW = w.win_rate == null ? '-' : `${(w.win_rate * 100).toFixed(1)}%`;
   const winRateA = a.win_rate == null ? '-' : `${(a.win_rate * 100).toFixed(1)}%`;
   const cards = [
@@ -1711,7 +1730,7 @@ function renderPnlCards(summary) {
       cls: 'neg',
     },
   ];
-  pnlCards.innerHTML = cards.map((c) => (
+  pnlCards.innerHTML = bannerHtml + cards.map((c) => (
     `<div class="pnl-card">
        <span class="pnl-label">${escapeHtml(c.label)}</span>
        <span class="pnl-value ${c.cls}">${escapeHtml(c.value)}</span>
@@ -6314,6 +6333,7 @@ async function _imprLoad(fresh = false) {
     }
     _imprRender();
     _imprLoadKpi();
+    _imprLoadMentor();
     _loadMainnetReadiness();
   } catch (err) {
     if (list) list.innerHTML = `<div class="trade-result-fail">❌ Erro: ${escapeHtml(String(err))}</div>`;
@@ -6353,6 +6373,114 @@ async function _loadMainnetReadiness(force = false) {
       <div class="impr-kpi-row" style="border-left:3px solid ${headerColor};padding-left:8px">${gateHtml}</div>`;
     const btn = document.getElementById('mainnet-readiness-refresh');
     if (btn) btn.addEventListener('click', () => _loadMainnetReadiness(true));
+  } catch (_e) {
+    el.innerHTML = '';
+  }
+}
+
+async function _imprLoadHistory() {
+  // Audit trail das decisões do operador (últimas 20). Read-only.
+  // Lazy: só carrega quando o <details> for aberto pela primeira vez.
+  const el = document.getElementById('impr-history');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/improvements/decision-history?limit=20', { cache: 'no-store' });
+    if (!res.ok) { el.innerHTML = '<div class="muted-line">Falha ao carregar histórico.</div>'; return; }
+    const data = await res.json();
+    const rows = data.history || [];
+    if (rows.length === 0) {
+      el.innerHTML = '<div class="muted-line">Sem decisões registradas ainda.</div>';
+      return;
+    }
+    const eventLabel = {
+      IMPROVEMENT_DECISION: '🎯 decisão',
+      IMPROVEMENT_CLAIMED: '🛠 reivindicação',
+      IMPROVEMENT_PR_APPROVED: '✅ PR aprovado',
+    };
+    el.innerHTML = `<table class="impr-history-table">
+      <thead><tr><th>Quando</th><th>Tipo</th><th>Detalhe</th></tr></thead>
+      <tbody>${rows.map(r => {
+        const when = r.timestamp ? new Date(r.timestamp).toLocaleString('pt-BR') : '—';
+        const lbl = eventLabel[r.event] || r.event;
+        return `<tr>
+          <td class="muted-line" style="white-space:nowrap">${escapeHtml(when)}</td>
+          <td><span class="impr-history-event">${lbl}</span></td>
+          <td>${escapeHtml(r.message || '')}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table>`;
+  } catch (_e) {
+    el.innerHTML = '<div class="muted-line">Erro ao buscar histórico.</div>';
+  }
+}
+
+async function _imprLoadMentor() {
+  // Painel Mentor (Charles Xavier) — ParameterSuggestion deltas a partir de
+  // outcomes resolvidos + Batman rejections + drawdown. Suggestion vazia é
+  // estado válido (ainda não há dados suficientes para sugerir).
+  const el = document.getElementById('impr-mentor');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/mentor/suggestions', { cache: 'no-store' });
+    if (!res.ok) { el.innerHTML = ''; return; }
+    const data = await res.json();
+    const sugs = data.suggestions || [];
+    const obs = data.observation_summary || {};
+    const ts = data.generated_at ? new Date(data.generated_at).toLocaleTimeString('pt-BR') : '';
+
+    const obsRow = `
+      <div class="impr-kpi-row">
+        <div class="impr-kpi-stat" title="Outcomes resolvidos (WIN/LOSS/NEUTRAL) usados como evidência">
+          <b>${obs.resolved_outcomes != null ? obs.resolved_outcomes : '—'}</b><span>outcomes resolvidos</span>
+        </div>
+        <div class="impr-kpi-stat" title="Win rate dos trades resolvidos">
+          <b>${obs.win_rate != null ? `${(obs.win_rate * 100).toFixed(0)}%` : '—'}</b><span>win rate</span>
+        </div>
+        <div class="impr-kpi-stat" title="Rejeições do Batman observadas recentemente">
+          <b>${obs.rejections_observed != null ? obs.rejections_observed : '—'}</b><span>rejeições Batman</span>
+        </div>
+        <div class="impr-kpi-stat" title="Drawdown atual em % do equity">
+          <b>${obs.drawdown_today_pct != null ? `${(obs.drawdown_today_pct * 100).toFixed(2)}%` : '—'}</b><span>drawdown hoje</span>
+        </div>
+      </div>`;
+
+    let sugBlock;
+    if (sugs.length === 0) {
+      sugBlock = `<div class="muted-line" style="margin-top:8px">
+        Sem sugestões agora — Mentor precisa de mais outcomes resolvidos para
+        identificar padrões acionáveis. Comportamento esperado em sistemas com
+        poucos trades fechados.
+      </div>`;
+    } else {
+      const items = sugs.map(s => {
+        const dirIcon = s.direction === 'tighten' ? '🛡️' : (s.direction === 'loosen' ? '🔓' : '↔️');
+        const dirColor = s.direction === 'tighten' ? 'var(--good, #2bce6c)' : 'var(--warn, #f5a623)';
+        const autoApply = s.can_auto_apply
+          ? `<span title="Pode ser aplicado sem revisão (apertando risco)" style="color:var(--good, #2bce6c);font-weight:600">✓ auto-aplicável</span>`
+          : `<span title="Requer revisão humana (afrouxando risco)" style="color:var(--warn, #f5a623);font-weight:600">⚠️ revisão humana</span>`;
+        const conf = s.confidence != null ? `${Math.round(s.confidence * 100)}%` : '—';
+        return `
+          <div class="impr-mentor-card" style="border-left:3px solid ${dirColor};padding:8px 12px;margin:6px 0;background:var(--bg-3, rgba(255,255,255,0.04));border-radius:6px">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap">
+              <strong>${dirIcon} ${escapeHtml(s.parameter_name || '?')}</strong>
+              <span style="font-size:0.85em" class="muted-line">conf ${conf} · ${autoApply}</span>
+            </div>
+            <div style="font-family:monospace;font-size:0.9em;margin:4px 0">
+              ${escapeHtml(String(s.current_value))} → <b>${escapeHtml(String(s.suggested_value))}</b>
+            </div>
+            <div style="font-size:0.9em">${escapeHtml(s.reason || '')}</div>
+            <div style="font-family:monospace;font-size:0.78em;margin-top:6px;color:var(--muted)">
+              <code>${escapeHtml(s.env_override || '')}</code> — colar no .env e reiniciar
+            </div>
+          </div>`;
+      }).join('');
+      sugBlock = `<div class="impr-mentor-suggestions">${items}</div>`;
+    }
+
+    el.innerHTML = `
+      <div class="impr-kpi-title">🎓 Mentor — Sugestões de Parâmetro <span class="muted-line">(Charles Xavier · ${ts})</span></div>
+      ${obsRow}
+      ${sugBlock}`;
   } catch (_e) {
     el.innerHTML = '';
   }
@@ -6572,11 +6700,45 @@ async function _imprApprovePr(recId, prNumber) {
   }
 }
 
+/**
+ * Toast helper — non-blocking ephemeral notification. Stacks at top-right.
+ * Use: showToast('Sucesso', 'success'), showToast('Falha', 'error', 5000)
+ */
+function showToast(message, level = 'info', durationMs = 3500) {
+  let container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    container.className = 'toast-container';
+    document.body.appendChild(container);
+  }
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${level}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  // Trigger CSS transition (off → on after next frame)
+  requestAnimationFrame(() => toast.classList.add('toast-visible'));
+  setTimeout(() => {
+    toast.classList.remove('toast-visible');
+    setTimeout(() => toast.remove(), 280);
+  }, Math.max(1000, durationMs));
+}
+
 async function _imprClaim(id) {
   // Mark an accepted brief as in_dev so the operator/team sees what is
   // actively being worked on vs what is still dead-letter "queued".
   const claimer = (window.prompt('Quem vai implementar?', 'dev') || 'dev').trim();
   if (!claimer) return;
+
+  // Visual feedback: disable + spinner on the clicked button (any with this
+  // data-id+data-act="claim"). Re-enable in finally regardless of outcome.
+  const btn = document.querySelector(`button[data-act="claim"][data-id="${CSS.escape(id)}"]`);
+  const originalLabel = btn ? btn.innerHTML : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<span class="btn-spinner"></span> Reivindicando…`;
+  }
+
   try {
     const res = await fetch('/api/improvements/claim', {
       method: 'POST',
@@ -6593,11 +6755,18 @@ async function _imprClaim(id) {
         }
       } catch (_) { /* noop */ }
       _imprRender();
+      const note = data.note ? ` (${data.note})` : '';
+      showToast(`✓ ${id.slice(0, 8)} reivindicado por ${claimer}${note}`, 'success');
     } else {
-      alert('❌ Não foi possível reivindicar: ' + (data.reason || 'erro desconhecido'));
+      showToast(`❌ ${data.reason || 'Falha desconhecida ao reivindicar'}`, 'error', 5000);
     }
   } catch (e) {
-    alert('❌ Falha de conexão ao reivindicar.');
+    showToast('❌ Falha de conexão ao reivindicar.', 'error', 5000);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = originalLabel;
+    }
   }
 }
 
@@ -6706,6 +6875,16 @@ function _bootImprovements() {
   if (refresh) refresh.addEventListener('click', () => _imprLoad(false));
   const scan = document.getElementById('impr-scan');
   if (scan) scan.addEventListener('click', _imprScan);
+
+  // Lazy-load do histórico de decisões quando o <details> abre.
+  // Recarrega a cada open para refletir mudanças (decisão recente, claim, PR).
+  const historyWrap = document.getElementById('impr-history-wrap');
+  if (historyWrap && !historyWrap.dataset.bound) {
+    historyWrap.dataset.bound = '1';
+    historyWrap.addEventListener('toggle', () => {
+      if (historyWrap.open) _imprLoadHistory();
+    });
+  }
 
   // Delegated click handler — inline onclick attributes are blocked by the
   // dashboard's strict CSP (script-src has no 'unsafe-inline'), which is why

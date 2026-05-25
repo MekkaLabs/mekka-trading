@@ -104,6 +104,47 @@ async def handle_pr_status(server, _: web.Request) -> web.Response:
         return web.json_response({}, status=200)
 
 
+async def handle_decision_history(server, request: web.Request) -> web.Response:
+    """GET /api/improvements/decision-history — últimas N decisões do operador.
+
+    Lê audit_log eventos IMPROVEMENT_DECISION + IMPROVEMENT_CLAIMED +
+    IMPROVEMENT_PR_APPROVED para dar visibilidade do trabalho do operador.
+    Default limit=20.
+    """
+    try:
+        from src.persistence.repository import MekkaRepository as _MR  # noqa: WPS433
+
+        limit_raw = request.query.get("limit", "20")
+        try:
+            limit = max(1, min(int(limit_raw), 200))
+        except (TypeError, ValueError):
+            limit = 20
+
+        rows = await _MR.list_recent_audit(limit=500)
+        relevant_events = (
+            "IMPROVEMENT_DECISION",
+            "IMPROVEMENT_CLAIMED",
+            "IMPROVEMENT_PR_APPROVED",
+        )
+        filtered = [r for r in rows if r.event in relevant_events][:limit]
+        out = [
+            {
+                "id": r.id,
+                "timestamp": r.timestamp.isoformat(),
+                "agent": r.agent,
+                "event": r.event,
+                "severity": r.severity,
+                "message": r.message,
+                "payload": r.payload or {},
+            }
+            for r in filtered
+        ]
+        return web.json_response({"history": out, "count": len(out)}, status=200)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("decision-history failed: %s", exc, exc_info=True)
+        return web.json_response({"history": [], "count": 0, "error": str(exc)}, status=200)
+
+
 async def handle_kpi(server, _: web.Request) -> web.Response:
     """GET /api/improvements/kpi — department KPI from Sage."""
     out: dict = {"kpi": {}, "latest_snapshot": None, "impact": None}

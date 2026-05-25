@@ -1139,6 +1139,20 @@
         <!-- Mainnet readiness — preflight gates ao vivo -->
         <div class="impr-kpi" id="mainnet-readiness-tile"></div>
 
+        <!-- Mentor (Charles Xavier) — ParameterSuggestion deltas a partir de
+             outcomes resolvidos + Batman rejections + drawdown. Endpoint:
+             /api/mentor/suggestions (lê a cada refresh do conselho). -->
+        <div class="impr-mentor" id="impr-mentor"></div>
+
+        <!-- Audit trail das decisões do operador (accept/reject/claim/approve)
+             — read-only, últimas 20. Endpoint: /api/improvements/decision-history. -->
+        <details class="impr-history-wrap" id="impr-history-wrap">
+          <summary class="impr-history-summary">🧾 Histórico de decisões (operador)</summary>
+          <div class="impr-history" id="impr-history">
+            <div class="muted-line">Carregando histórico…</div>
+          </div>
+        </details>
+
         <h3 class="impr-kanban-title">📋 Quadro de Status</h3>
         <div class="impr-kanban" id="impr-kanban"></div>
 
