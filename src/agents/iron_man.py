@@ -1386,6 +1386,27 @@ class IronMan(BaseAgent[ExecutionResult]):
             summary["errors"].append(f"db read: {exc}")
             return summary
 
+        # Defensive: detect symbols with a VERY recent trade (< 60s) to skip
+        # phantom recon for them. Binance fetch_positions can lag a few seconds
+        # behind a fill; if we reconcile during that window we'd see DB=open,
+        # exchange=empty and insert a synthetic close that is incorrect (the
+        # exchange DOES have the position, just hasn't reported it yet).
+        # Premortem 2026-05-25 flagged this as risk #3.
+        from datetime import datetime as _dt_ph, timezone as _tz_ph, timedelta as _td_ph
+        _now_ph = _dt_ph.now(_tz_ph.utc)
+        _fresh_window = _td_ph(seconds=60)
+        recent_trade_symbols: set[str] = set()
+        for t in trades or []:
+            ts = getattr(t, "timestamp", None)
+            if ts is None:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=_tz_ph.utc)
+            if (_now_ph - ts) <= _fresh_window:
+                sym_recent = (getattr(t, "symbol", "") or "").upper()
+                if sym_recent:
+                    recent_trade_symbols.add(sym_recent)
+
         db_net: dict[str, float] = defaultdict(float)
         for t in trades or []:
             if getattr(t, "is_paper", True):
@@ -1402,6 +1423,18 @@ class IronMan(BaseAgent[ExecutionResult]):
 
         db_open = {s for s, q in db_net.items() if abs(q) > 1e-8}
         summary["checked"] = len(db_open)
+        if not db_open:
+            return summary
+
+        # Skip symbols with very fresh trades — exchange may still be syncing.
+        fresh_skipped = db_open & recent_trade_symbols
+        if fresh_skipped:
+            self._log.info(
+                f"[IronMan/phantom] skipping {sorted(fresh_skipped)} "
+                f"— trade(s) <60s old, exchange may be syncing"
+            )
+            summary["fresh_skipped"] = sorted(fresh_skipped)
+            db_open = db_open - fresh_skipped
         if not db_open:
             return summary
 

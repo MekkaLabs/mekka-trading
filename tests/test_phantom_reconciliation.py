@@ -203,6 +203,47 @@ async def test_paper_trades_ignored():
 
 
 @pytest.mark.asyncio
+async def test_fresh_trade_skips_phantom_recon():
+    """If a trade is < 60s old, phantom recon skips that symbol (premortem #3
+    defensive: exchange may still be syncing after a recent fill)."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    fresh_trade = _trade("BTC", "long", 0.05)
+    fresh_trade.timestamp = now  # very recent
+
+    fake_exchange = MagicMock()
+    fake_exchange.fetch_positions = AsyncMock(return_value=[])  # exchange empty
+    im = IronMan()
+    im._get_ccxt_exchange = AsyncMock(return_value=fake_exchange)
+    saved: list = []
+
+    async def _capture(t):
+        saved.append(t)
+        return 1
+
+    with patch("src.agents.iron_man.settings") as fake_settings, patch(
+        "src.persistence.repository.MekkaRepository.list_recent_trades",
+        AsyncMock(return_value=[fresh_trade]),
+    ), patch(
+        "src.persistence.repository.MekkaRepository.save_trade",
+        AsyncMock(side_effect=_capture),
+    ), patch(
+        "src.persistence.repository.MekkaRepository.log_event", AsyncMock()
+    ):
+        fake_settings.paper_trading = False
+        fake_settings.phantom_reconciliation_enabled = True
+        fake_settings.active_exchange = "binance"
+        result = await im.reconcile_phantom_positions()
+
+    # BTC has a recent trade — should be skipped
+    assert "fresh_skipped" in result
+    assert "BTC" in result["fresh_skipped"]
+    assert result["phantom_closed"] == []
+    assert saved == []  # NO synthetic close inserted
+
+
+@pytest.mark.asyncio
 async def test_fetch_positions_failure_records_error():
     """Network/auth failure on fetch_positions is captured, never raises."""
     fake_trades = [_trade("BTC", "long", 0.05)]

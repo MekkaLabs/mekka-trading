@@ -437,6 +437,52 @@ class MekkaRepository:
             ).scalars().all()
             return list(rows)
 
+    @staticmethod
+    async def get_closed_trades_since(since: datetime) -> list[TradeRecord]:
+        """Trades with pnl_usd realized (closed) since ``since``, oldest-first.
+
+        Used by Beast for self-improvement analysis (win rate, profit factor,
+        per-symbol breakdown). Treats a row as "closed" when pnl_usd is
+        populated (set by Cyclops at SL/TP trigger or dashboard manual close).
+        Before this method existed, Beast silently swallowed the AttributeError
+        and produced 0 proposals — the agente of "self-improvement" was inerte.
+        """
+        async with get_session() as session:
+            rows = (
+                await session.execute(
+                    select(TradeRecord)
+                    .where(TradeRecord.timestamp >= since)
+                    .where(TradeRecord.pnl_usd.is_not(None))
+                    .order_by(TradeRecord.timestamp.asc())
+                )
+            ).scalars().all()
+            return list(rows)
+
+    @staticmethod
+    async def get_events_since(
+        agent: Optional[str] = None,
+        event: Optional[str] = None,
+        since: Optional[datetime] = None,
+    ) -> list[AuditRecord]:
+        """Audit events filtered by agent/event/since, oldest-first.
+
+        Used by Beast (Batman gate counts, ProfessorX cycle latency) and
+        any future analyst that needs raw audit rows scoped by agent +
+        event + time window. All filters are optional; passing none returns
+        the full audit_log (be careful in prod — table grows fast).
+        """
+        async with get_session() as session:
+            stmt = select(AuditRecord)
+            if agent:
+                stmt = stmt.where(AuditRecord.agent == agent)
+            if event:
+                stmt = stmt.where(AuditRecord.event == event)
+            if since is not None:
+                stmt = stmt.where(AuditRecord.timestamp >= since)
+            stmt = stmt.order_by(AuditRecord.timestamp.asc())
+            rows = (await session.execute(stmt)).scalars().all()
+            return list(rows)
+
     # ------------------------------------------------------------------
     # Story 069 — Re-entry cooldown: last Cyclops SL close for symbol
     # ------------------------------------------------------------------
