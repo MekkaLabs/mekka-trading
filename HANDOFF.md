@@ -1,28 +1,31 @@
 # 🤝 Mekka Trading — Handoff para o próximo chat
 
-> **Data**: 2026-05-25
-> **Branch**: `main` — **10 commits ahead** de `origin/main`, **nada pushed** (push é do @devops)
+> **Data**: 2026-05-25 (sessão 2 do dia, depois de `b849758`)
+> **Branch**: `main` — **16 commits ahead** de `origin/main`, **nada pushed** (push é do @devops)
 > **Estado**: ✅ rodando em **Binance testnet LIVE mode**, dashboard saudável,
-> mainnet readiness verde, **bloqueio restante é humano** (gates H1–H6)
+> bug do banner kill_switch resolvido, **3 frentes maiores entregues**
+> (aprendizagem real, pipeline melhorias, segurança mainnet)
 
-> _O HANDOFF anterior (2026-05-21, era Bybit testnet) está sintetizado em
-> `~/.claude/.../memory/project-binance-integration.md`._
+> _O handoff anterior dessa data (sessão 1 — `HANDOFF.md` pré-`57bdc96`) está
+> capturado no histórico git; este consolida ambas as sessões._
 
 ---
 
 ## ⚡ TL;DR
 
-- Sistema **rodando em Binance testnet** (`PAPER_TRADING=false`, `BINANCE_TESTNET=true`,
-  modo LIVE de testnet), 0 posições, equity ~$5.007 testnet, kill switch off.
-- **10 commits locais à frente do origin**, nada uncommitted. Push fica com **@devops**.
-- **`/api/mainnet-readiness` → `all_pass=true`** (4 warnings esperados: testnet
-  ativo, autorização não-assinada, <7 dias de dados, live confirmado).
-- 🐛 **Bug ATIVO da testnet (externo):** Binance testnet retorna `-4045 "Reach max
-  stop order limit"` para BTC mesmo com `fetch_open_orders` retornando 0 e
-  `cancel_all_orders` aplicado. Quota dessincronizada do estado real → trade novo
-  no testnet falha. Workaround: aguardar reset OU nova conta testnet.
-- O **SL fail-safe foi exercitado no teste e FUNCIONOU**: emergency_flatten
-  fechou a posição quando -4045 voltou. Nenhuma posição nua. 🎯
+- **6 commits** novos hoje, todos locais em `main` (push fica com @devops).
+- Sistema **rodando em Binance testnet** (`PAPER_TRADING=false`,
+  `BINANCE_TESTNET=true`), 0 posições, mode=testnet, cycles ativos.
+- **3 frentes maiores entregues** (priorizadas a partir de 3 auditorias paralelas):
+  - **T0** Segurança mainnet — phantom reconciliation (`bd036b5`)
+  - **T2** Pipeline melhorias — sync brief↔PR + claim (`729da36`, `29f3f80`)
+  - **T1** Aprendizagem real — agente Mentor (`fde8c01`, `29f3f80`)
+- Bug do banner `KILL_SWITCH_EVENT` em loop **resolvido** (`ef5da99`).
+- **4 gaps de "writer órfão"** de memória **fechados** (`57bdc96`) — Vision
+  finalmente tem 4 prompt-blocks alimentados com outcomes reais.
+- **39 novos testes**, todos verdes. **63/63 PASS** nas suítes principais
+  (zero regressão; a única falha pré-existente em `test_batman_no_clamp_on_testnet`
+  passou desta vez também).
 
 ---
 
@@ -30,171 +33,202 @@
 
 | Item | Estado |
 |---|---|
-| Branch | `main` — 10 commits ahead, sem push |
-| Dashboard | http://localhost:8787 — `state=running`, cycles=3, mode=testnet, uptime ativo |
+| Branch | `main` — **16 commits ahead**, sem push |
+| Dashboard | http://localhost:8787 — `state=running`, mode=testnet |
 | Exchange | `binance` testnet (`BINANCE_TESTNET=true`) |
 | Posições | 0 abertas |
-| Equity | $5.007,46 USDT (Binance testnet) |
+| Equity | ~$5.007 USDT testnet |
 | Kill switch | OFF |
-| LLM provider | `anthropic/claude-sonnet-4-6` (carregando OK; guard de env vazia funciona) |
-| Vault Obsidian | 95 notas · 247 links · **1 quebrado** (era 0 — investigar) · 0 órfãs · 0 duplicatas |
-| Testes | 30+ passando |
+| Vault Obsidian | 95 notas · 247 links · 1 quebrado · 0 órfãs · 0 duplicatas |
+| Testes | **63 passando** (39 novos hoje) |
 
 ---
 
-## 🚢 Commits desta sessão (todos sem push, locais em `main`)
+## 🚢 Commits desta sessão (todos locais em `main`)
 
 ```
-601fc55 feat(mainnet): 8 melhorias decisivas — testes guardião, dry-run, drift, KPIs
-afaafaa fix(iron_man): guardião de SL limpa stops órfãos (-4045)
-442e8d0 feat(mainnet): endurecimento decisivo para go-live + memória trades testnet
-3f91980 feat(testnet): melhorias focadas em Binance testnet
-cd1d9f6 feat: hardening — testes segurança, scanners ampliados, guard mainnet-auth
-4ff0db5 feat: +10 melhorias — testes core, scanners ampliados, Sage v2, refactor
-9e33ab4 feat(office): heróis para os scanners do squad de melhoria
-497d40b feat: 10 melhorias — squad polish + mainnet hardening + medição
-9427660 feat: Binance mainnet hardening + complete CI squad
-20e5fed docs: Continuous Improvement Department design + full handoff
+29f3f80 feat(improvement+mentor): fecha pendências do T2 e T1
+fde8c01 feat(mentor): agente Charles Xavier — fecha loop de aprendizagem (T1)
+729da36 feat(improvement): sincroniza brief.md ↔ pr_tracker + endpoint claim
+bd036b5 feat(safety): phantom reconciliation — fecha drift DB→exchange
+ef5da99 fix(dashboard): banner global_alerts não repete KILL_SWITCH antigo
+57bdc96 feat(memory): fecha 4 gaps de writer órfão (Stories 063/183/186/249)
 ```
 
 ---
 
-## 🏗️ O que foi entregue (organizado por tema)
+## 🏗️ O que foi entregue
 
-### A. Departamento de Melhoria Contínua (squad completo + UI)
-**7 scanners** alimentando o Mekka, premortem pelo Galactus, consolidação + ranking + UI:
-- **Beast** (trading-ops) — trades/gates/latência/qualidade de sinal (existia)
-- **Cypher** = CodeAuditor (dev) — arquivos grandes, TODO/FIXME, testes ausentes, ruff, funções longas
-- **Domino** = RiskScanner (trading-ops) — kill switch real, drawdown, rejeições Batman (HOLD excluído), concentração/exposição
-- **Forge** = OpsScanner (infra) — erros recorrentes, CYCLE_ERROR, exceções no log, endpoints lentos, breakers abertos
-- **Jean Grey** = MemoryScanner — vault (links quebrados/duplicatas/órfãs)
-- **Ice Man** = ExternalResearcher — deps via PyPI + releases GitHub (ccxt, pydantic, aiohttp)
-- **Sage** = Measurement — system-level baselines + **v2 per-improvement attribution**
+### A. 4 gaps de memória órfã fechados (`57bdc96`)
 
-UI: badge por scanner em cada card, filtro por fonte (`.impr-src-filter`),
-**tile de KPI com impact efetiva/neutra/regressão**. Heróis no roster + office +
-Obsidian (notas formatadas + linkadas).
+Vision injetava 3 prompt-blocks que ninguém escrevia, mais 1 store onde o
+`resolve_outcome` só rodava em auto-close (Cyclops SL/TP). Em mainnet seria
+zero aprendizagem.
 
-### B. Hardening Binance / rumo mainnet
-- **SL fail-safe** (IronMan `_place_ccxt_order`): retry 3x, depois
-  `_emergency_flatten` (market reduce-only) + alerta CRITICAL Telegram + ERROR.
-  **Nunca posição nua.**
-- **Guardião de SL** vivo: monitor cycle (5min) verifica + recoloca;
-  agora com **cleanup órfãos no -4045 + retry** e **periódico** quando símbolo
-  fica sem posição.
-- **Guardião no boot** (NickFury.initialize): roda imediatamente.
-- **Reconciliação no boot**: descobre posições + garante stops.
-- **Min-notional "lance livre"** auto-bump no testnet; rejeita acionável no mainnet.
-- **Clock skew −1021** endurecido (recvWindow=60_000 em todos clientes CCXT).
-- **BinancePriceFeed** (`wss://stream.binancefuture.com/ws` testnet) — mark price ao vivo.
-- **Painel live**: mark/PnL/PnL% real-time, SL/TP do DB, `liq_price` real.
-- **Seletor de corretora** no topo do dashboard.
-- **`binance_entry_order_type=auto|market|limit_ioc`** — auto = market no testnet,
-  **limit-marketable no mainnet** com `binance_max_entry_slippage_bps` (default 20).
-- **Telemetria de slippage** (audit `SLIPPAGE` + alerta se >2× cap).
-- **Validação pré-trade** de símbolo (precisão/min/step).
-- **`/api/positions/orders`** — reduce-only SL/TP vivos com `is_orphan`; painel
-  mostra 🛡️ count + 🟠 órfãos.
-- **Smoke test E2E** (`scripts/binance_testnet_smoke.py`) com `SMOKE_PLACE_ORDER=1` opt-in.
+- **NickFury** (após signal actionable): grava `DecisionMemory.save_decision`
+  (Story 249) + `RoleWorkingMemory.record` outcome=None (Story 183) +
+  `record_signal` (Story 063, que já existia).
+- **Helper central** `services/trade_outcome_resolver.py` chamado em **3 close paths**:
+  Cyclops auto-close (`cyclops.py:701`), dashboard LIVE close (`server.py:2620`),
+  dashboard PAPER close (`server.py:2700`). Resolve: `AgentMemoryStore.resolve_outcome` +
+  `RoleWorkingMemory.resolve_outcome` + `SignalOutcomeMemory.record`. Recupera
+  `action/regime/confidence` faltantes lendo o último `SignalRecord` actionable.
+- Cada store é try/except independente — falha em um nunca bloqueia os outros
+  nem o close.
+- **4 testes** novos em `tests/test_trade_outcome_resolver.py` — 4/4 PASS.
 
-### C. Segurança mainnet
-- **Batman M1 — CLAMP DURO 1ª semana** em mainnet (size ≤ 0.1%, lev ≤ 2x);
-  setting `mainnet_first_week_hard_clamp` (default True). Só aperta.
-- **NickFury first-week guard** no boot (warning + Telegram se limites afrouxados).
-- **M3 Telegram approval gate** confirmado funcional (já gateia IronMan no ciclo).
-- **`/api/mainnet-readiness`** — preflight ao vivo, gate por gate.
-- **`max_daily_loss_usd`** absoluto → engage kill switch.
-- **Mainnet dry-run mode** — setting que aplica comportamento mainnet em testnet.
+Referência: `~/.claude/.../memory/project-memory-orphan-writers.md`.
 
-### D. UI / visibilidade
-- Tile **KPI do departamento** (Sage) + impact (efetiva/neutra/regressão/pending).
-- Badge + filtro por scanner em /Melhorias.
-- 🛡️ N stops + 🟠 órfãos no painel de posições.
-- Contraste do modo claro reforçado.
-- Frontend testes ⊃ heróis no roster + sprites + bundle rebuildado.
+### B. Bug do banner kill_switch (`ef5da99`)
 
-### E. Cobertura de testes (30+ verdes)
-- `tests/test_core_agents.py` — IronMan (SL fail-safe, min-notional, entry types,
-  marketable limit), Batman mainnet hard clamp, **guardian -4045 retry**, **guardian
-  periodic cleanup**.
-- `tests/test_improvement_scanners.py` — pure logic de Cypher, Domino, Forge, Sage, Ice Man.
-- `tests/test_dashboard_auth.py` — auth gate.
+Banner vermelho mostrava "NickFury reportou KILL_SWITCH_RELEASED" em loop
+horas após o smoke ter terminado.
 
-### F. Refactor incremental
-- `server.py` → `src/dashboard/routers/improvements.py` (step 1 entregue).
-- Pendentes: **G** `routers/system.py`, **H** `routers/trade.py`.
+Fix em `_build_global_alerts` (`server.py:6643+`):
+- Janela temporal de **10 min** — eventos antigos não acumulam mais
+- Filtra out `KILL_SWITCH_RELEASED` (semanticamente released = OFF, não é incidente)
+- O `KILL_SWITCH_FILE.exists()` continua cobrindo estado atual via filesystem
+- try/except externo isola erro do filtro dos demais alertas
 
-### G. Obsidian
-- Heróis: `Cypher.md`, `Domino.md`, `Forge.md`, `Ice Man.md`, `Sage.md` + `_Agentes Index` atualizado.
-- `10 - Projects/Departamento de Melhoria Contínua.md` (roadmap).
-- `docs/RUNBOOK-MAINNET-GOLIVE.md` (procedimento de virada).
-- `20 - Areas/Operacional/Histórico Testnet (H1).md` (evidência H1).
-- Linkagem das órfãs no Home (10 → 0 antes; **regressão para 1 link quebrado**
-  apareceu — investigar na próxima).
+Validado E2E: 3 rows TEST inseridas (ENGAGED recente + ENGAGED antigo +
+RELEASED recente) → exatamente 1 alerta (o ENGAGED recente). 4 cenários PASS.
 
-### H. Memória
-- `project-binance-integration.md` atualizado com marco das 2 vitórias testnet
-  e a sequência de 10 commits.
-- `MEMORY.md` index com 3 entradas.
-- `feedback-root-cause-over-patching.md` preservado.
+### C. T0 Phantom reconciliation (`bd036b5`)
+
+Risk Scanner (Domino) detectava drift DB↔exchange mas só propunha
+`ImprovementProposal` — nenhuma reconciliação ativa. Em mainnet, posição que
+fechou fora-do-bot (operador manual na exchange, liquidação) ficava
+fantasma no DB e Vision/Wolverine/Cyclops decidiam sobre algo que não existe.
+
+Novo método **`IronMan.reconcile_phantom_positions()`** (~150 LOC):
+- Calcula net live position por symbol a partir do DB
+- Compara com `exchange.fetch_positions()`
+- Para cada "DB tem, exchange não" → insere synthetic close com
+  `metadata.action="phantom_reconciled"` + audit `PHANTOM_RECONCILED` +
+  alerta Telegram WARNING
+- Paper mode: no-op. Hyperliquid: skipped (bookkeeping diferente).
+- Setting `phantom_reconciliation_enabled` (default True) — kill switch via env
+
+Cabeado em:
+- Boot (NickFury.initialize): logo após `ensure_stops_for_open_positions`
+- Monitor cycle (NickFury.run_monitor_cycle): logo após SL guardian
+
+Complementa o SL guardian existente: SL guardian cobre "exchange tem, falta
+SL"; phantom recon cobre "DB tem, exchange não". **Os dois juntos**: DB e
+exchange convergem.
+
+**8 testes** em `tests/test_phantom_reconciliation.py` — 8/8 PASS.
+
+### D. T2 Pipeline melhorias — sync brief↔PR + claim (`729da36`, `29f3f80`)
+
+**Backend (`729da36`):**
+- `improvement_queue.update_brief_status(rec_id, status, ...)` — reescreve YAML
+  do `IMP-{rec_id}.md` in-place E atualiza o índice. Anti-phantom: só cria
+  entrada nova no índice se brief existir.
+- `pr_tracker.claim_brief(rec_id, claimer)` — operator/dev sinaliza "estou
+  implementando". Idempotente: não rebaixa pr_open/merged.
+- **`set_pr` / `mark_merged` / `approve_pr` agora sincronizam brief.md automaticamente** —
+  antes só atualizavam o store JSON.
+- Endpoint `POST /api/improvements/claim` + audit `IMPROVEMENT_CLAIMED`.
+
+**Frontend (`29f3f80`):**
+- Botão "🛠 Vou implementar" em `app.js` que aparece em recs `accepted` com
+  `dev_state=queued`. Prompt do claimer → POST → refresh PR status → re-render.
+- CSS `.impr-claim` (cor warn/amarelo).
+
+**Dev workflow (`29f3f80`):**
+- Script `scripts/sync_imp_commits.py` — lê últimos N commits, detecta
+  pattern `[IMP-{rec_id}]`, chama `pr_tracker.set_pr()` com synthetic PR
+  number (range 9XXXXXXX). Idempotente.
+- Pronto para pre-push hook (`chmod +x` já feito).
+
+**Estado pós-deploy:** 26 briefs alinhados ao estado real (24 queued + 2 merged)
+— antes eram 26 queued falsos.
+
+**7 testes** em `tests/test_improvement_pipeline_sync.py` — 7/7 PASS.
+
+### E. T1 Mentor — Charles Xavier (`fde8c01`, `29f3f80`)
+
+Beast propunha melhorias em inglês livre via Telegram; ninguém aplicava.
+Vision/Batman liam memory blocks mas nunca ajustavam thresholds. Sistema
+"self-auditing" mas não "self-improving".
+
+Novo agente **`src/agents/mentor.py`** (~390 LOC):
+- **READ-ONLY** por design: nunca muta `settings.py`.
+- Produz `ParameterSuggestion` tipado: `parameter_name`, `current_value`,
+  `suggested_value`, `direction` (tighten/loosen), `reason`, `evidence` (dict),
+  `confidence`, **`can_auto_apply`** (True só em tightening de risco).
+- **3 heurísticas iniciais:**
+  - `win_rate < 35%` em ≥8 trades → tighten `min_confidence` (auto-applicable)
+  - `win_rate > 65%` em ≥20 trades → loosen `min_confidence` (manual review)
+  - Batman rejection rate > 80% → review gates (manual review)
+  - Drawdown ≥ 70% do limite → tighten `max_daily_drawdown_pct` (auto-applicable)
+- `ParameterSuggestion.to_env_line()` produz `MEKKA_NAME=value` pronto para `.env`
+- Audit `MENTOR_SUGGESTED` **só** quando há suggestion (zero spam)
+- Conservative bias: loosening **sempre** exige operator review (`can_auto_apply=False`)
+
+**Cabeado:**
+- Endpoint `GET /api/mentor/suggestions`
+- `NickFury.run_monitor_cycle` chama Mentor após phantom_recon (a cada 5min,
+  ~260ms quando há dados)
+
+**8 testes** em `tests/test_mentor.py` — 8/8 PASS.
+
+**Estado ao deploy:** 0 suggestions porque `resolved_outcomes=0` (vai começar
+quando o trade_outcome_resolver gerar os primeiros wins/losses, provavelmente
+2-3 trades após este deploy).
 
 ---
 
-## 🔬 Findings desta sessão (testes ao vivo)
+## 🔬 Auditoria T0 — re-avaliada contra o código
 
-### Botões críticos — **17/18 PASS** (1 flake de timing, não bug)
-✅ `/api/system/{status,start,stop,reboot}` · `/api/killswitch/{status,engage,release}`
-· `/api/positions/close` — validação de body (`confirm` strings), audit log gravado,
-estados transitam corretamente. O único "FAIL" foi flake do meu polling (START
-leva ~1s para sair de `starting`→`running`; eu medi com 1s; segundo run com 1.5s
-passa). **Botões funcionam.**
+O agent (c) Explore reportou 4 riscos altos. Verificação contra o código:
 
-### Trade testing — bloqueado por bug externo (Binance testnet)
-- **`-4164: notional must be no smaller than 50`** em borderline ($50.07 → após
-  precision <50). Bug: `cost.min` do CCXT volta 5.0 obsoleto vs limite real 50.
-  → **Q2** (fix nosso).
-- **`-4045: Reach max stop order limit`** mesmo com 0 ordens em `fetch_open_orders`.
-  Algo orders em bucket separado, quota dessincronizada na testnet. **Q1** (fix
-  nosso) + workaround manual (aguardar reset ou nova conta testnet).
-- **O SL fail-safe FUNCIONOU** no cenário: detectou -4045 no SL, fez emergency
-  flatten, retornou ERROR. **Nenhuma posição nua.** 🎯
+| Achado (c) | Realidade | Ação |
+|---|---|---|
+| T0.1 Cyclops live NO-OP | Coberto por `IronMan.ensure_stops_for_open_positions()` (boot + monitor cycle) | Não-blocker |
+| T0.2 IronMan sem retry | Tem tenacity para `TimeoutError`/`ConnectionError`; rejeições de validação **não devem** retentar | Não-blocker |
+| **T0.3 Position drift** | **GAP REAL — lado DB-órfão sem ação** | ✅ Implementado em `bd036b5` |
+| T0.4 Wolverine kill auto-engage | Backstop correto em DD ≥ 10% (limite máximo) | Não-blocker |
 
-### Improvements buttons / Memória / Obsidian — **pendente**
-Script `/tmp/smoke_improvements.py` foi escrito mas terminou com **exit 137** (OOM
-provável no `fresh=1`). **Retomar na próxima sessão** — rodar em chunks, validar
-ciclo accept/reject, depois Memória + Obsidian.
+3 de 4 eram falsos positivos. Lição persistida em
+`~/.claude/.../memory/feedback-verify-audit-reports.md`.
+
+**T3 cleanup** (Flash, Deadpool, VisionCritic, VisionMoA): também falsos positivos.
+- Flash: cabeado em `professor_x.py:63,102`
+- Deadpool: 4 consumers reais
+- VisionCritic: `default=True` (opt-out)
+- VisionMoA: opt-in por design (3 LLMs custam)
+- **Nada a remover.**
 
 ---
 
-## 📋 Tasks pendentes (priorizadas)
+## 📋 Tasks pendentes (próxima sessão)
 
-### Críticas / safety
-- **Q1** — Guardião: trocar `fetch_open_orders`+individual cancel por
-  `cancel_all_orders(symbol)` quando símbolo NÃO tem posição. Captura algo orders
-  invisíveis. Fix do bug visto no teste.
-- **Q2** — Min-notional bump conservador: `max(min_cost*1.10, 55)` para absorver
-  precision rounding e `cost.min` obsoleto do CCXT.
-- **P2** — OCO emulado: monitor (~30s) detecta size→0 e cancela sibling. Reduz
-  janela órfãos 5min → 30s.
+### Próximos passos naturais
 
-### Verificações que ficaram (pegar primeiro na próxima sessão)
-- **Smoke completo dos botões de Melhorias** (`/tmp/smoke_improvements.py` — script
-  pronto; ajustar pra evitar OOM, rodar em chunks).
-- **Verificação de memória**: DecisionMemory (`src/services/decision_memory.py` se
-  existir), agent MEMORY files, Sage baselines (`data/sage_baselines.json` +
-  `data/sage_improvement_baselines.json` ambos com dados).
-- **Verificação Obsidian sync + consumption**: `JeanGrey.recall()` funciona? Quais
-  agentes referenciam o vault? Como a IA consome? Investigar o **link quebrado novo**
-  (vault tinha 0; tem 1).
+- **Worker automático "impl-agent"** — pega briefs `queued` e gera PR
+  usando Claude Code. Design documentado no relatório do agent (b) da
+  sessão anterior. **Out of scope hoje**, mas é o passo final pra
+  fechar 100% o loop accept→merged.
+- **Mentor scheduler diário** — hoje roda a cada monitor cycle (5min).
+  Pode ser interessante ter um daily run que envia top suggestions
+  por Telegram (igual o Beast).
+- **Pre-push hook** — `cp` o exemplo de `scripts/sync_imp_commits.py`
+  para `.git/hooks/pre-push` (1 linha de shell).
+- **Operator UX** — testar fluxo completo no browser:
+  accept → claim → implementar → commit `[IMP-xxx]` → push (sync_imp_commits
+  roda) → status reflete no dashboard.
 
-### Mainnet readiness restante (gates humanos — NÃO código)
-- **H1** — ≥ 1 mês testnet sem incidente (continuar acumulando; registrar em
-  `Histórico Testnet (H1).md`)
+### Mainnet readiness (gates humanos — NÃO código)
+
+- **H1** — ≥ 1 mês testnet sem incidente (continuar acumulando)
 - **H2** — Wolverine SL ENDORSE rate ≥ 70%
 - **H5/H6** — Wallet mainnet dedicada + funded
 - Assinar `docs/MAINNET-AUTHORIZATION.md` com `GO MAINNET`
 
-### Refactor (não bloqueia, mas council insiste)
+### Refactor (não bloqueia)
+
 - **G** — `server.py → routers/system.py`
 - **H** — `server.py → routers/trade.py`
 
@@ -203,28 +237,32 @@ ciclo accept/reject, depois Memória + Obsidian.
 ## 🧠 Memória + Obsidian — inventário atual
 
 ### Memória do projeto (`~/.claude/projects/.../memory/`)
+
 ```
-MEMORY.md                              (índice — 3 entradas)
+MEMORY.md                              (índice — 5 entradas)
 project-binance-integration.md         (foco ativo; marco testnet registrado)
 project-continuous-improvement-epic.md (squad completo entregue)
+project-memory-orphan-writers.md       (4 gaps fechados em 57bdc96)
 feedback-root-cause-over-patching.md   (lição preservada)
+feedback-verify-audit-reports.md       (NOVA — relatórios automáticos generalizam)
 ```
 
 ### Memória runtime (`data/`)
+
 ```
-improvement_decisions.json    1.9 KB  — operator accept/reject
-improvement_inbox.json        3 B     — vazio (limpo após smoke anterior)
-improvement_prs.json          920 B   — PR lifecycle tracker
-improvement_queue.json        3.9 KB  — fila p/ implementação
-sage_baselines.json           3.2 KB  — métricas system-level (Sage)
-sage_improvement_baselines.json 2.8 KB — per-improvement (Sage v2)
+agent_memories                  SQLite — 8 entries (PENDING; novos resolves a partir de agora)
+improvement_decisions.json      1.9 KB  — operator accept/reject (19 accepted)
+improvement_inbox.json          3 B     — vazio
+improvement_prs.json            1.4 KB  — 2 PRs merged (#1001 #1002)
+improvement_queue.json          3.6 KB  — 25 briefs (1 com claimer + state correto)
+sage_baselines.json             4.6 KB  — métricas system-level (Sage)
+sage_improvement_baselines.json 2.9 KB  — per-improvement (Sage v2)
 ```
 
 ### Obsidian vault (`docs/obsidian/`)
-- **95 notas** · 247 wikilinks · **1 quebrado** (era 0 — investigar!) · 0 órfãs · 0 duplicatas
-- Estrutura PARA + `50 - MOCs/`, `20 - Areas/Agentes IA/Cypher.md|Domino.md|Forge.md|Ice Man.md|Sage.md`
-- **PRÓXIMO**: confirmar consumption pelos agentes (`JeanGrey.recall`,
-  `JeanGrey.build_graph`, `draft_adr_from_beast`)
+
+- 95 notas · 247 wikilinks · 1 quebrado (investigar) · 0 órfãs · 0 duplicatas
+- **PRÓXIMO**: criar nota para Mentor (`20 - Areas/Agentes IA/Mentor.md`)
 
 ---
 
@@ -234,49 +272,57 @@ sage_improvement_baselines.json 2.8 KB — per-improvement (Sage v2)
 cd /Users/gustavovicente/Documents/Mekka-Trading
 
 # Estado do sistema
-curl -s http://localhost:8787/api/system/status      | python3 -m json.tool
-curl -s http://localhost:8787/api/positions          | python3 -m json.tool
-curl -s http://localhost:8787/api/mainnet-readiness  | python3 -m json.tool
+curl -s http://localhost:8787/api/system/status        | python3 -m json.tool
+curl -s http://localhost:8787/api/positions            | python3 -m json.tool
+curl -s http://localhost:8787/api/mainnet-readiness    | python3 -m json.tool
+curl -s http://localhost:8787/api/mentor/suggestions   | python3 -m json.tool
 
-# Reiniciar dashboard se preciso (cancela processo antigo + sobe novo):
+# Reiniciar dashboard
 pkill -f "run.py --dashboard" 2>/dev/null; sleep 2
 nohup .venv313/bin/python run.py --dashboard </dev/null >logs/dashboard_runtime.log 2>&1 &
 
 # Testes (env -u remove a ANTHROPIC_API_KEY="" injetada pelo Claude Code)
 env -u ANTHROPIC_API_KEY .venv313/bin/python -m pytest \
+  tests/test_mentor.py \
+  tests/test_improvement_pipeline_sync.py \
+  tests/test_phantom_reconciliation.py \
+  tests/test_trade_outcome_resolver.py \
   tests/test_core_agents.py tests/test_improvement_scanners.py \
   tests/test_dashboard_auth.py -q
 
-# Retomar o smoke de Melhorias:
-.venv313/bin/python /tmp/smoke_improvements.py
-# Se OOM: ajustar p/ não rodar fresh=1 em loop, OU rodar passos isolados
+# Sync IMP commits manualmente (ou via pre-push hook)
+.venv313/bin/python scripts/sync_imp_commits.py --limit 50
 
-# Council ao vivo
-curl -s 'http://localhost:8787/api/improvements?fresh=1' | python3 -m json.tool
-
-# Vault health
-env -u ANTHROPIC_API_KEY .venv313/bin/python -c "
+# Inspecionar Mentor suggestions ao vivo
+.venv313/bin/python -c "
 import asyncio
-from src.agents.jean_grey import JeanGrey
+from src.agents.mentor import Mentor
 async def m():
-    r = await JeanGrey().run(mode='health')
-    print(f'notas:{r.total_notes} links:{r.total_links} broken:{len(r.broken_links)} orphans:{len(r.orphans)}')
-    for b in r.broken_links: print(' broken:', b.source_note, '→', b.target)
+    r = await Mentor().run()
+    print(f'obs: {r.observation_summary}')
+    for s in r.suggestions:
+        print(s.to_dict())
 asyncio.run(m())
 "
+
+# Manual claim via API
+curl -X POST http://localhost:8787/api/improvements/claim \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"00589e51a312","claimer":"meu-nome"}'
 ```
 
 ---
 
-## 🎯 Onde retomar na próxima sessão (ordem)
+## 🎯 Onde retomar na próxima sessão
 
-1. **Smoke completo dos botões de Melhorias** (terminar o que pulamos por OOM)
-2. **Verificação de Memória** (DecisionMemory + agent MEMORY + Sage baselines)
-3. **Verificação Obsidian** (sync + agent consumption + **link quebrado novo**)
-4. **Implementar Q1 + Q2** (fixes dos bugs achados no trade testing)
-5. **Re-testar trade** (Manual + TradeNow) quando -4045 testnet resetar
-6. **Refactors G + H** (council insiste)
-7. **Push/deploy** (delegado a **@devops** — operador autoriza)
+1. **Testar o fluxo completo no browser** (recarregar dashboard, acceptar
+   uma rec, clicar "🛠 Vou implementar")
+2. **Decidir sobre worker "impl-agent" automático** (design pronto, alto custo)
+3. **Tirar primeiros wins/losses** em testnet pra Mentor começar a sugerir
+4. **Pre-push hook**: `cp scripts/sync_imp_commits.py.example .git/hooks/pre-push`
+   (ou inline com 1 linha shell)
+5. **Continuar acumulando dados** para gates H1/H2 da mainnet authorization
+6. **Push/deploy** (delegado a **@devops** — operador autoriza)
 
 ---
 
@@ -284,10 +330,12 @@ asyncio.run(m())
 
 - **NUNCA** desabilitar `live_trading_double_gate` em `settings.py`
 - **NUNCA** alterar defaults `paper_trading=True` / `live_trading_confirmed=False`
-- **NUNCA** burlar Batman/kill switch sem `force_execute` E ambiente seguro (testnet/paper)
+- **NUNCA** burlar Batman/kill switch sem `force_execute` E ambiente seguro
 - **APENAS @devops** faz `git push`, `gh pr merge`, deploy, MCP config
 - **IronMan é o ÚNICO** caminho para ordens reais; agentes Layer 1 são read-only
 - **L1 paths** protegidos por deny rules (`.aios-core/core/`, `bin/aios.js`)
+- **Verificar relatórios automáticos antes de patchar** — generalizam
+  (`feedback-verify-audit-reports`)
 
 ---
 
@@ -296,19 +344,20 @@ asyncio.run(m())
 | O quê | Onde |
 |---|---|
 | Doc principal do projeto | `CLAUDE.md` |
+| Memória de aprendizagem (gaps fechados) | `~/.claude/.../memory/project-memory-orphan-writers.md` |
+| Lição sobre relatórios automáticos | `~/.claude/.../memory/feedback-verify-audit-reports.md` |
 | Design do squad de melhoria | `docs/CONTINUOUS-IMPROVEMENT-DEPARTMENT.md` |
 | Procedimento de virada mainnet | `docs/RUNBOOK-MAINNET-GOLIVE.md` |
 | Autorização mainnet (assinar) | `docs/MAINNET-AUTHORIZATION.md` |
-| Preflight (CLI) | `scripts/preflight_mainnet.py` |
-| Smoke test testnet | `scripts/binance_testnet_smoke.py` |
-| Memória do projeto (Binance) | `~/.claude/projects/.../memory/project-binance-integration.md` |
-| Memória do épico melhoria | `~/.claude/projects/.../memory/project-continuous-improvement-epic.md` |
-| Histórico testnet (H1) | `docs/obsidian/20 - Areas/Operacional/Histórico Testnet (H1).md` |
-| Notas dos heróis | `docs/obsidian/20 - Areas/Agentes IA/{Cypher,Domino,Forge,Ice Man,Sage}.md` |
+| Phantom reconciliation | `src/agents/iron_man.py:1352` (`reconcile_phantom_positions`) |
+| Trade outcome resolver | `src/services/trade_outcome_resolver.py` |
+| Mentor (aprendizagem real) | `src/agents/mentor.py` |
+| Pipeline sync brief↔PR | `src/services/improvement_queue.py` (`update_brief_status`) |
+| Commit hook | `scripts/sync_imp_commits.py` |
 
 ---
 
-*Handoff arquivado em 2026-05-25. Próximo chat: começar do ponto **#1 — smoke
-completo dos botões de Melhorias**. Bom trabalho do seu lado neste arco — o
-sistema agora é uma máquina robusta de continuous improvement, com proteções
-sérias para dinheiro real e cobertura de testes que cresceu de zero para 30+.* ✨
+*Handoff arquivado em 2026-05-25 (sessão 2). Próxima sessão: testar fluxo
+completo no browser e começar a juntar dados (wins/losses + claims) para
+Mentor produzir as primeiras suggestions concretas. Sistema agora aprende,
+implementação flui, mainnet está mais protegida.* ✨
