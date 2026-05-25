@@ -51,6 +51,12 @@ _RUFF_TIMEOUT_S = 20.0
 # Files we never propose to touch (safety gates — protected by L1-L4).
 _PROTECTED_HINTS = ("settings.py", "kill_switch", "killswitch")
 
+# Files where _scan_todo_markers should self-exclude: this file defines the
+# regex `_TODO_RE` as a Python string literal containing the marker words
+# (TODO|FIXME|HACK|XXX), which the scanner would otherwise match on itself
+# and report as "6 TODOs in code_auditor.py" — a perpetual false positive.
+_TODO_SCAN_EXCLUDE = ("code_auditor.py",)
+
 
 def _area_for_path(path: Path) -> str:
     """Map a source path to a council 'area' (drives domain = dev-squad)."""
@@ -174,6 +180,9 @@ class CodeAuditor:
         total = 0
         for p in _SRC.rglob("*.py"):
             if "__pycache__" in str(p):
+                continue
+            # Self-exclude files that define the _TODO_RE literal (false positive).
+            if any(excl in p.name for excl in _TODO_SCAN_EXCLUDE):
                 continue
             try:
                 for i, line in enumerate(p.open("r", encoding="utf-8", errors="ignore"), 1):

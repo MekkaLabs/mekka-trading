@@ -1,6 +1,6 @@
 ---
 rec_id: "01c077b8f5ad"
-status: queued
+status: merged
 domain: "dev-squad"
 area: "backend"
 priority: "P2"

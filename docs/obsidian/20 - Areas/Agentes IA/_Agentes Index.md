@@ -3,14 +3,14 @@ title: Agentes IA — Index
 type: area
 tags: [area, agente]
 created: 2026-05-07
-updated: 2026-05-20
+updated: 2026-05-25
 ---
 
 # Área — Agentes IA
 
-> Uma nota por agente. Use `Template - Agente`. Roster organizado pela camada AIOX (Command → Strategy → Execution → Monitoring → Recovery → Analytics).
+> Uma nota por agente. Use `Template - Agente`. Roster organizado pela camada AIOX (Command → Strategy → Execution → Monitoring → Recovery → Analytics → Learning).
 
-## Roster (20 agentes)
+## Roster (22 agentes + 1 serviço)
 
 ### 🎖️ Command Layer
 - [x] [[Nick Fury]] — Mission Commander (orquestra o ciclo completo)
@@ -40,6 +40,10 @@ updated: 2026-05-20
 
 ### 📊 Analytics Layer
 - [x] [[Deadpool]] — Performance Analytics Agent (daily + weekly reports)
+
+### 🎓 Learning Layer (NOVO 2026-05-25)
+- [x] [[Mentor]] — Charles Xavier (distila outcomes em deltas de parâmetro tipados)
+- [x] [[Trade Outcome Resolver]] — serviço central que fecha 4 gaps de memory writer
 
 ### 🛠️ Continuous-Improvement Council
 > Departamento de Melhoria Contínua — 7 scanners read-only por domínio →

@@ -1,35 +1,35 @@
 ---
-rec_id: "5edbf4efb6f4"
+rec_id: "84b96c8ef42e"
 status: merged
 domain: "dev-squad"
 area: "backend"
-priority: "P1"
-created_at: "2026-05-21T19:12:51.830792+00:00"
+priority: "P2"
+created_at: "2026-05-25T15:19:21.254441+00:00"
 ---
 
-# IMP-5edbf4efb6f4 — Função longa: _run() em batman.py (1239 linhas)
+# IMP-84b96c8ef42e — Refatorar iron_man.py (1634 linhas)
 
 ## Title
 
-Função longa: _run() em batman.py (1239 linhas)
+Refatorar iron_man.py (1634 linhas)
 
 ## Context / Impact
 
 - **Domain:** dev-squad
 - **Area:** backend
-- **Priority:** P1
-- **Impact:** HIGH
+- **Priority:** P2
+- **Impact:** MEDIUM
 - **Council decision:** RECOMMEND_WITH_MITIGATION
 - **Rationale:** Mekka aprova condicionalmente: seguir SOMENTE com as mitigações do Galactus e validação em paper/testnet antes de produção.
 
 ## Description
 
-`_run` em `src/agents/batman.py` tem 1239 linhas (limite 120). Funções longas escondem complexidade e dificultam teste — extrair em helpers.
+`src/agents/iron_man.py` tem 1634 linhas — acima do limite de 1500. Arquivos grandes concentram risco, dificultam revisão e testes. Quebrar em módulos coesos por responsabilidade.
 
 ## Galactus Premortem
 
 - **Verdict:** NEEDS_HARDENING
-- **Hunger:** 62.5
+- **Hunger:** 50.0
 
 **Failure modes:**
 
@@ -42,7 +42,7 @@ Função longa: _run() em batman.py (1239 linhas)
 
 ## Evidence
 
-src/agents/batman.py: _run() = 1239 linhas (limite 120).
+src/agents/iron_man.py: 1634 linhas (limite 1500, enorme ≥4000).
 
 ## Acceptance Criteria
 
@@ -50,4 +50,4 @@ src/agents/batman.py: _run() = 1239 linhas (limite 120).
 - [ ] Mitigações do Galactus endereçadas no código/testes.
 - [ ] Testes adicionados/atualizados; `ruff` e `mypy` passam.
 - [ ] Validado em paper/testnet antes de qualquer impacto em produção.
-- [ ] PR aberto e vinculado a este rec_id (5edbf4efb6f4) para aprovação do operador.
+- [ ] PR aberto e vinculado a este rec_id (84b96c8ef42e) para aprovação do operador.

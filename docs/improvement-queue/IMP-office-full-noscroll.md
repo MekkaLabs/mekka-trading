@@ -1,6 +1,6 @@
 ---
 rec_id: "office-full-noscroll"
-status: queued
+status: merged
 domain: "dev-squad"
 area: "frontend"
 priority: "P2"

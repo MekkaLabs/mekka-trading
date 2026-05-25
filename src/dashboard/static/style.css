@@ -1339,15 +1339,18 @@ body[data-theme="light"] .brand-mark { filter: drop-shadow(0 0 6px rgba(15,23,42
 .overview-office-row.office-row-solo {
   grid-template-columns: 1fr;
 }
-.overview-office-row > .panel { margin: 0; }
+.overview-office-row > .panel { margin: 0; overflow: hidden; }
 /* The v4 floor fills its panel width and keeps the stage aspect (2000:1200)
-   so there are no dead margins. Capped so it never dominates the viewport. */
+   so there are no dead margins. Cap raised to 95vh and overflow:hidden on
+   the panel + scrolling="no" on the iframe ensure NO scrollbar in the
+   Visão Geral, regardless of viewport size (IMP-office-full-noscroll). */
 .overview-office-row #office-v2-frame {
   width: 100%;
   aspect-ratio: 2000 / 1200;
   height: auto;
   min-height: 0;
-  max-height: 84vh;
+  max-height: 95vh;
+  overflow: hidden;
 }
 
 /* Office companions row: Layer Command Map + Agents Roster side by side,
