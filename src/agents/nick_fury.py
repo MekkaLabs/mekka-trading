@@ -589,6 +589,27 @@ class NickFury(BaseAgent[list[CycleReport]]):
         if not _active_assets:
             _active_assets = _configured_assets
 
+        # Runtime override: altcoins_enabled expande a lista de assets ativos
+        # com ALTCOINS pré-definidas (ETH/SOL/AVAX/BNB/LINK), respeitando
+        # TRADING_ASSETS como base. Fix do bug "toggles silenciosos" 2026-05-25.
+        # Antes, esse toggle só afetava o TradeNow manual, NÃO o loop.
+        try:
+            from src.config.runtime_overrides import (  # noqa: WPS433
+                expand_assets_with_altcoins,
+                get_runtime_overrides,
+            )
+            _ov_nf = get_runtime_overrides()
+            if _ov_nf.get("altcoins_enabled"):
+                _expanded = expand_assets_with_altcoins(_active_assets)
+                if len(_expanded) > len(_active_assets):
+                    self._log.info(
+                        f"[NickFury] Altcoins toggle ON: assets {_active_assets} "
+                        f"→ {_expanded}"
+                    )
+                    _active_assets = _expanded
+        except Exception as _ov_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury] altcoins override skipped: {_ov_exc}")
+
         # Story 050 — Altcoins validation: filter out symbols not available on
         # the current exchange (prevents CYCLE_ERROR spam for unknown pairs).
         try:

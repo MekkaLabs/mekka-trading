@@ -1200,6 +1200,34 @@ class Batman(BaseAgent[RiskApproval]):
         _max_lev_high = _mode_params.get("max_leverage_high_regime", settings.max_leverage_high_regime)
         _max_lev_extreme = _mode_params.get("max_leverage_extreme_regime", settings.max_leverage_extreme_regime)
 
+        # Runtime override: super_aggressive força mínimo 5%/10x (respeitando
+        # o cap do Modo Global). Aplica ANTES do cap pra que UI honre o que
+        # promete sem violar limites. Fix do bug "toggles silenciosos" 2026-05-25.
+        try:
+            from src.config.runtime_overrides import (  # noqa: WPS433
+                apply_super_aggressive_to_size_lev,
+                get_runtime_overrides,
+            )
+            _ov_batman = get_runtime_overrides()
+            if _ov_batman.get("super_aggressive"):
+                _new_size_sa, _new_lev_sa = apply_super_aggressive_to_size_lev(
+                    adjusted_size, adjusted_leverage, _max_pos, _max_lev
+                )
+                if _new_size_sa > adjusted_size:
+                    reasons.append(
+                        f"Super Agressivo: size {adjusted_size:.2%} → {_new_size_sa:.2%} "
+                        f"(mínimo 5%, capped pelo Modo Global em {_max_pos:.2%})"
+                    )
+                    adjusted_size = _new_size_sa
+                if _new_lev_sa > adjusted_leverage:
+                    reasons.append(
+                        f"Super Agressivo: leverage {adjusted_leverage}x → {_new_lev_sa}x "
+                        f"(mínimo 10x, capped pelo Modo Global em {_max_lev}x)"
+                    )
+                    adjusted_leverage = _new_lev_sa
+        except Exception as _ov_exc:  # noqa: BLE001
+            self._log.debug(f"[Batman] runtime override skipped: {_ov_exc}")
+
         # Hard cap on size
         if adjusted_size > _max_pos:
             reasons.append(

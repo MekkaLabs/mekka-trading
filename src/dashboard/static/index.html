@@ -394,9 +394,10 @@
           </div>
 
           <p class="muted-line global-mode-hint">
-            Os dois toggles abaixo são <strong>overrides</strong> aplicados sobre o modo global.
-            <em>Super Agressivo</em> força size mínimo 5% e leverage 10x.
-            <em>Altcoins</em> expande o universo de ativos.
+            Os dois toggles abaixo são <strong>overrides</strong> aplicados sobre o Modo Global,
+            tanto no <strong>trader autônomo</strong> (Batman/NickFury) quanto no botão
+            <em>Executar Trade</em>. <em>Super Agressivo</em> força size mínimo 5% e leverage 10x
+            (respeitando o cap do Modo Global). <em>Altcoins</em> expande o universo de ativos.
           </p>
 
           <div class="trading-modes-grid">
@@ -406,10 +407,14 @@
                 <span class="mode-icon">🚀</span>
                 <div>
                   <strong class="mode-title">Super Agressivo</strong>
-                  <p class="mode-desc">Posição mínima 5% do capital · Leverage 10x · Threshold de confiança reduzido para 55%</p>
+                  <p class="mode-desc">
+                    Força size mínimo 5% e leverage mínimo 10x no trader autônomo.
+                    Respeita cap do Modo Global (ex: em <em>conservative</em>, fica em 2%/2x).
+                    Para liberar limites maiores, mude o Modo Global primeiro.
+                  </p>
                 </div>
               </div>
-              <label class="toggle-switch" title="Ligar/desligar modo Super Agressivo">
+              <label class="toggle-switch" title="Ligar/desligar Super Agressivo (afeta loop + TradeNow)">
                 <input type="checkbox" id="toggle-super-aggressive" />
                 <span class="toggle-track"><span class="toggle-thumb"></span></span>
               </label>
@@ -421,10 +426,14 @@
                 <span class="mode-icon">🪙</span>
                 <div>
                   <strong class="mode-title">Altcoins</strong>
-                  <p class="mode-desc">Expande universo de ativos para ETH, SOL, AVAX, BNB, LINK além de BTC</p>
+                  <p class="mode-desc">
+                    Expande trading_assets do loop autônomo com ETH, SOL, AVAX, BNB, LINK.
+                    Base sempre vem de <code>TRADING_ASSETS</code> no .env — toggle só adiciona,
+                    nunca remove.
+                  </p>
                 </div>
               </div>
-              <label class="toggle-switch" title="Ligar/desligar Altcoins">
+              <label class="toggle-switch" title="Ligar/desligar Altcoins (afeta loop + TradeNow)">
                 <input type="checkbox" id="toggle-altcoins" />
                 <span class="toggle-track"><span class="toggle-thumb"></span></span>
               </label>
