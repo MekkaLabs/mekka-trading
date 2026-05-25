@@ -1181,6 +1181,66 @@ class IronMan(BaseAgent[ExecutionResult]):
                     except Exception:  # noqa: BLE001
                         pass
                 except Exception as exc:  # noqa: BLE001
+                    err_str = str(exc)
+                    # Binance error -4045 ("Reach max stop order limit") happens
+                    # when accumulated orphan stops (residue from SL/TP whose
+                    # sibling closed the position) consume the per-symbol quota.
+                    # Free quota by cancelling reduce-only orphan stops/TPs for
+                    # this symbol, then RETRY placement once.
+                    if "-4045" in err_str or "max stop order" in err_str.lower():
+                        cancelled = 0
+                        for _o in open_orders or []:
+                            try:
+                                _typ = str(_o.get("type") or "").lower()
+                                _info = _o.get("info") or {}
+                                _itype = str(_info.get("type") or "").lower()
+                                _is_algo = (
+                                    "stop" in _typ or "stop" in _itype
+                                    or "take_profit" in _typ or "take_profit" in _itype
+                                )
+                                _ro = _o.get("reduceOnly")
+                                if _ro is None:
+                                    _ro = _info.get("reduceOnly") or _info.get("reduce_only")
+                                if _is_algo and bool(_ro):
+                                    await exchange.cancel_order(_o.get("id"), ccxt_symbol)
+                                    cancelled += 1
+                            except Exception:  # noqa: BLE001
+                                continue
+                        self._log.warning(
+                            f"[IronMan/guardian] -4045 hit on {mekka}; cancelled {cancelled} "
+                            "orphan reduce-only orders, retrying SL placement"
+                        )
+                        try:
+                            await exchange.create_order(
+                                symbol=ccxt_symbol, type="stop_market", side=sl_side,
+                                amount=size,
+                                params={"stopPrice": sl_price, "reduceOnly": True},
+                            )
+                            summary["replaced"].append({
+                                "symbol": mekka, "sl": sl_price, "emergency": emergency,
+                                "cleanup_cancelled": cancelled, "after_4045": True,
+                            })
+                            self._log.warning(
+                                "[IronMan/guardian] re-placed SL for %s after cleaning %d orphans",
+                                mekka, cancelled,
+                            )
+                            try:
+                                from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+                                asyncio.create_task(_TA().alert(
+                                    event="SL_GUARDIAN_REPLACED",
+                                    severity="WARNING", agent="IronMan", symbol=mekka,
+                                    message=(
+                                        f"🛡️ SL recolocado em {mekka} @ {sl_price:.4f} "
+                                        f"após limpar {cancelled} stops órfãos (-4045)."
+                                    ),
+                                ))
+                            except Exception:  # noqa: BLE001
+                                pass
+                            continue
+                        except Exception as retry_exc:  # noqa: BLE001
+                            exc = RuntimeError(
+                                f"after cleanup ({cancelled} orphans): {retry_exc}"
+                            )
                     summary["errors"].append(f"{mekka} replace SL: {exc}")
                     self._log.error(
                         f"[IronMan/guardian] FAILED to re-place SL for {mekka}: {exc}"
@@ -1202,6 +1262,53 @@ class IronMan(BaseAgent[ExecutionResult]):
             except Exception as exc:  # noqa: BLE001
                 summary["errors"].append(f"guardian loop: {exc}")
                 continue
+
+        # ── Cleanup pass: cancel orphan reduce-only stops/TPs for symbols WITHOUT
+        # an open position. When one bracket leg fires (SL or TP) and closes the
+        # position, the sibling leg remains orphan and consumes the per-symbol
+        # quota; over time this trips Binance -4045 ("max stop order limit").
+        # Running this every guardian cycle keeps the quota clean automatically.
+        try:
+            open_syms = {
+                to_mekka(p.get("symbol") or "").upper()
+                for p in (positions or [])
+                if abs(float(p.get("contracts") or 0)) > 0
+            }
+            cancelled_total = 0
+            for _sym in list(getattr(settings, "trading_assets", []) or []):
+                _sym_u = str(_sym).upper()
+                if _sym_u in open_syms:
+                    continue  # has a position; do not touch its stops
+                try:
+                    _ccxt_s = to_ccxt(_sym_u, exchange_id)  # type: ignore[arg-type]
+                    _oo = await exchange.fetch_open_orders(_ccxt_s)
+                except Exception:  # noqa: BLE001
+                    continue
+                for _o in _oo or []:
+                    try:
+                        _typ = str(_o.get("type") or "").lower()
+                        _info = _o.get("info") or {}
+                        _itype = str(_info.get("type") or "").lower()
+                        _is_algo = (
+                            "stop" in _typ or "stop" in _itype
+                            or "take_profit" in _typ or "take_profit" in _itype
+                        )
+                        _ro = _o.get("reduceOnly")
+                        if _ro is None:
+                            _ro = _info.get("reduceOnly") or _info.get("reduce_only")
+                        if _is_algo and bool(_ro):
+                            await exchange.cancel_order(_o.get("id"), _ccxt_s)
+                            cancelled_total += 1
+                    except Exception:  # noqa: BLE001
+                        continue
+            if cancelled_total > 0:
+                summary["orphans_cancelled"] = cancelled_total
+                self._log.info(
+                    "[IronMan/guardian] cleanup: cancelled %d orphan reduce-only orders "
+                    "(symbols without positions)", cancelled_total,
+                )
+        except Exception as exc:  # noqa: BLE001
+            summary["errors"].append(f"orphan cleanup: {exc}")
 
         return summary
 
