@@ -5898,6 +5898,32 @@ class MekkaDashboardServer:
                 "executed_at": executed_at,
             }, status=200), None
 
+        # Block HOLD recommendations — there is no trade to execute. Vision
+        # returns HOLD when conviction is insufficient; SL/TP/entry are still
+        # populated as reference levels but cannot be used to place an order.
+        # Without this gate, the SHORT fallback below crashes the TradingSignal
+        # validator (SL/TP geometry is built for LONG, not SHORT). Bug fix
+        # 2026-05-25 — discovered during #4 validation smoke.
+        _direction = str(cached_rec.get("direction") or "").upper()
+        if _direction not in ("LONG", "SHORT"):
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="TRADE_NOW_BLOCKED",
+                severity="INFO",
+                message=f"TradeNow execute blocked — direction={_direction!r} (not LONG/SHORT)",
+                payload={"recommendation_id": rec_id, "direction": _direction},
+            )
+            return web.json_response({
+                "status": "blocked",
+                "reason": (
+                    f"Recomendação atual é {_direction or 'HOLD'} — não há trade a executar. "
+                    f"Aguarde os agentes encontrarem oportunidade direcional (LONG ou SHORT)."
+                ),
+                "order_id": None,
+                "is_paper": _s.paper_trading,
+                "executed_at": executed_at,
+            }, status=200), None
+
         # Block mock recommendations (belt-and-suspenders — frontend also blocks)
         if cached_rec.get("source") == "mock":
             await MekkaRepository.log_event(

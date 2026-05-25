@@ -140,6 +140,42 @@ class TestBrokerAdapter:
         assert data['status'] == 'blocked'
         assert 'mock' in data['reason'].lower()
 
+    async def test_execute_hold_recommendation_blocked_early(self):
+        """Recomendação direction=HOLD → blocked com mensagem clara, sem crash.
+
+        Bug fix 2026-05-25: antes, HOLD caía no fallback else → SHORT, e o
+        validator do TradingSignal explodia (SL/TP geometry de LONG aplicada
+        a SHORT). O gate em _te_check_gates agora bloqueia HOLD cedo.
+        """
+        from src.persistence.repository import MekkaRepository
+        await MekkaRepository.initialize()
+
+        server = _make_server()
+        hold_rec_id = 'hold-rec-001'
+        server._rec_cache[hold_rec_id] = {
+            'symbol': 'BTC', 'direction': 'HOLD',
+            'entry_price': 77300.3, 'stop_loss': 74981.29, 'take_profit': 79619.31,
+            'size_pct': 0.005, 'leverage': 2, 'confidence': 0.52,
+            'justification': 'Consenso insuficiente', 'source': 'agents',
+            '_equity_usd': 5000.0,
+        }
+
+        with patch('src.agents.batman.is_kill_switch_active', return_value=False):
+            status, data = await _post(server, '/api/trade/execute', {
+                'recommendation_id': hold_rec_id,
+                'confirmed': True,
+            })
+
+        assert status == 200
+        assert data['status'] == 'blocked'
+        assert 'HOLD' in data['reason'] or 'direcional' in data['reason'].lower(), (
+            f"reason deve mencionar HOLD/direcional, recebido: {data['reason']}"
+        )
+        assert data['order_id'] is None
+        # Não deve ter chegado a tentar construir TradingSignal SHORT
+        assert 'validation error' not in data['reason'].lower()
+        assert 'stop_loss' not in data['reason'].lower()
+
     async def test_execute_real_rec_calls_ironman_paper(self):
         """rec válida com source=agents → IronMan é chamado, retorna PAPER- order_id."""
         import os
