@@ -695,13 +695,13 @@ class Cyclops:
                     "[Cyclops] %s — %s (qty=%.6f, close_price=%.4f)",
                     symbol, trigger_reason, open_qty, mark,
                 )
-                # Story 063 — Episodic Memory: resolve outcome for this position.
-                # Compute holding_hours from opening trade timestamp.
+                # Stories 063/183/186 — resolve all memory stores via central helper.
+                # AgentMemory (063), RoleWorkingMemory (183), SignalOutcomeMemory (186)
+                # are all written from the same place so closes via SL/TP, manual or
+                # emergency_flatten stay consistent. See project-memory-orphan-writers.
                 try:
-                    from src.persistence.agent_memory import AgentMemoryStore as _AMS  # noqa: WPS433
                     _holding_h: float | None = None
                     try:
-                        # Best effort: look for the opening trade to compute duration
                         _open_trades = await MekkaRepository.list_open_paper_trades()
                         _op = next(
                             (t for t in _open_trades if t.symbol == symbol),
@@ -714,10 +714,14 @@ class Cyclops:
                             _holding_h = round(_delta.total_seconds() / 3600, 2)
                     except Exception:  # noqa: BLE001
                         pass
-                    await _AMS.resolve_outcome(
+                    from src.services.trade_outcome_resolver import (  # noqa: WPS433
+                        resolve_trade_memories as _rtm,
+                    )
+                    await _rtm(
                         symbol=symbol,
                         pnl_usd=pnl_usd,
                         holding_hours=_holding_h,
+                        trade_id=str(_op.order_id) if _op and getattr(_op, "order_id", None) else None,
                     )
                 except Exception as _mem_exc:  # noqa: BLE001
                     logger.debug("[Cyclops] memory resolve skipped: %s", _mem_exc)

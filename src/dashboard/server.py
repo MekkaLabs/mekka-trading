@@ -2617,6 +2617,24 @@ class MekkaDashboardServer:
                         message=f"Posição LIVE {symbol} {side} fechada manualmente — qty={res.quantity}",
                         payload={"order_id": res.order_id, "exchange": _s.active_exchange},
                     )
+                    # Resolve 3 memory stores (063/183/186). PnL best-effort: live
+                    # exit lacks entry avg without an extra exchange roundtrip, so
+                    # passes 0.0 → NEUTRAL classification. Better than a silent gap.
+                    try:
+                        from src.services.trade_outcome_resolver import (  # noqa: WPS433
+                            resolve_trade_memories as _rtm_live,
+                        )
+                        await _rtm_live(
+                            symbol=symbol,
+                            pnl_usd=0.0,
+                            action=side,
+                            trade_id=str(res.order_id) if res.order_id else None,
+                        )
+                    except Exception as _rtm_live_exc:  # noqa: BLE001
+                        logger.debug(
+                            "dashboard live close memory resolve skipped: %s",
+                            _rtm_live_exc,
+                        )
                     return web.json_response({
                         "status": "closed", "symbol": symbol, "side": side,
                         "quantity": res.quantity, "avg_price": res.avg_price,
@@ -2692,6 +2710,34 @@ class MekkaDashboardServer:
                 message=f"Posição {symbol} {side} fechada manualmente — qty={close_qty:.6f} @ ${avg_px:,.2f}",
                 payload={"trade_id": trade_db_id, "order_id": close_result.order_id},
             )
+
+            # Resolve 3 memory stores (063/183/186). PnL computed from mark price
+            # cache vs avg_px; falls back to 0.0 (NEUTRAL) if mark not cached.
+            try:
+                from src.services.trade_outcome_resolver import (  # noqa: WPS433
+                    resolve_trade_memories as _rtm_paper,
+                )
+                _mark_paper = 0.0
+                try:
+                    _mp = self._mark_prices or {}
+                    _mark_paper = float(_mp.get(symbol, 0.0) or 0.0)
+                except Exception:  # noqa: BLE001
+                    pass
+                _pnl_paper = 0.0
+                if _mark_paper > 0 and avg_px > 0:
+                    _sign = 1.0 if side == "LONG" else -1.0
+                    _pnl_paper = (_mark_paper - avg_px) * close_qty * _sign
+                await _rtm_paper(
+                    symbol=symbol,
+                    pnl_usd=_pnl_paper,
+                    action=side,
+                    trade_id=close_result.order_id,
+                )
+            except Exception as _rtm_paper_exc:  # noqa: BLE001
+                logger.debug(
+                    "dashboard paper close memory resolve skipped: %s",
+                    _rtm_paper_exc,
+                )
 
             return web.json_response({
                 "status": "closed",

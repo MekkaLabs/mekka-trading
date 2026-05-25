@@ -1590,6 +1590,55 @@ class NickFury(BaseAgent[list[CycleReport]]):
             except Exception as _mem_exc:  # noqa: BLE001
                 self._log.debug(f"[NickFury] Episodic memory record skipped: {_mem_exc}")
 
+            # Story 249 — DecisionMemory.save_decision: write missing for Vision reflection.
+            # Story 183 — RoleWorkingMemory.record: register cycle (outcome resolved at close).
+            # Both readers existed without writers — see project-memory-orphan-writers memory.
+            try:
+                from datetime import datetime as _dt249  # noqa: WPS433
+                from src.services.decision_memory import (  # noqa: WPS433
+                    DecisionRecord as _DR249,
+                    get_decision_memory as _gdm249,
+                )
+                from src.services.role_working_memory import (  # noqa: WPS433
+                    get_role_working_memory as _grwm183,
+                )
+
+                _regime249 = (
+                    analysis.volatility.volatility_regime.value
+                    if analysis and analysis.volatility
+                    else "UNKNOWN"
+                )
+                _debate_conf249 = 0.0
+                if analysis and analysis.debate_verdict is not None:
+                    _debate_conf249 = float(
+                        getattr(analysis.debate_verdict, "confidence", 0.0) or 0.0
+                    )
+
+                await _gdm249().save_decision(
+                    _DR249(
+                        cycle_id=str(_cycle_id),
+                        symbol=symbol,
+                        signal_action=signal.action.value,
+                        entry_price=float(signal.entry_price or 0.0),
+                        confidence=float(signal.confidence),
+                        debate_confidence=_debate_conf249,
+                        regime=_regime249,
+                        timestamp=_dt249.utcnow(),
+                    )
+                )
+                _grwm183().record(
+                    symbol=symbol,
+                    action=signal.action.value,
+                    confidence=float(signal.confidence),
+                    regime=_regime249,
+                    outcome_pnl=None,
+                    cycle_id=str(_cycle_id),
+                )
+            except Exception as _mem249_exc:  # noqa: BLE001
+                self._log.debug(
+                    f"[NickFury:249/183] decision/working memory write skipped: {_mem249_exc}"
+                )
+
         # Story 163 — Signal Metadata Pipeline: auto-inject market_regime + cap_tier
         # before Batman so gates 5b/5c work without manual metadata population.
         # Reads chart data (already in memory) + AssetClassifier (stateless, no I/O).
