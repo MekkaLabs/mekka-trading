@@ -1337,11 +1337,19 @@ class Batman(BaseAgent[RiskApproval]):
         # conservative first-week caps so a loose config or a large model-suggested
         # size cannot risk real money. Only ever tightens; never loosens.
         # ---------------------------------------------------------------
+        # Treat as "mainnet behavior" when on real mainnet OR when dry-run is on
+        # (so the operator can rehearse the clamp on testnet before going live).
+        _looks_mainnet = (
+            settings.active_exchange == "binance"
+            and not settings.paper_trading
+            and (
+                not bool(getattr(settings, "binance_testnet", False))
+                or bool(getattr(settings, "mainnet_dry_run", False))
+            )
+        )
         if (
             getattr(settings, "mainnet_first_week_hard_clamp", True)
-            and not settings.paper_trading
-            and settings.active_exchange == "binance"
-            and not bool(getattr(settings, "binance_testnet", False))
+            and _looks_mainnet
         ):
             _cap_size, _cap_lev = 0.001, 2
             if adjusted_size > _cap_size:

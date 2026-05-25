@@ -154,6 +154,15 @@ class Settings(BaseSettings):
             "sell=bid*(1-bps)) so it fills reliably while capping slippage. 20 = 0.20%."
         ),
     )
+    mainnet_dry_run: bool = Field(
+        default=False,
+        description=(
+            "Rehearsal mode: when True, the system applies mainnet-style behavior "
+            "(Batman hard clamp, limit-IOC marketable entries — never auto→market) "
+            "even on testnet, so the operator can validate go-live behavior on "
+            "fake money before flipping BINANCE_TESTNET=false. Default False."
+        ),
+    )
     mainnet_first_week_hard_clamp: bool = Field(
         default=True,
         description=(
@@ -246,6 +255,15 @@ class Settings(BaseSettings):
     max_daily_drawdown_pct: Annotated[float, Field(gt=0.0, le=1.0)] = Field(
         default=0.10,
         description="Halt trading if daily drawdown exceeds this fraction (0.10 = 10%)",
+    )
+    max_daily_loss_usd: Annotated[float, Field(ge=0.0)] = Field(
+        default=0.0,
+        description=(
+            "Absolute daily-loss circuit breaker (USD). When > 0 AND today_pnl_usd "
+            "<= -max_daily_loss_usd, NickFury engages the kill switch + alerts. "
+            "Complements max_daily_drawdown_pct (which is %-based). 0 = disabled. "
+            "Mainnet recommended: a conservative absolute floor independent of equity."
+        ),
     )
     # Story 066 — Trailing stop distance after TP1 scale-out
     trailing_stop_pct: Annotated[float, Field(gt=0.0, le=0.10)] = Field(

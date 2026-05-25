@@ -782,7 +782,11 @@ class IronMan(BaseAgent[ExecutionResult]):
         )
         _etype = str(getattr(settings, "binance_entry_order_type", "auto") or "auto").lower()
         if _etype == "auto":
-            _etype = "market" if _is_testnet else "limit_ioc"
+            # In mainnet dry-run mode, behave like mainnet even on testnet so
+            # the operator can rehearse the marketable-limit path with real
+            # ticks (no surprise behavior change at go-live).
+            _dry_run = bool(getattr(settings, "mainnet_dry_run", False))
+            _etype = "market" if (_is_testnet and not _dry_run) else "limit_ioc"
         use_market = _etype == "market"
         self._log.info(f"[IronMan/{exchange_id}] entry order type={_etype} (testnet={_is_testnet})")
 
@@ -850,6 +854,39 @@ class IronMan(BaseAgent[ExecutionResult]):
         filled = float(order.get("filled") or 0)
         avg_px = float(order.get("average") or signal.entry_price)
         order_id = str(order.get("id") or "")
+
+        # Slippage telemetry: how much the fill drifted from signal.entry_price.
+        # Validates the marketable-limit cap (M2) in production. Alert when the
+        # actual slippage exceeds 2× the configured cap — that means either the
+        # book moved between ticker and order, or the cap isn't holding.
+        try:
+            _slip_bps = 0.0
+            if filled > 0 and signal.entry_price > 0:
+                raw_bps = (avg_px - signal.entry_price) / signal.entry_price * 10_000.0
+                # Adverse direction depends on side: a LONG paying more is bad;
+                # a SHORT receiving less (avg < entry) is bad. Sign so positive
+                # bps == adverse slippage.
+                _slip_bps = raw_bps if is_buy else -raw_bps
+            _cap_bps = float(getattr(settings, "binance_max_entry_slippage_bps", 20.0) or 0.0)
+            from src.persistence.repository import MekkaRepository as _Repo  # noqa: WPS433
+            _adverse = _slip_bps > 0 and _cap_bps > 0 and _slip_bps > _cap_bps * 2.0
+            asyncio.create_task(_Repo.log_event(
+                agent="IronMan",
+                event="SLIPPAGE",
+                severity="WARNING" if _adverse else "INFO",
+                message=(
+                    f"slippage {_slip_bps:+.1f}bps em {symbol} {('buy' if is_buy else 'sell')} "
+                    f"(entry {signal.entry_price} → fill {avg_px}, cap {_cap_bps:.0f}bps)"
+                ),
+                payload={
+                    "symbol": symbol, "side": "long" if is_buy else "short",
+                    "entry_price": signal.entry_price, "avg_fill": avg_px,
+                    "slippage_bps": round(_slip_bps, 2), "cap_bps": _cap_bps,
+                    "adverse_over_2x_cap": _adverse, "order_type": _etype,
+                },
+            ))
+        except Exception:  # noqa: BLE001
+            _slip_bps = 0.0  # telemetry must never break execution
 
         if filled <= 0:
             return ExecutionResult(

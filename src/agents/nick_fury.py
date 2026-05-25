@@ -479,6 +479,42 @@ class NickFury(BaseAgent[list[CycleReport]]):
                     except Exception:  # noqa: BLE001
                         pass
                     return []
+
+                # Absolute daily-loss cap (USD): independent of equity %, fires
+                # when realized losses cross a hard floor. Complements the
+                # %-based drawdown cap above for mainnet risk control.
+                _max_loss = float(getattr(settings, "max_daily_loss_usd", 0.0) or 0.0)
+                if _max_loss > 0 and today_pnl_usd <= -_max_loss:
+                    self._log.error(
+                        f"[NickFury] Daily ABSOLUTE loss cap hit "
+                        f"(${today_pnl_usd:.2f} ≤ -${_max_loss:.2f}) — engaging kill switch"
+                    )
+                    await MekkaRepository.log_event(
+                        agent="NickFury", event="DAILY_LOSS_USD_KILL_SWITCH",
+                        severity="CRITICAL",
+                        message=(
+                            f"Daily PnL ${today_pnl_usd:.2f} ≤ cap -${_max_loss:.2f} "
+                            "— kill switch engaged"
+                        ),
+                        payload={"today_pnl_usd": today_pnl_usd, "cap_usd": _max_loss},
+                    )
+                    try:
+                        await self._telegram.alert(
+                            event="DAILY_LOSS_USD_KILL_SWITCH", severity="CRITICAL",
+                            agent="NickFury",
+                            message=(
+                                f"🛑 PERDA DIÁRIA absoluta: ${today_pnl_usd:.2f} ≤ "
+                                f"-${_max_loss:.2f}. Kill switch acionado."
+                            ),
+                            payload={},
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        engage_kill_switch()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return []
         except Exception as _pnl_exc:  # noqa: BLE001
             self._log.debug(f"[NickFury] Daily PnL gate skipped: {_pnl_exc}")
 

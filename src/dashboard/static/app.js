@@ -2182,6 +2182,10 @@ async function loadPositions() {
           const n = od.count || 0;
           if (od.supported) {
             positionsStatus.innerHTML += ` · 🛡️ ${n} stop${n === 1 ? '' : 's'} na corretora`;
+            const orph = od.orphan_count || 0;
+            if (orph > 0) {
+              positionsStatus.innerHTML += ` · <span style="color:#fb923c">🟠 ${orph} órfão${orph === 1 ? '' : 's'}</span>`;
+            }
           }
         })
         .catch(() => {});
@@ -6310,12 +6314,50 @@ async function _imprLoad(fresh = false) {
     }
     _imprRender();
     _imprLoadKpi();
+    _loadMainnetReadiness();
   } catch (err) {
     if (list) list.innerHTML = `<div class="trade-result-fail">❌ Erro: ${escapeHtml(String(err))}</div>`;
   }
 }
 
 // Department KPI tile (Sage) — throughput + latest measurement snapshot.
+// Mainnet readiness tile — runs the preflight on demand (subprocess ~3s).
+async function _loadMainnetReadiness(force = false) {
+  const el = document.getElementById('mainnet-readiness-tile');
+  if (!el) return;
+  if (!force && el.dataset.loaded === '1') return;
+  el.innerHTML = `<div class="impr-kpi-title">🚦 Mainnet readiness <span class="muted-line">(rodando preflight…)</span></div>`;
+  try {
+    const res = await fetch('/api/mainnet-readiness', { cache: 'no-store' });
+    if (!res.ok) { el.innerHTML = ''; return; }
+    const data = await res.json();
+    el.dataset.loaded = '1';
+    const checks = data.checks || [];
+    const fails = data.fail_count || 0;
+    const warns = data.warn_count || 0;
+    const all = data.all_pass;
+    const headerColor = all ? (warns ? '#fbbf24' : '#10b981') : '#ef4444';
+    const gateHtml = checks.map(c => {
+      const emoji = c.level === 'PASS' ? '✅' : c.level === 'WARN' ? '⚠️' : c.level === 'FAIL' ? '❌' : '⏭️';
+      return `<div class="impr-kpi-stat" title="${escapeHtml(c.detail || '')}">
+        <b style="color:${c.level === 'PASS' ? '#10b981' : c.level === 'WARN' ? '#fbbf24' : '#ef4444'}">${emoji}</b>
+        <span>${escapeHtml(c.name.replace(/_/g,' '))}</span>
+      </div>`;
+    }).join('');
+    el.innerHTML = `
+      <div class="impr-kpi-title">
+        🚦 Mainnet readiness
+        <span class="muted-line">${all ? 'verde' : 'bloqueado'} · ${fails} falha(s) · ${warns} aviso(s)</span>
+        <button type="button" class="impr-btn" style="margin-left:8px;font-size:0.7rem;padding:2px 8px" id="mainnet-readiness-refresh">↻</button>
+      </div>
+      <div class="impr-kpi-row" style="border-left:3px solid ${headerColor};padding-left:8px">${gateHtml}</div>`;
+    const btn = document.getElementById('mainnet-readiness-refresh');
+    if (btn) btn.addEventListener('click', () => _loadMainnetReadiness(true));
+  } catch (_e) {
+    el.innerHTML = '';
+  }
+}
+
 async function _imprLoadKpi() {
   const el = document.getElementById('impr-kpi');
   if (!el) return;

@@ -615,7 +615,21 @@ async def fetch_open_orders() -> dict[str, Any]:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("%s fetch_open_orders failed: %s", exchange_id, exc)
                 return _stub_response(f"{exchange_id} error: {type(exc).__name__}")
+        # Build the set of symbols with an OPEN position so we can tag each
+        # reduce-only order with is_orphan=True when no position matches —
+        # the operator sees orphans (the leftover leg of a SL/TP that fired)
+        # before the guardian's cleanup runs.
+        active_symbols: set[str] = set()
+        try:
+            pos = await asyncio.wait_for(exchange.fetch_positions(), timeout=5.0)
+            for p in pos or []:
+                if abs(float(p.get("contracts") or 0)) > 0:
+                    active_symbols.add(to_mekka(p.get("symbol") or "").upper())
+        except Exception:  # noqa: BLE001
+            pass
+
         items = []
+        orphan_count = 0
         for o in raw or []:
             info = o.get("info") or {}
             otype = str(o.get("type") or info.get("type") or "").lower()
@@ -623,17 +637,29 @@ async def fetch_open_orders() -> dict[str, Any]:
             reduce_only = bool(o.get("reduceOnly") or info.get("reduceOnly") or info.get("reduce_only"))
             kind = "SL" if ("stop" in otype and "profit" not in otype) else (
                 "TP" if ("take_profit" in otype or "takeprofit" in otype) else otype.upper() or "ORDER")
+            sym = to_mekka(o.get("symbol") or "")
+            # An order is "orphan" when it's reduce-only (i.e., a closing leg)
+            # for a symbol that no longer has an open position.
+            is_orphan = bool(reduce_only) and sym.upper() not in active_symbols
+            if is_orphan:
+                orphan_count += 1
             items.append({
-                "symbol": to_mekka(o.get("symbol") or ""),
+                "symbol": sym,
                 "kind": kind, "side": (o.get("side") or "").upper(),
                 "trigger_price": stop_px or None,
                 "price": _to_float(o.get("price")) or None,
                 "amount": _to_float(o.get("amount")),
                 "reduce_only": reduce_only,
+                "is_orphan": is_orphan,
                 "order_id": str(o.get("id") or ""),
             })
-        return {"items": items, "count": len(items), "source": exchange_id,
-                "supported": True, "message": None if items else "Sem ordens abertas na corretora."}
+        msg = (
+            f"{orphan_count} órfão(s) detectado(s) — guardião limpa no próximo ciclo."
+            if orphan_count > 0
+            else (None if items else "Sem ordens abertas na corretora.")
+        )
+        return {"items": items, "count": len(items), "orphan_count": orphan_count,
+                "source": exchange_id, "supported": True, "message": msg}
     finally:
         try:
             await exchange.close()

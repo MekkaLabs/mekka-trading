@@ -40,7 +40,8 @@ class RiskScanner:
     async def scan(self, period_days: int = 7) -> list[ImprovementProposal]:
         out: list[ImprovementProposal] = []
         for fn in (self._scan_kill_switch, self._scan_drawdown,
-                   self._scan_batman_rejections, self._scan_concentration):
+                   self._scan_batman_rejections, self._scan_concentration,
+                   self._scan_position_drift):
             try:
                 out.extend(await fn(period_days))
             except Exception as exc:  # noqa: BLE001
@@ -151,6 +152,64 @@ class RiskScanner:
                 suggested_story="Revisar exposição bruta agregada",
             )]
         return []
+
+    async def _scan_position_drift(self, period_days: int) -> list[ImprovementProposal]:
+        """Drift detector: compare what the system *thinks* is open (recent
+        FILLED trades with no closing trade after) vs what is *actually* open on
+        the exchange (PortfolioManager snapshot). A mismatch means the DB lost
+        track of an exchange position (or vice-versa) — silent risk on mainnet.
+        Read-only, fail-silent."""
+        try:
+            from src.agents.portfolio_manager import PortfolioManager  # noqa: WPS433
+            from src.persistence.repository import MekkaRepository  # noqa: WPS433
+            snap = await PortfolioManager().run()
+            trades = await MekkaRepository.list_recent_trades(limit=60)
+        except Exception:  # noqa: BLE001
+            return []
+        # Net DB position per symbol from FILLED trades (live only).
+        from collections import defaultdict  # noqa: WPS433
+        net: dict[str, float] = defaultdict(float)
+        for t in trades or []:
+            if getattr(t, "is_paper", True):
+                continue
+            if (getattr(t, "status", "") or "").upper() not in ("FILLED", "PARTIAL"):
+                continue
+            sym = (getattr(t, "symbol", "") or "").upper()
+            side = (getattr(t, "side", "") or "").lower()
+            qty = float(getattr(t, "quantity", 0) or 0)
+            if not sym or qty <= 0:
+                continue
+            net[sym] += qty if side == "long" else -qty
+        db_open = {s for s, q in net.items() if abs(q) > 1e-8}
+        ex_open = {
+            (getattr(p, "symbol", "") or "").upper()
+            for p in (getattr(snap, "positions", []) or [])
+            if abs(float(getattr(p, "size", 0) or 0)) > 0
+        }
+        drift = db_open.symmetric_difference(ex_open)
+        if not drift:
+            return []
+        # Build a readable evidence line: who thinks what.
+        only_db = sorted(db_open - ex_open)
+        only_ex = sorted(ex_open - db_open)
+        parts = []
+        if only_db:
+            parts.append("DB acha aberto, corretora não: " + ", ".join(only_db))
+        if only_ex:
+            parts.append("Corretora tem, DB não rastreia: " + ", ".join(only_ex))
+        return [ImprovementProposal(
+            title=f"Drift DB↔corretora em {len(drift)} símbolo(s)",
+            description=(
+                "Divergência entre posições gravadas no DB e posições reais na "
+                "corretora. Pode indicar fechamento sem registro, restart sem "
+                "reconciliação, ou trade fora do bot. Em mainnet isso é risco "
+                "silencioso — investigar e re-sincronizar."
+            ),
+            impact="HIGH" if only_ex else "MEDIUM",
+            area="risk",
+            evidence="; ".join(parts),
+            suggested_story="Reconciliar DB↔corretora e investigar a causa do drift",
+        )]
 
     async def _scan_drawdown(self, period_days: int) -> list[ImprovementProposal]:
         from src.persistence.repository import MekkaRepository  # noqa: WPS433

@@ -346,3 +346,109 @@ async def test_ironman_marketable_limit_crosses(monkeypatch):
     # Buy entry priced to cross above the ask (70010) by up to 20bps.
     assert entry_call["price"] > 70010.0
     assert entry_call["price"] <= 70010.0 * 1.0021  # within the slippage cap
+
+
+# ---------------------------------------------------------------------------
+# N1/N2 — SL guardian orphan cleanup (-4045) + periodic cleanup
+# ---------------------------------------------------------------------------
+
+class _GuardianFake:
+    """Fake exchange for guardian tests. Records cancel_order calls."""
+
+    def __init__(self, *, positions, open_orders_by_sym, sl_fails_with_4045=False):
+        self._positions = positions
+        self._open_orders = open_orders_by_sym
+        self._sl_fails_with_4045 = sl_fails_with_4045
+        self.cancelled: list[str] = []
+        self.create_orders: list[dict] = []
+        self._sl_attempt = 0
+
+    def market(self, sym):
+        return {"limits": {"amount": {"min": 0.001}, "cost": {"min": 5.0}}}
+
+    def price_to_precision(self, sym, p):
+        return float(round(float(p), 2))
+
+    async def fetch_positions(self):
+        return self._positions
+
+    async def fetch_open_orders(self, sym=None):
+        if sym is None:
+            return [o for lst in self._open_orders.values() for o in lst]
+        return list(self._open_orders.get(sym, []))
+
+    async def cancel_order(self, oid, sym=None):
+        self.cancelled.append(str(oid))
+        # remove from any list
+        for lst in self._open_orders.values():
+            lst[:] = [o for o in lst if str(o.get("id")) != str(oid)]
+        return {"id": oid, "status": "canceled"}
+
+    async def create_order(self, symbol, type, side, amount, price=None, params=None):
+        self.create_orders.append({"symbol": symbol, "type": type, "side": side,
+                                   "amount": amount, "params": params or {}})
+        if type == "stop_market":
+            self._sl_attempt += 1
+            if self._sl_fails_with_4045 and self._sl_attempt == 1:
+                # Simulate Binance error -4045 on the first try.
+                raise RuntimeError('binance {"code":-4045,"msg":"Reach max stop order limit."}')
+            return {"id": f"SL_{self._sl_attempt}"}
+        return {"id": "X"}
+
+
+async def test_guardian_retries_after_4045_cleanup(monkeypatch):
+    """When SL placement fails with -4045, guardian cancels orphan reduce-only
+    orders for the symbol and retries — the position ends up protected."""
+    from src.agents.iron_man import IronMan
+    from src.config.settings import settings
+    monkeypatch.setattr(settings, "paper_trading", False)
+    monkeypatch.setattr(settings, "active_exchange", "binance")
+
+    # One open SHORT position with orphan reduce-only stops on the symbol.
+    positions = [{
+        "symbol": "BTC/USDT:USDT", "contracts": 0.033, "side": "short",
+        "entryPrice": 77000.0,
+    }]
+    open_orders = {"BTC/USDT:USDT": [
+        # Orphan reduce-only stops with the WRONG side (not protective for the
+        # short — protective side is "buy"). These should be cancelled.
+        {"id": "O1", "type": "stop_market", "side": "sell", "reduceOnly": True,
+         "info": {"reduceOnly": True}},
+        {"id": "O2", "type": "take_profit_market", "side": "sell", "reduceOnly": True,
+         "info": {"reduceOnly": True}},
+    ]}
+    fake = _GuardianFake(positions=positions, open_orders_by_sym=open_orders,
+                         sl_fails_with_4045=True)
+    im = IronMan(); im._ccxt_exchange = fake
+    summary = await im.ensure_stops_for_open_positions()
+
+    # Orphans were cancelled, then the SL placement succeeded after retry.
+    assert len(fake.cancelled) >= 1
+    assert summary.get("checked") == 1
+    rep = summary.get("replaced") or []
+    assert any(r.get("after_4045") for r in rep)
+
+
+async def test_guardian_periodic_cleanup_for_closed_symbols(monkeypatch):
+    """When a symbol has NO open position but still has reduce-only orders on
+    the venue (the orphan leg of a SL/TP that fired), they get cancelled."""
+    from src.agents.iron_man import IronMan
+    from src.config.settings import settings
+    monkeypatch.setattr(settings, "paper_trading", False)
+    monkeypatch.setattr(settings, "active_exchange", "binance")
+    monkeypatch.setattr(settings, "trading_assets", ["BTC"])
+
+    # No open positions.
+    positions = []
+    # But BTC has a leftover reduce-only TP order on the venue.
+    open_orders = {"BTC/USDT:USDT": [
+        {"id": "ORPH_TP", "type": "take_profit_market", "side": "buy",
+         "reduceOnly": True, "info": {"reduceOnly": True}},
+    ]}
+    fake = _GuardianFake(positions=positions, open_orders_by_sym=open_orders)
+    im = IronMan(); im._ccxt_exchange = fake
+    summary = await im.ensure_stops_for_open_positions()
+
+    # Cleanup cancelled the orphan even though there's no position to guard.
+    assert "ORPH_TP" in fake.cancelled
+    assert summary.get("orphans_cancelled", 0) >= 1
