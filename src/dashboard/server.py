@@ -5502,38 +5502,131 @@ class MekkaDashboardServer:
             }, status=200)
 
         # ── Build recommendation ─────────────────────────────────────────
-        # Try to pull the latest Vision signal from DB as a real recommendation.
-        # Fall back to a mock (stub) when no signal is available.
+        # BUG fix 2026-05-25 — operator reported: "sempre sugere a mesma
+        # operação". Causa: este handler antes só fazia
+        # `SELECT * FROM signals ORDER BY timestamp DESC LIMIT 1`, retornando
+        # o ÚLTIMO signal cacheado do DB (gerado pelo loop autônomo, possivelmente
+        # horas atrás). Cliques sucessivos batiam no mesmo row.
+        #
+        # Agora: dispara análise FRESH (ProfessorX → Vision) para o asset
+        # configurado. Cache curto (60s) evita rerodar agentes se o operador
+        # clicar 2x em sequência — mas após 60s, nova análise é forçada.
+        #
+        # Custo: ~5-15s por chamada (Layer 1 paralelo + Vision LLM). Justificado
+        # porque o botão é clicado conscientemente pelo operador.
         recommendation = None
         source = "mock"
-        try:
-            from src.persistence.models import SignalRecord
-            from src.persistence.db import get_session
-            from sqlalchemy import desc, select
-            async with get_session() as _sess:
-                row = (
-                    await _sess.execute(
-                        select(SignalRecord)
-                        .where(SignalRecord.is_actionable.is_(True))
-                        .order_by(desc(SignalRecord.timestamp))
-                        .limit(1)
-                    )
-                ).scalars().first()
-            if row:
-                entry = float(row.entry_price or 0)
-                sl = float(row.stop_loss or 0)
-                tp = float(row.take_profit or 0)
-                size_pct = float(row.size_pct or params.get("max_position_size_pct", 0.02))
-                leverage_val = int(row.leverage or params.get("max_leverage", 1) or 1)
+        analysis_age_s: float | None = None
+        analysis_was_fresh = False
+
+        # Cache para evitar rerodar agentes em cliques sucessivos (~60s TTL).
+        _tn_cache = getattr(self, "_trade_now_analysis_cache", None) or {}
+        _cache_ttl_s = 60.0
+        _cache_key = "_".join(list(params.get("trading_assets", ["BTC"])))
+        _cache_entry = _tn_cache.get(_cache_key)
+        if _cache_entry and (datetime.now(timezone.utc) - _cache_entry["at"]).total_seconds() < _cache_ttl_s:
+            row = _cache_entry["signal"]
+            analysis_age_s = (datetime.now(timezone.utc) - _cache_entry["at"]).total_seconds()
+            analysis_was_fresh = False
+            logger.info(
+                f"[TradeNow] using cached analysis ({int(analysis_age_s)}s old) "
+                f"for {_cache_key}"
+            )
+        else:
+            # Run fresh analysis: ProfessorX (Layer 1) + Vision (LLM decision).
+            row = None
+            try:
+                from src.agents.professor_x import ProfessorX  # noqa: WPS433
+                from src.agents.vision import Vision  # noqa: WPS433
+
+                _target_symbol = list(params.get("trading_assets", ["BTC"]))[0]
+                logger.info(f"[TradeNow] running FRESH analysis for {_target_symbol}")
+                _professor = ProfessorX()
+                _analysis = await asyncio.wait_for(
+                    _professor.run(symbol=_target_symbol),
+                    timeout=30.0,
+                )
+                _vision = Vision()
+                _signal = await asyncio.wait_for(
+                    _vision.run(analysis=_analysis),
+                    timeout=45.0,
+                )
+                row = _signal  # TradingSignal pydantic model
+                analysis_was_fresh = True
+                # Cache for next clicks in this window
+                _tn_cache = {_cache_key: {"signal": row, "at": datetime.now(timezone.utc)}}
+                self._trade_now_analysis_cache = _tn_cache
+                logger.info(
+                    f"[TradeNow] fresh analysis done: "
+                    f"{getattr(_signal, 'symbol', '?')} {getattr(_signal.action, 'value', '?')} "
+                    f"conf={getattr(_signal, 'confidence', 0):.2f}"
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[TradeNow] fresh analysis TIMEOUT — falling back to last DB signal")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[TradeNow] fresh analysis FAILED: {exc} — falling back to last DB signal")
+
+            # Fallback: se análise fresh falhou, usa último signal do DB com timestamp
+            if row is None:
+                try:
+                    from sqlalchemy import desc, select  # noqa: WPS433
+
+                    from src.persistence.db import get_session  # noqa: WPS433
+                    from src.persistence.models import SignalRecord  # noqa: WPS433
+
+                    async with get_session() as _sess:
+                        db_row = (
+                            await _sess.execute(
+                                select(SignalRecord)
+                                .where(SignalRecord.is_actionable.is_(True))
+                                .order_by(desc(SignalRecord.timestamp))
+                                .limit(1)
+                            )
+                        ).scalars().first()
+                    if db_row:
+                        row = db_row
+                        # Idade do signal cacheado
+                        _ts = db_row.timestamp
+                        if _ts and _ts.tzinfo is None:
+                            _ts = _ts.replace(tzinfo=timezone.utc)
+                        analysis_age_s = (datetime.now(timezone.utc) - _ts).total_seconds() if _ts else None
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[TradeNow] DB fallback also failed: {exc}")
+
+        if row is not None:
+            try:
+                # row pode ser TradingSignal (fresh) OU SignalRecord (DB fallback)
+                # Ambos têm os mesmos atributos básicos
+                _sym = getattr(row, "symbol", None)
+                _action_obj = getattr(row, "action", None)
+                _action_str = _action_obj.value if hasattr(_action_obj, "value") else str(_action_obj or "")
+                entry = float(getattr(row, "entry_price", 0) or 0)
+                sl = float(getattr(row, "stop_loss", 0) or 0)
+                tp = float(getattr(row, "take_profit", 0) or 0)
+                size_pct = float(
+                    getattr(row, "size_pct", None) or params.get("max_position_size_pct", 0.02)
+                )
+                leverage_val = int(
+                    getattr(row, "leverage", None) or params.get("max_leverage", 1) or 1
+                )
                 # Super Agressivo: boost size and leverage
                 if _super_aggressive:
-                    size_pct = max(size_pct, 0.05)   # mínimo 5% do capital
-                    leverage_val = max(leverage_val, 10)  # mínimo 10x
-                conf = float(row.confidence or 0.5)
+                    size_pct = max(size_pct, 0.05)
+                    leverage_val = max(leverage_val, 10)
+                conf = float(getattr(row, "confidence", 0.5) or 0.5)
                 risk_usd = round(equity_usd * size_pct * abs(entry - sl) / entry, 2) if entry else 0.0
+                _justification = str(getattr(row, "reasoning", None) or "Vision analysis")[:400]
+                # Anexar info de freshness na justificativa
+                if analysis_was_fresh:
+                    _justification = f"[ANÁLISE FRESH AGORA] {_justification}"
+                elif analysis_age_s is not None:
+                    _mins = int(analysis_age_s // 60)
+                    _justification = (
+                        f"[Cache {_mins}min atrás — fresh analysis falhou ou ainda no TTL] {_justification}"
+                    )
                 recommendation = {
-                    "symbol": row.symbol,
-                    "direction": row.action.upper(),
+                    "symbol": _sym,
+                    "direction": _action_str.upper(),
                     "entry_price": entry,
                     "stop_loss": sl,
                     "take_profit": tp,
@@ -5541,13 +5634,15 @@ class MekkaDashboardServer:
                     "leverage": leverage_val,
                     "confidence": round(conf, 3),
                     "risk_usd": risk_usd,
-                    "justification": (row.reasoning or "Vision analysis")[:400],
+                    "justification": _justification,
                     "source": "agents",
                     "agents_consensus": conf >= _confidence_threshold,
+                    "analysis_was_fresh": analysis_was_fresh,
+                    "analysis_age_s": int(analysis_age_s) if analysis_age_s is not None else None,
                 }
                 source = "agents"
-        except Exception as exc:
-            logger.warning("trade_analyze: could not fetch latest signal: %s", exc)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[TradeNow] could not build recommendation from row: {exc}")
 
         if recommendation is None:
             # Mock stub — clear TODO marker for operator awareness
