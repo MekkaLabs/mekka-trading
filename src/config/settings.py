@@ -172,6 +172,17 @@ class Settings(BaseSettings):
             "first week once comfortable."
         ),
     )
+    phantom_reconciliation_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True (live mode only), IronMan periodically detects positions the DB "
+            "thinks are open but the exchange does not have, then inserts a synthetic "
+            "close to keep state consistent. Runs at boot and on every monitor cycle. "
+            "Bybit/Binance only (Hyperliquid uses different bookkeeping). Audits "
+            "PHANTOM_RECONCILED and alerts Telegram WARNING. Disable only when "
+            "manually reconciling state."
+        ),
+    )
 
     # --------------------------------------------------------------------------
     # Telegram

@@ -1349,6 +1349,157 @@ class IronMan(BaseAgent[ExecutionResult]):
 
         return summary
 
+    async def reconcile_phantom_positions(self) -> dict[str, Any]:
+        """Phantom reconciliation — detect positions the DB thinks are open
+        but the exchange does not have, then insert a synthetic close so the
+        rest of the system (Vision, Wolverine, Cyclops, Risk Scanner) stops
+        treating a ghost position as real.
+
+        Background — Risk Scanner (Domino) already detects this drift as an
+        ImprovementProposal, but it never acted on it. In mainnet, a phantom
+        position is silent risk: any agent reading the DB believes it still
+        exists and can add to it, hedge against it, or trigger emergency
+        flows that target nothing.
+
+        Paper mode is a no-op. Hyperliquid is skipped (uses different
+        bookkeeping; reconciliation there should follow a separate path).
+
+        Returns ``{checked, phantom_closed, errors}``. Read-mostly: only
+        writes when a phantom is found. Fail-silent — never raises.
+        """
+        summary: dict[str, Any] = {"checked": 0, "phantom_closed": [], "errors": []}
+        if settings.paper_trading:
+            return summary
+        if not bool(getattr(settings, "phantom_reconciliation_enabled", True)):
+            return summary
+        exchange_id = settings.active_exchange
+        if exchange_id not in ("bybit", "binance"):
+            return summary
+
+        # ── Step 1: build NET live position per symbol from DB ─────────
+        from collections import defaultdict  # noqa: WPS433
+        from src.persistence.repository import MekkaRepository  # noqa: WPS433
+
+        try:
+            trades = await MekkaRepository.list_recent_trades(limit=200)
+        except Exception as exc:  # noqa: BLE001
+            summary["errors"].append(f"db read: {exc}")
+            return summary
+
+        db_net: dict[str, float] = defaultdict(float)
+        for t in trades or []:
+            if getattr(t, "is_paper", True):
+                continue
+            status = (getattr(t, "status", "") or "").upper()
+            if status not in ("FILLED", "PARTIAL"):
+                continue
+            sym = (getattr(t, "symbol", "") or "").upper()
+            side = (getattr(t, "side", "") or "").lower()
+            qty = float(getattr(t, "quantity", 0) or 0)
+            if not sym or qty <= 0:
+                continue
+            db_net[sym] += qty if side == "long" else -qty
+
+        db_open = {s for s, q in db_net.items() if abs(q) > 1e-8}
+        summary["checked"] = len(db_open)
+        if not db_open:
+            return summary
+
+        # ── Step 2: fetch live exchange positions ──────────────────────
+        try:
+            exchange = await self._get_ccxt_exchange(exchange_id)
+            positions = await exchange.fetch_positions()
+        except Exception as exc:  # noqa: BLE001
+            summary["errors"].append(f"fetch_positions: {exc}")
+            return summary
+
+        ex_open: set[str] = set()
+        for p in positions or []:
+            try:
+                if abs(float(p.get("contracts") or 0)) > 0:
+                    ex_open.add(to_mekka(p.get("symbol") or "").upper())
+            except Exception:  # noqa: BLE001
+                continue
+
+        # ── Step 3: synthetic close + audit + alert for each phantom ──
+        phantoms = sorted(db_open - ex_open)
+        if not phantoms:
+            return summary
+
+        for sym in phantoms:
+            try:
+                net_qty = db_net[sym]
+                is_phantom_long = net_qty > 0
+                offset_side = "short" if is_phantom_long else "long"
+                close_qty = abs(net_qty)
+
+                close_result = ExecutionResult(
+                    symbol=sym,
+                    status=ExecutionStatus.FILLED,
+                    is_paper=False,
+                    side=offset_side,
+                    quantity=close_qty,
+                    avg_price=0.0,
+                    notional_usd=0.0,
+                    order_id=f"PHANTOM-{sym}-{uuid.uuid4().hex[:8]}",
+                    metadata={
+                        "action": "phantom_reconciled",
+                        "exchange": exchange_id,
+                        "reason": "DB had open position, exchange did not.",
+                        "original_net_qty": round(net_qty, 8),
+                        "original_side": "LONG" if is_phantom_long else "SHORT",
+                    },
+                )
+                await MekkaRepository.save_trade(close_result)
+                await MekkaRepository.log_event(
+                    agent="IronMan",
+                    event="PHANTOM_RECONCILED",
+                    severity="WARNING",
+                    symbol=sym,
+                    message=(
+                        f"Phantom reconciliation: DB acha {sym} aberto "
+                        f"qty={close_qty:.6f} {'LONG' if is_phantom_long else 'SHORT'}, "
+                        f"corretora não tem. Synthetic close inserido."
+                    ),
+                    payload={
+                        "db_net_qty": round(net_qty, 8),
+                        "offset_side": offset_side,
+                        "exchange": exchange_id,
+                    },
+                )
+                summary["phantom_closed"].append(
+                    {
+                        "symbol": sym,
+                        "qty": round(close_qty, 8),
+                        "side": "LONG" if is_phantom_long else "SHORT",
+                    }
+                )
+                try:
+                    from src.services.telegram_alerter import (  # noqa: WPS433
+                        TelegramAlerter as _TA,
+                    )
+
+                    asyncio.create_task(
+                        _TA().alert(
+                            event="PHANTOM_RECONCILED",
+                            severity="WARNING",
+                            agent="IronMan",
+                            symbol=sym,
+                            message=(
+                                f"⚠️ Phantom reconciliado em {sym} "
+                                f"({'LONG' if is_phantom_long else 'SHORT'} qty={close_qty:.6f}) — "
+                                f"DB achava aberto, corretora não tem. Synthetic close inserido."
+                            ),
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            except Exception as exc:  # noqa: BLE001
+                summary["errors"].append(f"{sym} phantom close: {exc}")
+                self._log.error(f"[IronMan/phantom] {sym}: {exc}")
+
+        return summary
+
     async def close_position(self, symbol: str, side: str) -> ExecutionResult:
         """Close an open LIVE position with a reduce-only MARKET order and
         cancel its resting SL/TP orders. ``side`` is the OPEN position's side

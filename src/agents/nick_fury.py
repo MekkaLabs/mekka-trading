@@ -190,7 +190,8 @@ class NickFury(BaseAgent[list[CycleReport]]):
         if not settings.paper_trading:
             try:
                 from src.agents.iron_man import IronMan  # noqa: WPS433
-                recon = await IronMan().ensure_stops_for_open_positions()
+                _im_boot = IronMan()
+                recon = await _im_boot.ensure_stops_for_open_positions()
                 replaced = recon.get("replaced") or []
                 errors = recon.get("errors") or []
                 self._log.info(
@@ -222,6 +223,35 @@ class NickFury(BaseAgent[list[CycleReport]]):
                         )
                     except Exception:  # noqa: BLE001
                         pass
+
+                # Phantom reconciliation — same intent, opposite direction:
+                # detect positions the DB believes are open but the exchange
+                # does not have, insert a synthetic close + alert.
+                try:
+                    phantom_boot = await _im_boot.reconcile_phantom_positions()
+                    p_closed = phantom_boot.get("phantom_closed") or []
+                    p_errors = phantom_boot.get("errors") or []
+                    self._log.info(
+                        f"[NickFury] Boot phantom reconciliation: "
+                        f"checked={phantom_boot.get('checked')} "
+                        f"closed={len(p_closed)} errors={len(p_errors)}"
+                    )
+                    if p_closed or p_errors:
+                        await MekkaRepository.log_event(
+                            agent="NickFury",
+                            event="BOOT_PHANTOM_RECONCILE",
+                            severity="WARNING",
+                            message=(
+                                f"Boot phantom reconciliation: "
+                                f"{phantom_boot.get('checked')} verificada(s), "
+                                f"{len(p_closed)} synthetic close, {len(p_errors)} erro(s)."
+                            ),
+                            payload=phantom_boot,
+                        )
+                except Exception as _exc:  # noqa: BLE001
+                    self._log.warning(
+                        f"[NickFury] Boot phantom reconciliation skipped: {_exc}"
+                    )
             except Exception as _exc:  # noqa: BLE001
                 self._log.warning(f"[NickFury] Boot reconciliation skipped: {_exc}")
 
@@ -2588,6 +2618,30 @@ class NickFury(BaseAgent[list[CycleReport]]):
             except Exception as _exc:  # noqa: BLE001
                 self._log.warning(f"[NickFury] SL guardian skipped: {_exc}")
 
+        # [C4] Phantom reconciliation — complementar ao SL guardian: detecta
+        # posições que o DB acha aberto mas a corretora não tem (DB-side
+        # drift), insere synthetic close + alerta. Sem isto, Vision/Wolverine
+        # podem decidir sobre uma posição que não existe. Sem-op em paper.
+        phantom_recon: dict = {}
+        if not settings.paper_trading:
+            try:
+                from src.agents.iron_man import IronMan as _IM  # noqa: WPS433
+                phantom_recon = await _IM().reconcile_phantom_positions()
+                if phantom_recon.get("phantom_closed") or phantom_recon.get("errors"):
+                    await MekkaRepository.log_event(
+                        agent="IronMan",
+                        event="PHANTOM_RECONCILE_SUMMARY",
+                        severity="WARNING",
+                        message=(
+                            f"Phantom reconciliation: checked={phantom_recon.get('checked')} "
+                            f"closed={len(phantom_recon.get('phantom_closed') or [])} "
+                            f"errors={len(phantom_recon.get('errors') or [])}"
+                        ),
+                        payload=phantom_recon,
+                    )
+            except Exception as _exc:  # noqa: BLE001
+                self._log.warning(f"[NickFury] Phantom reconciliation skipped: {_exc}")
+
         return {
             "status": "halted" if plan.kill_switch_engaged else "ok",
             "positions_monitored": len(plan.positions),
@@ -2596,6 +2650,7 @@ class NickFury(BaseAgent[list[CycleReport]]):
             "recovery_actions_taken": actions_taken,
             "cyclops_triggered": cyclops_triggered,
             "sl_guardian": sl_guardian,
+            "phantom_recon": phantom_recon,
         }
 
     async def _execute_recovery_plan(
