@@ -563,6 +563,7 @@ class MekkaDashboardServer:
         r.add_post("/api/improvements/approve-pr", self._handle_improvements_approve_pr)
         r.add_post("/api/improvements/claim", self._handle_improvements_claim)
         r.add_get("/api/improvements/kpi", self._handle_improvements_kpi)
+        r.add_get("/api/mentor/suggestions", self._handle_mentor_suggestions)
 
     def _register_backtest_debate_routes(self, r) -> None:
         r.add_post("/api/backtest/run", self._handle_backtest_run)
@@ -6457,6 +6458,19 @@ class MekkaDashboardServer:
     async def _handle_improvements_claim(self, request: web.Request) -> web.Response:
         from src.dashboard.routers import improvements as _impr
         return await _impr.handle_claim(self, request)
+
+    async def _handle_mentor_suggestions(self, _: web.Request) -> web.Response:
+        """GET /api/mentor/suggestions — Charles Xavier proposes parameter deltas."""
+        try:
+            from src.agents.mentor import Mentor  # noqa: WPS433
+            report = await Mentor().run()
+            return web.json_response(report.to_dict(), status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("mentor suggestions failed: %s", exc, exc_info=True)
+            return web.json_response(
+                {"error": str(exc), "suggestions": [], "observation_summary": {}},
+                status=200,
+            )
 
     async def _handle_improvements_approve_pr(self, request: web.Request) -> web.Response:
         from src.dashboard.routers import improvements as _impr
