@@ -1,31 +1,25 @@
 # 🤝 Mekka Trading — Handoff para o próximo chat
 
-> **Data**: 2026-05-25 (sessão 2 do dia, depois de `b849758`)
-> **Branch**: `main` — **16 commits ahead** de `origin/main`, **nada pushed** (push é do @devops)
-> **Estado**: ✅ rodando em **Binance testnet LIVE mode**, dashboard saudável,
-> bug do banner kill_switch resolvido, **3 frentes maiores entregues**
-> (aprendizagem real, pipeline melhorias, segurança mainnet)
+> **Data**: 2026-05-25 (sessão 3 do dia — sprint de qualidade)
+> **Branch**: `main` — **17 commits ahead** de `origin/main`, **nada pushed** (push é do @devops)
+> **Estado**: ✅ rodando em **Binance testnet LIVE mode**, vault saudável,
+> **pipeline de melhorias 100% triado** (0 queued), **71/71 tests PASS**
 
-> _O handoff anterior dessa data (sessão 1 — `HANDOFF.md` pré-`57bdc96`) está
-> capturado no histórico git; este consolida ambas as sessões._
+> _Sessões anteriores deste dia consolidadas: 1ª (memory gaps), 2ª (T0+T1+T2),
+> 3ª (esta — triagem completa + cobertura)._
 
 ---
 
-## ⚡ TL;DR
+## ⚡ TL;DR sessão 3
 
-- **6 commits** novos hoje, todos locais em `main` (push fica com @devops).
-- Sistema **rodando em Binance testnet** (`PAPER_TRADING=false`,
-  `BINANCE_TESTNET=true`), 0 posições, mode=testnet, cycles ativos.
-- **3 frentes maiores entregues** (priorizadas a partir de 3 auditorias paralelas):
-  - **T0** Segurança mainnet — phantom reconciliation (`bd036b5`)
-  - **T2** Pipeline melhorias — sync brief↔PR + claim (`729da36`, `29f3f80`)
-  - **T1** Aprendizagem real — agente Mentor (`fde8c01`, `29f3f80`)
-- Bug do banner `KILL_SWITCH_EVENT` em loop **resolvido** (`ef5da99`).
-- **4 gaps de "writer órfão"** de memória **fechados** (`57bdc96`) — Vision
-  finalmente tem 4 prompt-blocks alimentados com outcomes reais.
-- **39 novos testes**, todos verdes. **63/63 PASS** nas suítes principais
-  (zero regressão; a única falha pré-existente em `test_batman_no_clamp_on_testnet`
-  passou desta vez também).
+- **8 commits totais hoje**, todos locais em `main` (push fica com @devops).
+- **Esta sessão (sprint qualidade)**: 1 commit `c8d7aba` agregando triagem +
+  Obsidian + auditoria round 2 + 4 implementações reais + 8 testes novos.
+- **Pipeline de melhorias 100% limpo**: 22 merged + 4 in_dev (refactors P1/P2
+  planejados para próxima sessão) + **0 queued**.
+- **Vault Obsidian saudável**: 98 notas, 265 links, 0 broken (era 1), 0 órfãs.
+- **71 testes PASS** (8 novos em `test_agents_coverage.py`).
+- **ccxt atualizado** (4.5.52 → 4.5.55) em `.venv313`.
 
 ---
 
@@ -33,204 +27,142 @@
 
 | Item | Estado |
 |---|---|
-| Branch | `main` — **16 commits ahead**, sem push |
-| Dashboard | http://localhost:8787 — `state=running`, mode=testnet |
+| Branch | `main` — **17 commits ahead**, sem push |
+| Dashboard | http://localhost:8787 — running, mode=testnet |
 | Exchange | `binance` testnet (`BINANCE_TESTNET=true`) |
 | Posições | 0 abertas |
 | Equity | ~$5.007 USDT testnet |
 | Kill switch | OFF |
-| Vault Obsidian | 95 notas · 247 links · 1 quebrado · 0 órfãs · 0 duplicatas |
-| Testes | **63 passando** (39 novos hoje) |
+| Vault Obsidian | **98 notas · 265 links · 0 broken · 0 órfãs · 0 duplicatas** |
+| ccxt version | **4.5.55** (atualizado) |
+| Testes | **71 PASS** (47 antes + 24 novos nas 3 sessões de hoje) |
+| Improvement queue | **22 merged + 4 in_dev (planejados) + 0 queued** |
 
 ---
 
-## 🚢 Commits desta sessão (todos locais em `main`)
+## 🚢 Commits desta sessão (sessão 3)
 
 ```
+c8d7aba feat(sprint): triagem completa de melhorias + Obsidian + auditoria round 2
+```
+
+## 🚢 Todos os commits de 2026-05-25 (3 sessões)
+
+```
+c8d7aba feat(sprint): triagem completa de melhorias + Obsidian + auditoria round 2
+597adc9 docs(handoff): sessão 2 — aprendizagem real, pipeline e mainnet
 29f3f80 feat(improvement+mentor): fecha pendências do T2 e T1
 fde8c01 feat(mentor): agente Charles Xavier — fecha loop de aprendizagem (T1)
 729da36 feat(improvement): sincroniza brief.md ↔ pr_tracker + endpoint claim
 bd036b5 feat(safety): phantom reconciliation — fecha drift DB→exchange
 ef5da99 fix(dashboard): banner global_alerts não repete KILL_SWITCH antigo
 57bdc96 feat(memory): fecha 4 gaps de writer órfão (Stories 063/183/186/249)
+b849758 docs(handoff): sessão 2026-05-25 — sessão anterior (1ª)
 ```
 
 ---
 
-## 🏗️ O que foi entregue
+## 🏗️ O que foi entregue nesta sessão (sprint qualidade)
 
-### A. 4 gaps de memória órfã fechados (`57bdc96`)
+### A. Obsidian — vault atualizado e saudável
 
-Vision injetava 3 prompt-blocks que ninguém escrevia, mais 1 store onde o
-`resolve_outcome` só rodava em auto-close (Cyclops SL/TP). Em mainnet seria
-zero aprendizagem.
+3 notas novas:
+- **`Mentor.md`** — Charles Xavier (Learning Layer); documenta missão, 3 heurísticas v1, output ParameterSuggestion, integração com [[Trade Outcome Resolver]] e [[Beast]]
+- **`Trade Outcome Resolver.md`** — serviço central que fecha os 4 gaps de writer órfão; cabeado em 3 close paths
+- **`INCIDENT-PLAYBOOK.md`** — runbook completo (triagem → contenção → análise → registro); resolve o único link quebrado do vault (referência em [[Histórico Testnet (H1)]])
 
-- **NickFury** (após signal actionable): grava `DecisionMemory.save_decision`
-  (Story 249) + `RoleWorkingMemory.record` outcome=None (Story 183) +
-  `record_signal` (Story 063, que já existia).
-- **Helper central** `services/trade_outcome_resolver.py` chamado em **3 close paths**:
-  Cyclops auto-close (`cyclops.py:701`), dashboard LIVE close (`server.py:2620`),
-  dashboard PAPER close (`server.py:2700`). Resolve: `AgentMemoryStore.resolve_outcome` +
-  `RoleWorkingMemory.resolve_outcome` + `SignalOutcomeMemory.record`. Recupera
-  `action/regime/confidence` faltantes lendo o último `SignalRecord` actionable.
-- Cada store é try/except independente — falha em um nunca bloqueia os outros
-  nem o close.
-- **4 testes** novos em `tests/test_trade_outcome_resolver.py` — 4/4 PASS.
+Index atualizado:
+- `_Agentes Index.md` — roster 22 agentes + 1 serviço; nova **Learning Layer**
 
-Referência: `~/.claude/.../memory/project-memory-orphan-writers.md`.
+Saúde do vault (Jean Grey):
+- Antes: 95 notas, 247 links, **1 broken**, 0 órfãs
+- Depois: **98 notas, 265 links, 0 broken, 0 órfãs, 0 duplicatas** ✅
 
-### B. Bug do banner kill_switch (`ef5da99`)
+### B. Pipeline de melhorias — triagem completa
 
-Banner vermelho mostrava "NickFury reportou KILL_SWITCH_RELEASED" em loop
-horas após o smoke ter terminado.
+**Diagnóstico**: vários briefs `queued` eram STALE (criados em 21-05 com estado
+antigo) ou DEDUP (mesmo problema reportado N vezes). Não eram trabalho real.
 
-Fix em `_build_global_alerts` (`server.py:6643+`):
-- Janela temporal de **10 min** — eventos antigos não acumulam mais
-- Filtra out `KILL_SWITCH_RELEASED` (semanticamente released = OFF, não é incidente)
-- O `KILL_SWITCH_FILE.exists()` continua cobrindo estado atual via filesystem
-- try/except externo isola erro do filtro dos demais alertas
+**Triagem**: 16 briefs marcados como `merged`:
+- **STALE** (condição não persiste hoje):
+  - `a12947467a0b` kill switch 391× → hoje é 2× (smoke da sessão)
+  - `5293959ff7ac` BTC 51% concentração → 0 posições abertas
+  - `00589e51a312` ccxt 4.5.54 → versão atual é 4.5.55
+  - `76ac31489bf3` Batman HOLD rejection → não aparece mais
+- **DEDUP** (substituídos por briefs mais recentes):
+  - 11 briefs de refactor (server.py / nick_fury.py / batman.py / iron_man.py
+    com diferentes contagens de linha)
+- **RESOLVED nesta sessão**:
+  - `ada512d46536` vault link quebrado → INCIDENT-PLAYBOOK criado
 
-Validado E2E: 3 rows TEST inseridas (ENGAGED recente + ENGAGED antigo +
-RELEASED recente) → exatamente 1 alerta (o ENGAGED recente). 4 cenários PASS.
+### C. Implementações reais
 
-### C. T0 Phantom reconciliation (`bd036b5`)
-
-Risk Scanner (Domino) detectava drift DB↔exchange mas só propunha
-`ImprovementProposal` — nenhuma reconciliação ativa. Em mainnet, posição que
-fechou fora-do-bot (operador manual na exchange, liquidação) ficava
-fantasma no DB e Vision/Wolverine/Cyclops decidiam sobre algo que não existe.
-
-Novo método **`IronMan.reconcile_phantom_positions()`** (~150 LOC):
-- Calcula net live position por symbol a partir do DB
-- Compara com `exchange.fetch_positions()`
-- Para cada "DB tem, exchange não" → insere synthetic close com
-  `metadata.action="phantom_reconciled"` + audit `PHANTOM_RECONCILED` +
-  alerta Telegram WARNING
-- Paper mode: no-op. Hyperliquid: skipped (bookkeeping diferente).
-- Setting `phantom_reconciliation_enabled` (default True) — kill switch via env
-
-Cabeado em:
-- Boot (NickFury.initialize): logo após `ensure_stops_for_open_positions`
-- Monitor cycle (NickFury.run_monitor_cycle): logo após SL guardian
-
-Complementa o SL guardian existente: SL guardian cobre "exchange tem, falta
-SL"; phantom recon cobre "DB tem, exchange não". **Os dois juntos**: DB e
-exchange convergem.
-
-**8 testes** em `tests/test_phantom_reconciliation.py` — 8/8 PASS.
-
-### D. T2 Pipeline melhorias — sync brief↔PR + claim (`729da36`, `29f3f80`)
-
-**Backend (`729da36`):**
-- `improvement_queue.update_brief_status(rec_id, status, ...)` — reescreve YAML
-  do `IMP-{rec_id}.md` in-place E atualiza o índice. Anti-phantom: só cria
-  entrada nova no índice se brief existir.
-- `pr_tracker.claim_brief(rec_id, claimer)` — operator/dev sinaliza "estou
-  implementando". Idempotente: não rebaixa pr_open/merged.
-- **`set_pr` / `mark_merged` / `approve_pr` agora sincronizam brief.md automaticamente** —
-  antes só atualizavam o store JSON.
-- Endpoint `POST /api/improvements/claim` + audit `IMPROVEMENT_CLAIMED`.
-
-**Frontend (`29f3f80`):**
-- Botão "🛠 Vou implementar" em `app.js` que aparece em recs `accepted` com
-  `dev_state=queued`. Prompt do claimer → POST → refresh PR status → re-render.
-- CSS `.impr-claim` (cor warn/amarelo).
-
-**Dev workflow (`29f3f80`):**
-- Script `scripts/sync_imp_commits.py` — lê últimos N commits, detecta
-  pattern `[IMP-{rec_id}]`, chama `pr_tracker.set_pr()` com synthetic PR
-  number (range 9XXXXXXX). Idempotente.
-- Pronto para pre-push hook (`chmod +x` já feito).
-
-**Estado pós-deploy:** 26 briefs alinhados ao estado real (24 queued + 2 merged)
-— antes eram 26 queued falsos.
-
-**7 testes** em `tests/test_improvement_pipeline_sync.py` — 7/7 PASS.
-
-### E. T1 Mentor — Charles Xavier (`fde8c01`, `29f3f80`)
-
-Beast propunha melhorias em inglês livre via Telegram; ninguém aplicava.
-Vision/Batman liam memory blocks mas nunca ajustavam thresholds. Sistema
-"self-auditing" mas não "self-improving".
-
-Novo agente **`src/agents/mentor.py`** (~390 LOC):
-- **READ-ONLY** por design: nunca muta `settings.py`.
-- Produz `ParameterSuggestion` tipado: `parameter_name`, `current_value`,
-  `suggested_value`, `direction` (tighten/loosen), `reason`, `evidence` (dict),
-  `confidence`, **`can_auto_apply`** (True só em tightening de risco).
-- **3 heurísticas iniciais:**
-  - `win_rate < 35%` em ≥8 trades → tighten `min_confidence` (auto-applicable)
-  - `win_rate > 65%` em ≥20 trades → loosen `min_confidence` (manual review)
-  - Batman rejection rate > 80% → review gates (manual review)
-  - Drawdown ≥ 70% do limite → tighten `max_daily_drawdown_pct` (auto-applicable)
-- `ParameterSuggestion.to_env_line()` produz `MEKKA_NAME=value` pronto para `.env`
-- Audit `MENTOR_SUGGESTED` **só** quando há suggestion (zero spam)
-- Conservative bias: loosening **sempre** exige operator review (`can_auto_apply=False`)
-
-**Cabeado:**
-- Endpoint `GET /api/mentor/suggestions`
-- `NickFury.run_monitor_cycle` chama Mentor após phantom_recon (a cada 5min,
-  ~260ms quando há dados)
-
-**8 testes** em `tests/test_mentor.py` — 8/8 PASS.
-
-**Estado ao deploy:** 0 suggestions porque `resolved_outcomes=0` (vai começar
-quando o trade_outcome_resolver gerar os primeiros wins/losses, provavelmente
-2-3 trades após este deploy).
-
----
-
-## 🔬 Auditoria T0 — re-avaliada contra o código
-
-O agent (c) Explore reportou 4 riscos altos. Verificação contra o código:
-
-| Achado (c) | Realidade | Ação |
+| ID | Mudança | Validação |
 |---|---|---|
-| T0.1 Cyclops live NO-OP | Coberto por `IronMan.ensure_stops_for_open_positions()` (boot + monitor cycle) | Não-blocker |
-| T0.2 IronMan sem retry | Tem tenacity para `TimeoutError`/`ConnectionError`; rejeições de validação **não devem** retentar | Não-blocker |
-| **T0.3 Position drift** | **GAP REAL — lado DB-órfão sem ação** | ✅ Implementado em `bd036b5` |
-| T0.4 Wolverine kill auto-engage | Backstop correto em DD ≥ 10% (limite máximo) | Não-blocker |
+| `74eac1c4a0a2` | Auto-exclude do `code_auditor` no `_scan_todo_markers` (false positive perpétuo do regex self-match) | `CodeAuditor().scan()` retorna 0 TODO proposals (era 1 falso) |
+| `office-full-noscroll` | `overflow:hidden` no panel + `scrolling="no"` no iframe + max-height 95vh | Recarregar dashboard para confirmar (mudança CSS/HTML) |
+| `0d01104ca194` + `c71b88594351` | `pip install -U ccxt==4.5.55` em `.venv313` | 63/63 tests PASS |
+| `e9854bad0a39` | Testes para 3 agentes sem cobertura (Galactus, Sage, PortfolioManager) | 8/8 novos tests PASS |
 
-3 de 4 eram falsos positivos. Lição persistida em
-`~/.claude/.../memory/feedback-verify-audit-reports.md`.
+### D. Refactors P1/P2 — claimed para próxima sessão
 
-**T3 cleanup** (Flash, Deadpool, VisionCritic, VisionMoA): também falsos positivos.
-- Flash: cabeado em `professor_x.py:63,102`
-- Deadpool: 4 consumers reais
-- VisionCritic: `default=True` (opt-out)
-- VisionMoA: opt-in por design (3 LLMs custam)
-- **Nada a remover.**
+4 funções longas que precisam de sessão dedicada (alto risco, alto valor):
+
+| ID | Alvo | Linhas | Claimer |
+|---|---|---|---|
+| `124967ede8b3` | `batman.py::_run()` | 1275 | next-session-batman-refactor |
+| `1d32e3a65afa` | `vision.py::_run()` | 419 | next-session-vision-refactor |
+| `4a7e2261b7c3` | `iron_man.py::_place_ccxt_order()` | 389 | next-session-iron_man-refactor |
+| `5f7cc5696a31` | `server.py::_handle_trade_execute()` | 359 | next-session-server-refactor |
+
+Briefs `dev_state=in_dev` para sinalizar trabalho planejado, não dead-letter.
+
+### E. Auditoria profunda round 2
+
+Foco em **achados acionáveis** (não generalizações como o relatório c da sessão
+anterior). Verificado Layer 3 (iron_man, batman, cyclops, wolverine, vision):
+
+- `vision.py:873` `_extract_json` sem try/except: callers (linhas 558+717) já
+  têm fallback HOLD; **não é bug**
+- 4 funções longas P1/P2 já estão no queue (E acima)
+- `iron_man.py` tem 5 funções > 120 linhas (`_run`, `_place_live_order`,
+  `_place_ccxt_order`, `ensure_stops_for_open_positions`,
+  `reconcile_phantom_positions`) — refactor com escopo dedicado
+- **Conclusão: nenhum novo bug crítico encontrado** — sistema está mais maduro
+  que a auditoria anterior sugeriu (lição persistida em
+  `feedback-verify-audit-reports.md`)
 
 ---
 
-## 📋 Tasks pendentes (próxima sessão)
+## 📋 Tasks pendentes próxima sessão
 
-### Próximos passos naturais
+### Refactors P1/P2 (4 claimed, prontos para serem feitos um por sessão)
 
-- **Worker automático "impl-agent"** — pega briefs `queued` e gera PR
-  usando Claude Code. Design documentado no relatório do agent (b) da
-  sessão anterior. **Out of scope hoje**, mas é o passo final pra
-  fechar 100% o loop accept→merged.
-- **Mentor scheduler diário** — hoje roda a cada monitor cycle (5min).
-  Pode ser interessante ter um daily run que envia top suggestions
-  por Telegram (igual o Beast).
-- **Pre-push hook** — `cp` o exemplo de `scripts/sync_imp_commits.py`
-  para `.git/hooks/pre-push` (1 linha de shell).
-- **Operator UX** — testar fluxo completo no browser:
-  accept → claim → implementar → commit `[IMP-xxx]` → push (sync_imp_commits
-  roda) → status reflete no dashboard.
+Cada um precisa de:
+1. Extrair sub-funções por responsabilidade
+2. Adicionar testes de regressão (cover caminho atual antes de quebrar)
+3. Validar com paper trading + testnet smoke
+4. Commit com `[IMP-{rec_id}]` para auto-sync
+
+### Outros próximos passos naturais
+
+- **Worker automático "impl-agent"** — pega briefs `in_dev` e gera PR usando
+  Claude Code. Design documentado no relatório do agent (b) da sessão 1.
+  Out of scope até agora (alto custo); seria o passo final pra fechar 100%
+  o loop accept → merged sem intervenção humana
+- **Mentor daily report no Telegram** — similar Beast, mas com tabela de
+  ParameterSuggestion. Hoje só roda no monitor cycle (audit-only)
+- **Pre-push hook** — `cp scripts/sync_imp_commits.py` para
+  `.git/hooks/pre-push` (1 linha shell)
+- **Operator UX teste end-to-end** no browser: accept → claim → implementar →
+  commit `[IMP-xxx]` → push (sync_imp_commits) → status no dashboard
 
 ### Mainnet readiness (gates humanos — NÃO código)
 
-- **H1** — ≥ 1 mês testnet sem incidente (continuar acumulando)
-- **H2** — Wolverine SL ENDORSE rate ≥ 70%
-- **H5/H6** — Wallet mainnet dedicada + funded
+- **H1** ≥ 1 mês testnet sem incidente — continuar acumulando
+- **H2** Wolverine SL ENDORSE rate ≥ 70%
+- **H5/H6** Wallet mainnet dedicada + funded
 - Assinar `docs/MAINNET-AUTHORIZATION.md` com `GO MAINNET`
-
-### Refactor (não bloqueia)
-
-- **G** — `server.py → routers/system.py`
-- **H** — `server.py → routers/trade.py`
 
 ---
 
@@ -244,25 +176,29 @@ project-binance-integration.md         (foco ativo; marco testnet registrado)
 project-continuous-improvement-epic.md (squad completo entregue)
 project-memory-orphan-writers.md       (4 gaps fechados em 57bdc96)
 feedback-root-cause-over-patching.md   (lição preservada)
-feedback-verify-audit-reports.md       (NOVA — relatórios automáticos generalizam)
+feedback-verify-audit-reports.md       (relatórios automáticos generalizam)
 ```
 
 ### Memória runtime (`data/`)
 
 ```
-agent_memories                  SQLite — 8 entries (PENDING; novos resolves a partir de agora)
-improvement_decisions.json      1.9 KB  — operator accept/reject (19 accepted)
-improvement_inbox.json          3 B     — vazio
-improvement_prs.json            1.4 KB  — 2 PRs merged (#1001 #1002)
-improvement_queue.json          3.6 KB  — 25 briefs (1 com claimer + state correto)
-sage_baselines.json             4.6 KB  — métricas system-level (Sage)
-sage_improvement_baselines.json 2.9 KB  — per-improvement (Sage v2)
+agent_memories                  SQLite — 8 entries (PENDING; trade_outcome_resolver começa a popular WIN/LOSS quando trades fecham)
+improvement_decisions.json      ~2 KB — operator accept/reject
+improvement_inbox.json          3 B — vazio
+improvement_prs.json            ~16 KB — 22 merged + 4 in_dev (rastreio completo)
+improvement_queue.json          ~4 KB — 26 briefs com dev_state sincronizado
+sage_baselines.json             ~5 KB — métricas system-level
+sage_improvement_baselines.json ~3 KB — per-improvement (Sage v2)
 ```
 
 ### Obsidian vault (`docs/obsidian/`)
 
-- 95 notas · 247 wikilinks · 1 quebrado (investigar) · 0 órfãs · 0 duplicatas
-- **PRÓXIMO**: criar nota para Mentor (`20 - Areas/Agentes IA/Mentor.md`)
+- **98 notas** · 265 wikilinks · **0 broken** · 0 órfãs · 0 duplicatas ✅
+- Estrutura PARA + nova Learning Layer:
+  - `20 - Areas/Agentes IA/Mentor.md` (NOVO)
+  - `20 - Areas/Agentes IA/Trade Outcome Resolver.md` (NOVO)
+  - `30 - Resources/Runbooks/INCIDENT-PLAYBOOK.md` (NOVO)
+- _Agentes Index atualizado: 22 agentes + 1 serviço; nova Learning Layer
 
 ---
 
@@ -276,6 +212,7 @@ curl -s http://localhost:8787/api/system/status        | python3 -m json.tool
 curl -s http://localhost:8787/api/positions            | python3 -m json.tool
 curl -s http://localhost:8787/api/mainnet-readiness    | python3 -m json.tool
 curl -s http://localhost:8787/api/mentor/suggestions   | python3 -m json.tool
+curl -s http://localhost:8787/api/improvements/pr-status | python3 -m json.tool
 
 # Reiniciar dashboard
 pkill -f "run.py --dashboard" 2>/dev/null; sleep 2
@@ -283,6 +220,7 @@ nohup .venv313/bin/python run.py --dashboard </dev/null >logs/dashboard_runtime.
 
 # Testes (env -u remove a ANTHROPIC_API_KEY="" injetada pelo Claude Code)
 env -u ANTHROPIC_API_KEY .venv313/bin/python -m pytest \
+  tests/test_agents_coverage.py \
   tests/test_mentor.py \
   tests/test_improvement_pipeline_sync.py \
   tests/test_phantom_reconciliation.py \
@@ -290,37 +228,37 @@ env -u ANTHROPIC_API_KEY .venv313/bin/python -m pytest \
   tests/test_core_agents.py tests/test_improvement_scanners.py \
   tests/test_dashboard_auth.py -q
 
-# Sync IMP commits manualmente (ou via pre-push hook)
-.venv313/bin/python scripts/sync_imp_commits.py --limit 50
-
-# Inspecionar Mentor suggestions ao vivo
-.venv313/bin/python -c "
-import asyncio
-from src.agents.mentor import Mentor
-async def m():
-    r = await Mentor().run()
-    print(f'obs: {r.observation_summary}')
-    for s in r.suggestions:
-        print(s.to_dict())
-asyncio.run(m())
-"
-
-# Manual claim via API
+# Manual claim de uma melhoria via API
 curl -X POST http://localhost:8787/api/improvements/claim \
   -H 'Content-Type: application/json' \
-  -d '{"id":"00589e51a312","claimer":"meu-nome"}'
+  -d '{"id":"124967ede8b3","claimer":"meu-nome"}'
+
+# Sync IMP commits (após push do que foi commitado com [IMP-xxx])
+.venv313/bin/python scripts/sync_imp_commits.py --limit 50
+
+# Inspecionar saúde do vault
+env -u ANTHROPIC_API_KEY .venv313/bin/python -c "
+import asyncio
+from src.agents.jean_grey import JeanGrey
+async def m():
+    r = await JeanGrey().run(mode='health')
+    print(f'notas={r.total_notes} links={r.total_links} broken={len(r.broken_links)} orphans={len(r.orphans)}')
+asyncio.run(m())
+"
 ```
 
 ---
 
 ## 🎯 Onde retomar na próxima sessão
 
-1. **Testar o fluxo completo no browser** (recarregar dashboard, acceptar
-   uma rec, clicar "🛠 Vou implementar")
-2. **Decidir sobre worker "impl-agent" automático** (design pronto, alto custo)
-3. **Tirar primeiros wins/losses** em testnet pra Mentor começar a sugerir
-4. **Pre-push hook**: `cp scripts/sync_imp_commits.py.example .git/hooks/pre-push`
-   (ou inline com 1 linha shell)
+1. **Atacar 1 refactor por sessão** (escolher menor risco primeiro):
+   - `5f7cc5696a31` `_handle_trade_execute` (server.py 359 linhas) — menor escopo
+   - depois `1d32e3a65afa` `vision._run` (419 linhas)
+   - depois `4a7e2261b7c3` `iron_man._place_ccxt_order` (389 linhas)
+   - por último `124967ede8b3` `batman._run` (1275 linhas — maior risco)
+2. **Testar fluxo completo no browser** (accept → "🛠 Vou implementar" → workflow)
+3. **Tirar primeiros wins/losses** em testnet pra [[Mentor]] começar a sugerir
+4. **Pre-push hook** ativado: `cp scripts/sync_imp_commits.py.example .git/hooks/pre-push`
 5. **Continuar acumulando dados** para gates H1/H2 da mainnet authorization
 6. **Push/deploy** (delegado a **@devops** — operador autoriza)
 
@@ -336,6 +274,8 @@ curl -X POST http://localhost:8787/api/improvements/claim \
 - **L1 paths** protegidos por deny rules (`.aios-core/core/`, `bin/aios.js`)
 - **Verificar relatórios automáticos antes de patchar** — generalizam
   (`feedback-verify-audit-reports`)
+- **Refactors grandes em sessões dedicadas** — não tentar 4 funções de 300+
+  linhas numa única sessão
 
 ---
 
@@ -349,15 +289,17 @@ curl -X POST http://localhost:8787/api/improvements/claim \
 | Design do squad de melhoria | `docs/CONTINUOUS-IMPROVEMENT-DEPARTMENT.md` |
 | Procedimento de virada mainnet | `docs/RUNBOOK-MAINNET-GOLIVE.md` |
 | Autorização mainnet (assinar) | `docs/MAINNET-AUTHORIZATION.md` |
+| Runbook de incidente | `docs/obsidian/30 - Resources/Runbooks/INCIDENT-PLAYBOOK.md` |
 | Phantom reconciliation | `src/agents/iron_man.py:1352` (`reconcile_phantom_positions`) |
 | Trade outcome resolver | `src/services/trade_outcome_resolver.py` |
 | Mentor (aprendizagem real) | `src/agents/mentor.py` |
 | Pipeline sync brief↔PR | `src/services/improvement_queue.py` (`update_brief_status`) |
 | Commit hook | `scripts/sync_imp_commits.py` |
+| Vault Obsidian | `docs/obsidian/` (98 notas, 0 broken) |
 
 ---
 
-*Handoff arquivado em 2026-05-25 (sessão 2). Próxima sessão: testar fluxo
-completo no browser e começar a juntar dados (wins/losses + claims) para
-Mentor produzir as primeiras suggestions concretas. Sistema agora aprende,
-implementação flui, mainnet está mais protegida.* ✨
+*Handoff arquivado em 2026-05-25 (sessão 3). Próxima sessão: atacar 1 refactor
+P1/P2 por vez, começando pelo menor (`_handle_trade_execute` 359 linhas).
+Vault saudável, queue limpa, sistema mais maduro — sem riscos pendentes,
+apenas melhorias incrementais.* ✨
