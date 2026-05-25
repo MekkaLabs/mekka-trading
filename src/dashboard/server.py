@@ -5609,10 +5609,20 @@ class MekkaDashboardServer:
                 leverage_val = int(
                     getattr(row, "leverage", None) or params.get("max_leverage", 1) or 1
                 )
-                # Super Agressivo: boost size and leverage
+                # Super Agressivo: força mínimo 5%/10x RESPEITANDO o cap do Modo
+                # Global (mesmo helper que Batman usa — consistência loop↔TradeNow).
+                # Antes: aplicava raw max() sem checar cap, gerando size=5%/lev=10
+                # mesmo com Modo Conservative (cap 0.5%/2x). Bug fix 2026-05-25.
                 if _super_aggressive:
-                    size_pct = max(size_pct, 0.05)
-                    leverage_val = max(leverage_val, 10)
+                    from src.config.runtime_overrides import (  # noqa: WPS433
+                        apply_super_aggressive_to_size_lev,
+                    )
+                    size_pct, leverage_val = apply_super_aggressive_to_size_lev(
+                        size_pct,
+                        leverage_val,
+                        float(params.get("max_position_size_pct", 0.02)),
+                        int(params.get("max_leverage", 1) or 1),
+                    )
                 conf = float(getattr(row, "confidence", 0.5) or 0.5)
                 risk_usd = round(equity_usd * size_pct * abs(entry - sl) / entry, 2) if entry else 0.0
                 _justification = str(getattr(row, "reasoning", None) or "Vision analysis")[:400]
@@ -5650,7 +5660,13 @@ class MekkaDashboardServer:
             _all_assets = _base_assets + [a for a in _ALTCOINS if a not in _base_assets] if _altcoins_enabled else _base_assets
             top_asset = _all_assets[0]
             source = "mock"
-            _mock_size = 0.05 if _super_aggressive else float(params.get("max_position_size_pct", 0.02))
+            # Mock size respeita o cap do Modo Global (mesma lógica do path real)
+            _cap_size = float(params.get("max_position_size_pct", 0.02))
+            _cap_lev = int(params.get("max_leverage", 1) or 1)
+            _mock_size = _cap_size
+            if _super_aggressive:
+                from src.config.runtime_overrides import apply_super_aggressive_to_size_lev  # noqa: WPS433
+                _mock_size, _ = apply_super_aggressive_to_size_lev(_cap_size, _cap_lev, _cap_size, _cap_lev)
             recommendation = {
                 "symbol": top_asset,
                 "direction": "LONG",
