@@ -788,6 +788,17 @@ class Settings(BaseSettings):
             "should only be done temporarily to reduce API costs."
         ),
     )
+    vault_enrichment_enabled: bool = Field(
+        default=False,
+        description=(
+            "Story #72 — Neural graph / Second-brain enrichment. When True, "
+            "Vision (and future consumers) augments its LLM prompt with a "
+            "short block of relevant vault notes via Jean Grey's recall(). "
+            "READ-ONLY: never changes decision path; fail-silent + bounded "
+            "latency (1.5s timeout) + cached for 5min. Off by default — "
+            "operator must enable explicitly via VAULT_ENRICHMENT_ENABLED=true."
+        ),
+    )
     vision_critic_min_disagreement: float = Field(
         default=0.30,
         ge=0.0,

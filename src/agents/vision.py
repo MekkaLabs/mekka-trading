@@ -211,6 +211,22 @@ class Vision(BaseAgent[TradingSignal]):
         except Exception as _mem_exc:  # noqa: BLE001
             self._log.debug(f"[Vision] Episodic memory fetch skipped: {_mem_exc}")
 
+        # Story #72 — Vault enrichment (Second-brain / Neural-graph).
+        # Read-only: appends curated notes from the Obsidian vault when the
+        # operator enabled VAULT_ENRICHMENT_ENABLED. Fail-silent + bounded
+        # latency (1.5s) + cached. Never changes Vision's decision path —
+        # worst case the prompt stays unchanged.
+        try:
+            from src.services.vault_context import vault_context_for  # noqa: WPS433
+            vault_block = await vault_context_for(
+                symbol=analysis.symbol,
+                topic=(analysis.chart.trend.value if analysis.chart else None),
+            )
+            if vault_block:
+                prompt = prompt + "\n\n" + vault_block
+        except Exception as _vault_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision] Vault enrichment skipped: {_vault_exc}")
+
         # Story 164 — MicroagentRegistry regime-aware prompt injection.
         # Detects the current market regime from the analysis chart data and
         # appends the matching Markdown microagent prompt to Vision's context.
