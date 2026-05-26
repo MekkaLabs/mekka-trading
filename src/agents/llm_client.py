@@ -291,23 +291,31 @@ class LLMClient:
     async def _call_openai(
         self, system_prompt: str, user_prompt: str, model_override: Optional[str] = None
     ) -> Tuple[str, int, int]:
-        """Returns (content, tokens_in, tokens_out)."""
-        client = self._get_openai()
-        response = await client.chat.completions.create(
-            model=model_override or self._openai_model,
-            temperature=self._temperature,
-            max_tokens=self._max_tokens,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-        content = response.choices[0].message.content or "{}"
-        usage = response.usage
-        tokens_in = usage.prompt_tokens if usage else 0
-        tokens_out = usage.completion_tokens if usage else 0
-        return content, tokens_in, tokens_out
+        """Returns (content, tokens_in, tokens_out).
+
+        Wraps the raw call in `_retry_call` (Fase 2.2 — retry com backoff
+        para erros transitórios: timeout, 5xx, rate limit). Erros 4xx de
+        auth/schema não são retentados.
+        """
+        async def _do_call() -> Tuple[str, int, int]:
+            client = self._get_openai()
+            response = await client.chat.completions.create(
+                model=model_override or self._openai_model,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            content = response.choices[0].message.content or "{}"
+            usage = response.usage
+            tokens_in = usage.prompt_tokens if usage else 0
+            tokens_out = usage.completion_tokens if usage else 0
+            return content, tokens_in, tokens_out
+
+        return await self._retry_call(_do_call, provider="openai")
 
     # ── Internal: Anthropic ───────────────────────────────────────────────────
 
@@ -319,32 +327,134 @@ class LLMClient:
     async def _call_anthropic(
         self, system_prompt: str, user_prompt: str, model_override: Optional[str] = None
     ) -> Tuple[str, int, int]:
-        """Returns (content, tokens_in, tokens_out)."""
-        client = self._get_anthropic()
+        """Returns (content, tokens_in, tokens_out).
 
-        # Claude doesn't have a JSON mode — append instruction to system prompt
-        system_with_json = (
-            system_prompt
-            + "\n\nCRITICAL: Your response MUST be a single valid JSON object only. "
-            "No markdown, no code fences, no commentary. Output raw JSON."
-        )
+        Wraps the raw call in `_retry_call` (Fase 2.2 — retry com backoff).
+        """
+        async def _do_call() -> Tuple[str, int, int]:
+            client = self._get_anthropic()
 
-        response = await client.messages.create(
-            model=model_override or self._anthropic_model,
-            max_tokens=self._max_tokens,
-            temperature=self._temperature,
-            system=system_with_json,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-        # Extract text content
-        content = ""
-        for block in response.content:
-            if hasattr(block, "text"):
-                content += block.text
-        usage = response.usage
-        tokens_in = usage.input_tokens if usage else 0
-        tokens_out = usage.output_tokens if usage else 0
-        return content.strip() or "{}", tokens_in, tokens_out
+            # Claude doesn't have a JSON mode — append instruction to system prompt
+            system_with_json = (
+                system_prompt
+                + "\n\nCRITICAL: Your response MUST be a single valid JSON object only. "
+                "No markdown, no code fences, no commentary. Output raw JSON."
+            )
+
+            response = await client.messages.create(
+                model=model_override or self._anthropic_model,
+                max_tokens=self._max_tokens,
+                temperature=self._temperature,
+                system=system_with_json,
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+            # Extract text content
+            content = ""
+            for block in response.content:
+                if hasattr(block, "text"):
+                    content += block.text
+            usage = response.usage
+            tokens_in = usage.input_tokens if usage else 0
+            tokens_out = usage.output_tokens if usage else 0
+            return content.strip() or "{}", tokens_in, tokens_out
+
+        return await self._retry_call(_do_call, provider="anthropic")
+
+    # ── Retry com backoff exponencial (Fase 2.2) ──────────────────────────
+    async def _retry_call(
+        self,
+        callable_fn,
+        provider: str,
+        max_retries: int = 2,
+        base_delay_s: float = 1.0,
+    ) -> Tuple[str, int, int]:
+        """
+        Executa `callable_fn` com retry exponencial em erros transitórios.
+
+        Estratégia:
+          - Max 2 retries (3 tentativas no total)
+          - Backoff exponencial: 1s, 2s
+          - Retentar apenas em: timeout, rate limit, e erros 5xx genéricos
+          - NÃO retentar: 4xx (auth, schema, invalid_request) e erros de
+            validação Pydantic (são determinísticos)
+
+        Args:
+          callable_fn: corotina sem argumentos que faz a chamada API.
+          provider: "openai" ou "anthropic" — usado em logs.
+          max_retries: número de retries adicionais (default 2 = 3 tentativas).
+          base_delay_s: delay base do backoff (default 1.0s).
+
+        Raises:
+          A última exceção se todas as tentativas falharem.
+        """
+        import asyncio as _asyncio  # noqa: WPS433
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(max_retries + 1):
+            try:
+                return await callable_fn()
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if not self._is_retryable(exc):
+                    # Erro determinístico — não retentar
+                    raise
+                if attempt >= max_retries:
+                    # Esgotou tentativas — propaga
+                    logger.warning(
+                        f"[LLMClient] {provider} retry exhausted after "
+                        f"{attempt + 1} attempts ({type(exc).__name__}: {exc})"
+                    )
+                    raise
+                delay = base_delay_s * (2 ** attempt)
+                logger.info(
+                    f"[LLMClient] {provider} attempt {attempt + 1}/{max_retries + 1} "
+                    f"failed ({type(exc).__name__}: {exc}); retrying in {delay:.1f}s"
+                )
+                await _asyncio.sleep(delay)
+        # Defensivo — não deve chegar aqui
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(f"[LLMClient] {provider} retry loop ended unexpectedly")
+
+    @staticmethod
+    def _is_retryable(exc: Exception) -> bool:
+        """Heurística para classificar erro como transitório (retentável).
+
+        Retentável:
+          - APITimeoutError (OpenAI / Anthropic equivalente)
+          - RateLimitError
+          - APIError com status 5xx
+          - asyncio.TimeoutError, ConnectionError, OSError genéricos
+
+        Não-retentável:
+          - APIError 4xx (auth, bad_request, invalid)
+          - Erros de schema/validação Pydantic
+          - RuntimeError (já é nosso, não retentar)
+        """
+        import asyncio as _asyncio  # noqa: WPS433
+
+        # OpenAI: timeout + rate limit são sempre retentáveis
+        if _OPENAI_AVAILABLE and isinstance(exc, (OpenAITimeoutError, OpenAIRateLimitError)):
+            return True
+        # OpenAI APIError: retentar só 5xx
+        if _OPENAI_AVAILABLE and isinstance(exc, OpenAIAPIError):
+            status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+            return status is not None and 500 <= int(status) < 600
+
+        # Anthropic — usa estrutura similar; checar por nome de classe
+        exc_name = type(exc).__name__
+        if exc_name in ("APITimeoutError", "RateLimitError"):
+            return True
+        if exc_name in ("APIStatusError", "APIError", "InternalServerError"):
+            status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+            return status is None or (status is not None and 500 <= int(status) < 600)
+
+        # Erros genéricos de network
+        if isinstance(exc, (_asyncio.TimeoutError, ConnectionError, OSError)):
+            return True
+
+        # Nosso RuntimeError, schema errors, etc. — não retentar
+        return False
 
 
     # ── Structured Output (Story 250) ─────────────────────────────────────────
