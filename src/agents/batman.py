@@ -767,6 +767,210 @@ class Batman(BaseAgent[RiskApproval]):
                 breached.append("correlation_penalty")
         return None, signal
 
+    async def _gate_3d_episodic_memory(
+        self,
+        signal: TradingSignal,
+        symbol: str,
+        reasons: list[str],
+        breached: list[str],
+    ) -> tuple[Optional[RiskApproval], TradingSignal]:
+        """Gate 3d — Episodic Memory gate (Story 063).
+
+        Query AgentMemoryStore for resolved historical patterns that match
+        the signal's fingerprint (symbol + direction + RSI bucket + trend).
+
+        Rules:
+          - <  5 resolved memories            -> skip (insufficient data)
+          - win_rate < 30% AND total >= 8     -> hard REJECT (strong failure)
+          - win_rate < 45% AND total >= 5     -> warning + size reduced 20%
+          - win_rate > 65% AND total >= 5     -> positive note (no override)
+
+        Never blocks on DB error — fails open (APPROVED).
+
+        Returns:
+          (RiskApproval or None, possibly-modified signal)
+        """
+        try:
+            from src.persistence.agent_memory import AgentMemoryStore as _AMS  # noqa: WPS433
+            _rsi_raw = signal.metadata.get("rsi") if signal.metadata else None
+            _trend_raw = signal.metadata.get("trend", "NEUTRAL") if signal.metadata else "NEUTRAL"
+            _mem_ctx = await _AMS.query_similar(
+                symbol=symbol,
+                action=signal.action.value,
+                rsi=float(_rsi_raw) if _rsi_raw is not None else None,
+                trend=str(_trend_raw),
+                limit=15,
+            )
+            _wr = _mem_ctx.win_rate_pct  # None if no decided trades
+
+            if _mem_ctx.total >= 5 and _wr is not None:
+                _snippet = _AMS.build_context_snippet(_mem_ctx)
+                if _wr < 30.0 and _mem_ctx.total >= 8:
+                    reasons.append(
+                        f"Episodic memory VETO: win rate {_wr:.1f}% "
+                        f"({_mem_ctx.wins}W/{_mem_ctx.losses}L) "
+                        f"over {_mem_ctx.total} similar patterns — "
+                        f"historical performance too weak to proceed."
+                    )
+                    breached.append("memory_veto")
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        breached_limits=breached,
+                        metadata={"memory_context": _snippet},
+                    ), signal
+                elif _wr < 45.0:
+                    signal = signal.model_copy(
+                        update={"size_pct": round(signal.size_pct * 0.80, 6)}
+                    )
+                    reasons.append(
+                        f"Episodic memory WARNING: win rate {_wr:.1f}% "
+                        f"({_mem_ctx.wins}W/{_mem_ctx.losses}L / {_mem_ctx.total} patterns) "
+                        f"→ size reduced 20%."
+                    )
+                    breached.append("memory_caution")
+                else:
+                    reasons.append(
+                        f"Episodic memory OK: win rate {_wr:.1f}% "
+                        f"({_mem_ctx.wins}W/{_mem_ctx.losses}L / {_mem_ctx.total} patterns)."
+                    )
+        except Exception as _mem_exc:  # noqa: BLE001
+            self._log.debug(f"[Batman] Episodic memory gate skipped: {_mem_exc}")
+        return None, signal
+
+    async def _gate_3f_reentry_cooldown(
+        self,
+        symbol: str,
+        reasons: list[str],
+        breached: list[str],
+    ) -> Optional[RiskApproval]:
+        """Gate 3f — Re-entry Cooldown Guard (Story 069).
+
+        After Cyclops closes a position via SL, the same symbol is locked
+        for ``reentry_cooldown_minutes`` minutes. Prevents revenge trading.
+
+        Falls open on any DB error (never blocks due to infra failure).
+        """
+        if settings.reentry_cooldown_minutes > 0:
+            try:
+                from src.persistence.repository import MekkaRepository as _Repo  # noqa: WPS433
+                _sl_time = await _Repo.get_last_sl_close_time(
+                    symbol=symbol,
+                    lookback_minutes=settings.reentry_cooldown_minutes,
+                )
+                if _sl_time is not None:
+                    from datetime import datetime as _dt, timezone as _tz  # noqa: WPS433
+                    _elapsed_min = (_dt.now(_tz.utc) - _sl_time).total_seconds() / 60
+                    _remaining_min = round(settings.reentry_cooldown_minutes - _elapsed_min, 1)
+                    reasons.append(
+                        f"Re-entry cooldown: {symbol} had SL close {_elapsed_min:.1f}min ago "
+                        f"(cooldown={settings.reentry_cooldown_minutes}min, "
+                        f"remaining={max(0, _remaining_min):.1f}min)"
+                    )
+                    breached.append("reentry_cooldown")
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        breached_limits=breached,
+                        metadata={
+                            "last_sl_close_utc": _sl_time.isoformat(),
+                            "elapsed_minutes": round(_elapsed_min, 2),
+                            "cooldown_minutes": settings.reentry_cooldown_minutes,
+                        },
+                    )
+            except Exception as _cd_exc:  # noqa: BLE001
+                self._log.debug(f"[Batman] Re-entry cooldown gate skipped: {_cd_exc}")
+        return None
+
+    async def _gate_3g_symbol_blacklist(
+        self,
+        symbol: str,
+        reasons: list[str],
+        breached: list[str],
+    ) -> Optional[RiskApproval]:
+        """Gate 3g — Symbol Strike Counter + Auto-Blacklist (Story 071).
+
+        If a symbol has hit its SL ``symbol_strike_limit`` times in a row,
+        it is automatically blocked for ``symbol_blacklist_hours`` hours.
+        A Telegram CRITICAL alert is fired on first blacklist.
+
+        Falls open on any error (DB, file I/O, Telegram).
+        """
+        try:
+            from src.persistence.repository import MekkaRepository as _Repo  # noqa: WPS433
+            _strike_count = await _Repo.count_consecutive_sl_hits(symbol=symbol)
+            if _strike_count >= settings.symbol_strike_limit:
+                import json as _json  # noqa: WPS433
+                from pathlib import Path as _Path  # noqa: WPS433
+                from datetime import datetime as _dt2, timezone as _tz2, timedelta as _td2  # noqa: WPS433
+
+                _bl_path = _Path("data") / f".blacklist_{symbol.upper()}.json"
+                _now2 = _dt2.now(_tz2.utc)
+                _bl_active = False
+                _bl_data: dict = {}
+
+                if _bl_path.exists():
+                    try:
+                        _bl_data = _json.loads(_bl_path.read_text())
+                        _bl_since = _dt2.fromisoformat(_bl_data.get("since", ""))
+                        _bl_expires = _bl_since + _td2(hours=settings.symbol_blacklist_hours)
+                        if _now2 < _bl_expires:
+                            _bl_active = True
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                if not _bl_active:
+                    # Fresh blacklist — write file + fire Telegram alert
+                    _bl_data = {
+                        "symbol": symbol.upper(),
+                        "since": _now2.isoformat(),
+                        "expires": (_now2 + _td2(hours=settings.symbol_blacklist_hours)).isoformat(),
+                        "consecutive_sl_hits": _strike_count,
+                    }
+                    try:
+                        _bl_path.parent.mkdir(parents=True, exist_ok=True)
+                        _bl_path.write_text(_json.dumps(_bl_data, indent=2))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    # Telegram CRITICAL alert
+                    try:
+                        from src.services.telegram_alerter import TelegramAlerter  # noqa: WPS433
+                        await TelegramAlerter().send_message(
+                            f"🚫 *BLACKLIST ATIVADO* — `{symbol.upper()}`\n"
+                            f"*{_strike_count} SLs consecutivos* sem TP intermediário.\n"
+                            f"Símbolo bloqueado por {settings.symbol_blacklist_hours:.0f}h "
+                            f"(expira: {_bl_data['expires'][:16]} UTC).",
+                            level="CRITICAL",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._log.warning(
+                        "[Batman] [3g] %s BLACKLISTED — %d consecutive SL hits "
+                        "(limit=%d, duration=%.0fh)",
+                        symbol, _strike_count, settings.symbol_strike_limit,
+                        settings.symbol_blacklist_hours,
+                    )
+
+                # Either way: block this entry
+                _expires_str = _bl_data.get("expires", "?")[:16]
+                reasons.append(
+                    f"Symbol blacklist: {symbol} hit {_strike_count} consecutive SL(s) "
+                    f"(limit={settings.symbol_strike_limit}) → blocked until {_expires_str} UTC"
+                )
+                breached.append("symbol_blacklist")
+                return RiskApproval(
+                    symbol=symbol,
+                    verdict=RiskVerdict.REJECTED,
+                    reasons=reasons,
+                    breached_limits=breached,
+                    metadata={"consecutive_sl_hits": _strike_count, "blacklist": _bl_data},
+                )
+        except Exception as _bl_exc:  # noqa: BLE001
+            self._log.debug(f"[Batman] Symbol blacklist gate skipped: {_bl_exc}")
+        return None
+
     def _gate_3e_portfolio_exposure(
         self,
         symbol: str,
@@ -986,65 +1190,14 @@ class Batman(BaseAgent[RiskApproval]):
             return _gate_3c_result
 
         # ---------------------------------------------------------------
-        # 3d. Episodic Memory gate — Story 063
-        #
-        # Query AgentMemoryStore for resolved historical patterns that match
-        # the signal's fingerprint (symbol + direction + RSI bucket + trend).
-        # Rules:
-        #   - <  5 resolved memories → skip (insufficient data)
-        #   - win_rate < 30% AND total ≥ 8 → hard REJECT (strong historical failure)
-        #   - win_rate < 45% AND total ≥ 5 → add warning note, reduce size 20%
-        #   - win_rate > 65% AND total ≥ 5 → add positive note (no override)
-        # Never blocks on DB error — fails open (APPROVED).
+        # 3d. Episodic Memory gate — Story 063 (helper extraído #73)
         # ---------------------------------------------------------------
-        try:
-            from src.persistence.agent_memory import AgentMemoryStore as _AMS  # noqa: WPS433
-            _rsi_raw = signal.metadata.get("rsi") if signal.metadata else None
-            _trend_raw = signal.metadata.get("trend", "NEUTRAL") if signal.metadata else "NEUTRAL"
-            _mem_ctx = await _AMS.query_similar(
-                symbol=symbol,
-                action=signal.action.value,
-                rsi=float(_rsi_raw) if _rsi_raw is not None else None,
-                trend=str(_trend_raw),
-                limit=15,
-            )
-            _wr = _mem_ctx.win_rate_pct  # None if no decided trades
-
-            if _mem_ctx.total >= 5 and _wr is not None:
-                _snippet = _AMS.build_context_snippet(_mem_ctx)
-                if _wr < 30.0 and _mem_ctx.total >= 8:
-                    reasons.append(
-                        f"Episodic memory VETO: win rate {_wr:.1f}% "
-                        f"({_mem_ctx.wins}W/{_mem_ctx.losses}L) "
-                        f"over {_mem_ctx.total} similar patterns — "
-                        f"historical performance too weak to proceed."
-                    )
-                    breached.append("memory_veto")
-                    return RiskApproval(
-                        symbol=symbol,
-                        verdict=RiskVerdict.REJECTED,
-                        reasons=reasons,
-                        breached_limits=breached,
-                        metadata={"memory_context": _snippet},
-                    )
-                elif _wr < 45.0:
-                    _size_before = adjusted_size if "adjusted_size" in dir() else signal.size_pct
-                    signal = signal.model_copy(
-                        update={"size_pct": round(signal.size_pct * 0.80, 6)}
-                    )
-                    reasons.append(
-                        f"Episodic memory WARNING: win rate {_wr:.1f}% "
-                        f"({_mem_ctx.wins}W/{_mem_ctx.losses}L / {_mem_ctx.total} patterns) "
-                        f"→ size reduced 20%."
-                    )
-                    breached.append("memory_caution")
-                else:
-                    reasons.append(
-                        f"Episodic memory OK: win rate {_wr:.1f}% "
-                        f"({_mem_ctx.wins}W/{_mem_ctx.losses}L / {_mem_ctx.total} patterns)."
-                    )
-        except Exception as _mem_exc:  # noqa: BLE001
-            self._log.debug(f"[Batman] Episodic memory gate skipped: {_mem_exc}")
+        _gate_3d_result, signal = await self._gate_3d_episodic_memory(
+            signal=signal, symbol=symbol,
+            reasons=reasons, breached=breached,
+        )
+        if _gate_3d_result is not None:
+            return _gate_3d_result
 
         # ---------------------------------------------------------------
         # 3e. Portfolio Exposure Cap — Story 068 (helper extraído #73)
@@ -1058,135 +1211,22 @@ class Batman(BaseAgent[RiskApproval]):
             return _gate_3e_result
 
         # ---------------------------------------------------------------
-        # 3f. Re-entry Cooldown Guard — Story 069
-        #
-        # After Cyclops closes a position via SL, the same symbol is locked
-        # for ``reentry_cooldown_minutes`` minutes. This prevents the AI from
-        # immediately re-entering a losing trade ("revenge trading").
-        #
-        # Logic:
-        #   - Query the last Cyclops SL close for this symbol within the
-        #     cooldown window. If found, return REJECTED with time-remaining.
-        #   - Falls open on any DB error (never blocks due to infra failure).
+        # 3f. Re-entry Cooldown Guard — Story 069 (helper extraído #73)
         # ---------------------------------------------------------------
-        if settings.reentry_cooldown_minutes > 0:
-            try:
-                from src.persistence.repository import MekkaRepository as _Repo  # noqa: WPS433
-                from datetime import timedelta  # noqa: WPS433
-                _sl_time = await _Repo.get_last_sl_close_time(
-                    symbol=symbol,
-                    lookback_minutes=settings.reentry_cooldown_minutes,
-                )
-                if _sl_time is not None:
-                    from datetime import datetime as _dt, timezone as _tz  # noqa: WPS433
-                    _elapsed_min = (_dt.now(_tz.utc) - _sl_time).total_seconds() / 60
-                    _remaining_min = round(settings.reentry_cooldown_minutes - _elapsed_min, 1)
-                    reasons.append(
-                        f"Re-entry cooldown: {symbol} had SL close {_elapsed_min:.1f}min ago "
-                        f"(cooldown={settings.reentry_cooldown_minutes}min, "
-                        f"remaining={max(0, _remaining_min):.1f}min)"
-                    )
-                    breached.append("reentry_cooldown")
-                    return RiskApproval(
-                        symbol=symbol,
-                        verdict=RiskVerdict.REJECTED,
-                        reasons=reasons,
-                        breached_limits=breached,
-                        metadata={
-                            "last_sl_close_utc": _sl_time.isoformat(),
-                            "elapsed_minutes": round(_elapsed_min, 2),
-                            "cooldown_minutes": settings.reentry_cooldown_minutes,
-                        },
-                    )
-            except Exception as _cd_exc:  # noqa: BLE001
-                self._log.debug(f"[Batman] Re-entry cooldown gate skipped: {_cd_exc}")
+        _gate_3f_result = await self._gate_3f_reentry_cooldown(
+            symbol=symbol, reasons=reasons, breached=breached,
+        )
+        if _gate_3f_result is not None:
+            return _gate_3f_result
 
         # ---------------------------------------------------------------
-        # 3g. Symbol Strike Counter + Auto-Blacklist — Story 071
-        #
-        # If a symbol has hit its SL ``symbol_strike_limit`` times in a
-        # row (consecutive Cyclops SL closes with no TP or manual close
-        # in between), it is automatically blocked for ``symbol_blacklist_hours``
-        # hours. A Telegram CRITICAL alert is fired on first blacklist.
-        #
-        # Logic:
-        #   - Count consecutive SL hits via DB query (most recent first).
-        #   - If count ≥ limit: check if a per-symbol blacklist file exists
-        #     and is still within the cooldown window. If so → REJECTED.
-        #   - If freshly hit: create/update the file + fire Telegram alert.
-        #   - Falls open on any error (DB, file I/O, Telegram).
+        # 3g. Symbol Strike Counter + Auto-Blacklist — Story 071 (helper extraído #73)
         # ---------------------------------------------------------------
-        try:
-            from src.persistence.repository import MekkaRepository as _Repo  # noqa: WPS433
-            _strike_count = await _Repo.count_consecutive_sl_hits(symbol=symbol)
-            if _strike_count >= settings.symbol_strike_limit:
-                import json as _json  # noqa: WPS433
-                from pathlib import Path as _Path  # noqa: WPS433
-                from datetime import datetime as _dt2, timezone as _tz2, timedelta as _td2  # noqa: WPS433
-
-                _bl_path = _Path("data") / f".blacklist_{symbol.upper()}.json"
-                _now2 = _dt2.now(_tz2.utc)
-                _bl_active = False
-                _bl_data: dict = {}
-
-                if _bl_path.exists():
-                    try:
-                        _bl_data = _json.loads(_bl_path.read_text())
-                        _bl_since = _dt2.fromisoformat(_bl_data.get("since", ""))
-                        _bl_expires = _bl_since + _td2(hours=settings.symbol_blacklist_hours)
-                        if _now2 < _bl_expires:
-                            _bl_active = True
-                    except Exception:  # noqa: BLE001
-                        pass
-
-                if not _bl_active:
-                    # Fresh blacklist — write file + fire Telegram alert
-                    _bl_data = {
-                        "symbol": symbol.upper(),
-                        "since": _now2.isoformat(),
-                        "expires": (_now2 + _td2(hours=settings.symbol_blacklist_hours)).isoformat(),
-                        "consecutive_sl_hits": _strike_count,
-                    }
-                    try:
-                        _bl_path.parent.mkdir(parents=True, exist_ok=True)
-                        _bl_path.write_text(_json.dumps(_bl_data, indent=2))
-                    except Exception:  # noqa: BLE001
-                        pass
-                    # Telegram CRITICAL alert
-                    try:
-                        from src.services.telegram_alerter import TelegramAlerter  # noqa: WPS433
-                        await TelegramAlerter().send_message(
-                            f"🚫 *BLACKLIST ATIVADO* — `{symbol.upper()}`\n"
-                            f"*{_strike_count} SLs consecutivos* sem TP intermediário.\n"
-                            f"Símbolo bloqueado por {settings.symbol_blacklist_hours:.0f}h "
-                            f"(expira: {_bl_data['expires'][:16]} UTC).",
-                            level="CRITICAL",
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-                    self._log.warning(
-                        "[Batman] [3g] %s BLACKLISTED — %d consecutive SL hits "
-                        "(limit=%d, duration=%.0fh)",
-                        symbol, _strike_count, settings.symbol_strike_limit,
-                        settings.symbol_blacklist_hours,
-                    )
-
-                # Either way: block this entry
-                _expires_str = _bl_data.get("expires", "?")[:16]
-                reasons.append(
-                    f"Symbol blacklist: {symbol} hit {_strike_count} consecutive SL(s) "
-                    f"(limit={settings.symbol_strike_limit}) → blocked until {_expires_str} UTC"
-                )
-                breached.append("symbol_blacklist")
-                return RiskApproval(
-                    symbol=symbol,
-                    verdict=RiskVerdict.REJECTED,
-                    reasons=reasons,
-                    breached_limits=breached,
-                    metadata={"consecutive_sl_hits": _strike_count, "blacklist": _bl_data},
-                )
-        except Exception as _bl_exc:  # noqa: BLE001
-            self._log.debug(f"[Batman] Symbol blacklist gate skipped: {_bl_exc}")
+        _gate_3g_result = await self._gate_3g_symbol_blacklist(
+            symbol=symbol, reasons=reasons, breached=breached,
+        )
+        if _gate_3g_result is not None:
+            return _gate_3g_result
 
         # ---------------------------------------------------------------
         # 3h. MTF Confluence — Story 072 (helper extraído #73)
