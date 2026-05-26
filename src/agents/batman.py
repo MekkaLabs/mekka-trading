@@ -638,6 +638,182 @@ class Batman(BaseAgent[RiskApproval]):
                 self._log.debug("[Batman] Consecutive losses gate skipped: %s", _cl_exc)
         return None
 
+    def _gate_3b_total_capital_cap(
+        self,
+        signal: TradingSignal,
+        symbol: str,
+        equity_usd: float,
+        running_notional_usd: float,
+        reasons: list[str],
+        breached: list[str],
+    ) -> Optional[RiskApproval]:
+        """Gate 3b — Total capital cap (Story 029a — Safety Net).
+
+        Computes the notional this signal would add (size_pct * leverage * equity).
+        Checks BEFORE size adjustments so the cap is on Vision's intent, not on
+        the post-Thor-multiplier value. If the intent itself blows the cap, we
+        reject regardless of how much Thor would have shrunk it.
+
+        Two caps evaluated when equity > 0:
+          - Absolute cap (max_total_notional_usd) — takes precedence when set
+          - Percentage cap (max_total_capital_pct of equity) — always evaluated
+        """
+        if equity_usd > 0:
+            new_notional = equity_usd * signal.size_pct * signal.leverage
+            projected_total = running_notional_usd + new_notional
+
+            # Absolute cap takes precedence when set
+            if settings.max_total_notional_usd is not None:
+                if projected_total > settings.max_total_notional_usd:
+                    reasons.append(
+                        f"Projected total notional ${projected_total:,.2f} would "
+                        f"exceed absolute cap ${settings.max_total_notional_usd:,.2f}"
+                    )
+                    breached.append("max_total_notional_usd")
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        breached_limits=breached,
+                    )
+
+            # Percentage cap (always evaluated when equity > 0)
+            cap_pct = settings.max_total_capital_pct
+            cap_usd = equity_usd * cap_pct
+            if projected_total > cap_usd:
+                reasons.append(
+                    f"Projected total notional ${projected_total:,.2f} would "
+                    f"exceed {cap_pct:.1%} of equity (${cap_usd:,.2f})"
+                )
+                breached.append("max_total_capital_pct")
+                return RiskApproval(
+                    symbol=symbol,
+                    verdict=RiskVerdict.REJECTED,
+                    reasons=reasons,
+                    breached_limits=breached,
+                )
+        return None
+
+    def _gate_3c_correlation(
+        self,
+        signal: TradingSignal,
+        symbol: str,
+        current_positions: Optional[list[PositionSummary]],
+        reasons: list[str],
+        breached: list[str],
+    ) -> tuple[Optional[RiskApproval], TradingSignal]:
+        """Gate 3c — Correlation gate (Story 057).
+
+        Prevents the system from building a stack of same-direction positions
+        in highly correlated crypto assets (e.g. 3× LONG in BTC, ETH, SOL
+        simultaneously = a single unhedged market bet).
+
+        Logic:
+          - Find how many OPEN positions share the new signal's direction
+            AND belong to the same correlation group.
+          - If count >= reject_threshold  -> hard REJECT
+          - If count >= penalty_threshold -> REDUCED with 50/60% size cut
+
+        Returns:
+          (RiskApproval or None, possibly-modified signal)
+        """
+        if current_positions:
+            from src.config.runtime_mode import get_params as _get_mode_params  # noqa: WPS433
+            _mp = _get_mode_params()
+            _penalty_threshold: int = int(_mp.get("correlation_penalty_threshold", 1))
+            _reject_threshold: int = int(_mp.get("correlation_reject_threshold", 2))
+
+            _group = _find_correlation_group(signal.symbol)
+            _new_side = signal.action.value.lower()  # "long" or "short"
+
+            # Count open positions that are same-direction AND in the same group,
+            # excluding the signal's own symbol (already checked by max_open_positions).
+            _corr_count = 0
+            for _pos in current_positions:
+                _pos_sym = _pos.symbol.upper()
+                if _pos_sym == signal.symbol:
+                    continue  # same asset — not a correlation risk
+                _pos_side = _pos.side.lower()
+                if _pos_side != _new_side:
+                    continue  # opposite direction — not correlated risk
+                if _group and _pos_sym in _group:
+                    _corr_count += 1
+
+            _mode_label = _mp.get("label", "")
+            if _corr_count >= _reject_threshold:
+                reasons.append(
+                    f"Correlation gate: {_corr_count} same-direction positions already open "
+                    f"in correlated group (≥ reject threshold {_reject_threshold}) [{_mode_label}]"
+                )
+                breached.append("correlation_reject")
+                return RiskApproval(
+                    symbol=symbol,
+                    verdict=RiskVerdict.REJECTED,
+                    reasons=reasons,
+                    breached_limits=breached,
+                ), signal
+            elif _corr_count >= _penalty_threshold:
+                # Apply size reduction — severity increases with count
+                _penalty_mult = max(0.4, 1.0 - (_corr_count * 0.3))
+                _prev_size = signal.size_pct
+                signal = signal.model_copy(
+                    update={"size_pct": round(signal.size_pct * _penalty_mult, 6)}
+                )
+                reasons.append(
+                    f"Correlation penalty: {_corr_count} same-direction position(s) in correlated "
+                    f"group → size × {_penalty_mult:.0%} ({_prev_size:.4f} → {signal.size_pct:.4f}) "
+                    f"[{_mode_label}]"
+                )
+                breached.append("correlation_penalty")
+        return None, signal
+
+    def _gate_3e_portfolio_exposure(
+        self,
+        symbol: str,
+        equity_usd: float,
+        current_positions: Optional[list[PositionSummary]],
+        reasons: list[str],
+        breached: list[str],
+    ) -> Optional[RiskApproval]:
+        """Gate 3e — Portfolio Exposure Cap (Story 068).
+
+        Prevents over-exposure across multiple simultaneous positions.
+        If the sum of ALL open paper positions' notional (size × entry)
+        already exceeds max_portfolio_exposure_pct of equity, block the
+        new entry regardless of individual signal quality.
+
+        Uses current_positions from NickFury's cycle snapshot — same data
+        as the correlation gate (3c). Falls open on any error.
+        """
+        if equity_usd > 0 and current_positions:
+            try:
+                _open_notional = sum(
+                    abs(p.size * p.entry_price) for p in current_positions
+                )
+                _cap_usd = equity_usd * settings.max_portfolio_exposure_pct
+                if _open_notional >= _cap_usd:
+                    reasons.append(
+                        f"Portfolio exposure cap: open notional "
+                        f"${_open_notional:,.2f} ≥ "
+                        f"{settings.max_portfolio_exposure_pct:.0%} of equity "
+                        f"(${_cap_usd:,.2f}) — new entry blocked"
+                    )
+                    breached.append("max_portfolio_exposure_pct")
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        breached_limits=breached,
+                        metadata={
+                            "open_notional_usd": round(_open_notional, 2),
+                            "cap_usd": round(_cap_usd, 2),
+                            "equity_usd": round(equity_usd, 2),
+                        },
+                    )
+            except Exception as _exp_exc:  # noqa: BLE001
+                self._log.debug(f"[Batman] Portfolio exposure gate skipped: {_exp_exc}")
+        return None
+
     async def _run(  # type: ignore[override]
         self,
         signal: TradingSignal,
@@ -788,108 +964,26 @@ class Batman(BaseAgent[RiskApproval]):
             )
 
         # ---------------------------------------------------------------
-        # 3b. Total capital cap (Story 029a — Safety Net)
+        # 3b. Total capital cap — Story 029a (helper extraído #73)
         # ---------------------------------------------------------------
-        # Compute the notional this signal would add (size_pct * leverage * equity).
-        # We check BEFORE size adjustments so the cap is on Vision's intent,
-        # not on the post-Thor-multiplier value. If the intent itself blows
-        # the cap, we reject regardless of how much Thor would have shrunk it.
-        if equity_usd > 0:
-            new_notional = equity_usd * signal.size_pct * signal.leverage
-            projected_total = running_notional_usd + new_notional
-
-            # Absolute cap takes precedence when set
-            if settings.max_total_notional_usd is not None:
-                if projected_total > settings.max_total_notional_usd:
-                    reasons.append(
-                        f"Projected total notional ${projected_total:,.2f} would "
-                        f"exceed absolute cap ${settings.max_total_notional_usd:,.2f}"
-                    )
-                    breached.append("max_total_notional_usd")
-                    return RiskApproval(
-                        symbol=symbol,
-                        verdict=RiskVerdict.REJECTED,
-                        reasons=reasons,
-                        breached_limits=breached,
-                    )
-
-            # Percentage cap (always evaluated when equity > 0)
-            cap_pct = settings.max_total_capital_pct
-            cap_usd = equity_usd * cap_pct
-            if projected_total > cap_usd:
-                reasons.append(
-                    f"Projected total notional ${projected_total:,.2f} would "
-                    f"exceed {cap_pct:.1%} of equity (${cap_usd:,.2f})"
-                )
-                breached.append("max_total_capital_pct")
-                return RiskApproval(
-                    symbol=symbol,
-                    verdict=RiskVerdict.REJECTED,
-                    reasons=reasons,
-                    breached_limits=breached,
-                )
+        _gate_3b_result = self._gate_3b_total_capital_cap(
+            signal=signal, symbol=symbol, equity_usd=equity_usd,
+            running_notional_usd=running_notional_usd,
+            reasons=reasons, breached=breached,
+        )
+        if _gate_3b_result is not None:
+            return _gate_3b_result
 
         # ---------------------------------------------------------------
-        # 3c. Correlation gate — Story 057
-        #
-        # Prevents the system from building a stack of same-direction
-        # positions in highly correlated crypto assets (e.g. 3× LONG in
-        # BTC, ETH, SOL simultaneously = a single unhedged market bet).
-        #
-        # Logic:
-        #   - Find how many OPEN positions share the new signal's direction
-        #     AND belong to the same correlation group.
-        #   - If count ≥ reject_threshold  → hard REJECT
-        #   - If count ≥ penalty_threshold → REDUCED with 50/60% size cut
+        # 3c. Correlation gate — Story 057 (helper extraído #73)
         # ---------------------------------------------------------------
-        if current_positions:
-            from src.config.runtime_mode import get_params as _get_mode_params  # noqa: WPS433
-            _mp = _get_mode_params()
-            _penalty_threshold: int = int(_mp.get("correlation_penalty_threshold", 1))
-            _reject_threshold: int = int(_mp.get("correlation_reject_threshold", 2))
-
-            _group = _find_correlation_group(signal.symbol)
-            _new_side = signal.action.value.lower()  # "long" or "short"
-
-            # Count open positions that are same-direction AND in the same group,
-            # excluding the signal's own symbol (already checked by max_open_positions).
-            _corr_count = 0
-            for _pos in current_positions:
-                _pos_sym = _pos.symbol.upper()
-                if _pos_sym == signal.symbol:
-                    continue  # same asset — not a correlation risk
-                _pos_side = _pos.side.lower()
-                if _pos_side != _new_side:
-                    continue  # opposite direction — not correlated risk
-                if _group and _pos_sym in _group:
-                    _corr_count += 1
-
-            _mode_label = _mp.get("label", "")
-            if _corr_count >= _reject_threshold:
-                reasons.append(
-                    f"Correlation gate: {_corr_count} same-direction positions already open "
-                    f"in correlated group (≥ reject threshold {_reject_threshold}) [{_mode_label}]"
-                )
-                breached.append("correlation_reject")
-                return RiskApproval(
-                    symbol=symbol,
-                    verdict=RiskVerdict.REJECTED,
-                    reasons=reasons,
-                    breached_limits=breached,
-                )
-            elif _corr_count >= _penalty_threshold:
-                # Apply size reduction — severity increases with count
-                _penalty_mult = max(0.4, 1.0 - (_corr_count * 0.3))
-                _prev_size = signal.size_pct
-                signal = signal.model_copy(
-                    update={"size_pct": round(signal.size_pct * _penalty_mult, 6)}
-                )
-                reasons.append(
-                    f"Correlation penalty: {_corr_count} same-direction position(s) in correlated "
-                    f"group → size × {_penalty_mult:.0%} ({_prev_size:.4f} → {signal.size_pct:.4f}) "
-                    f"[{_mode_label}]"
-                )
-                breached.append("correlation_penalty")
+        _gate_3c_result, signal = self._gate_3c_correlation(
+            signal=signal, symbol=symbol,
+            current_positions=current_positions,
+            reasons=reasons, breached=breached,
+        )
+        if _gate_3c_result is not None:
+            return _gate_3c_result
 
         # ---------------------------------------------------------------
         # 3d. Episodic Memory gate — Story 063
@@ -953,43 +1047,15 @@ class Batman(BaseAgent[RiskApproval]):
             self._log.debug(f"[Batman] Episodic memory gate skipped: {_mem_exc}")
 
         # ---------------------------------------------------------------
-        # 3e. Portfolio Exposure Cap — Story 068
-        #
-        # Prevents over-exposure across multiple simultaneous positions.
-        # If the sum of ALL open paper positions' notional (size × entry)
-        # already exceeds max_portfolio_exposure_pct of equity, block the
-        # new entry regardless of individual signal quality.
-        #
-        # Uses current_positions from NickFury's cycle snapshot — same data
-        # as the correlation gate (3c).  Falls open on any error.
+        # 3e. Portfolio Exposure Cap — Story 068 (helper extraído #73)
         # ---------------------------------------------------------------
-        if equity_usd > 0 and current_positions:
-            try:
-                _open_notional = sum(
-                    abs(p.size * p.entry_price) for p in current_positions
-                )
-                _cap_usd = equity_usd * settings.max_portfolio_exposure_pct
-                if _open_notional >= _cap_usd:
-                    reasons.append(
-                        f"Portfolio exposure cap: open notional "
-                        f"${_open_notional:,.2f} ≥ "
-                        f"{settings.max_portfolio_exposure_pct:.0%} of equity "
-                        f"(${_cap_usd:,.2f}) — new entry blocked"
-                    )
-                    breached.append("max_portfolio_exposure_pct")
-                    return RiskApproval(
-                        symbol=symbol,
-                        verdict=RiskVerdict.REJECTED,
-                        reasons=reasons,
-                        breached_limits=breached,
-                        metadata={
-                            "open_notional_usd": round(_open_notional, 2),
-                            "cap_usd": round(_cap_usd, 2),
-                            "equity_usd": round(equity_usd, 2),
-                        },
-                    )
-            except Exception as _exp_exc:  # noqa: BLE001
-                self._log.debug(f"[Batman] Portfolio exposure gate skipped: {_exp_exc}")
+        _gate_3e_result = self._gate_3e_portfolio_exposure(
+            symbol=symbol, equity_usd=equity_usd,
+            current_positions=current_positions,
+            reasons=reasons, breached=breached,
+        )
+        if _gate_3e_result is not None:
+            return _gate_3e_result
 
         # ---------------------------------------------------------------
         # 3f. Re-entry Cooldown Guard — Story 069
