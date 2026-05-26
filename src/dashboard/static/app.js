@@ -4140,13 +4140,66 @@ function _tradeRenderRecommendation(rec, isPaper) {
     <div class="trade-rec-justification">${escapeHtml(rec.justification || '')}</div>
   `;
 
-  // Disable confirm if no consensus or mock source
-  const canConfirm = rec.agents_consensus && rec.source !== 'mock';
-  if (_tradeConfirmBtn) {
-    _tradeConfirmBtn.disabled = !canConfirm;
-    _tradeConfirmBtn.title = canConfirm
-      ? 'Confirmar execução'
-      : 'Confirmar bloqueado: confiança insuficiente ou fonte mock';
+  // Confirm button enable logic (3-way, bug fix 2026-05-26):
+  //
+  //   • Direction == HOLD               → ALWAYS disabled (no trade to execute)
+  //   • Modo Deus checkbox is checked   → enable even without consensus
+  //     (operator explicitly overrides Batman in paper/testnet)
+  //   • Otherwise (LONG/SHORT)          → enable only if agents_consensus
+  //                                       and source != mock
+  //
+  // Modo Deus serves to FORCE an existing LONG/SHORT recommendation past
+  // Batman — it does NOT invent a direction from a HOLD. That's why HOLD
+  // remains disabled regardless of the checkbox.
+  // (Renamed from `dir` to `dirUpper` to avoid colliding with the const
+  //  declared above for the display value.)
+  const dirUpper = String(rec.direction || '').toUpperCase();
+  const isHold = (dirUpper === 'HOLD' || dirUpper === 'NONE' || !dirUpper);
+  const forceCb = document.getElementById('trade-force-execute');
+  const holdBanner = document.getElementById('trade-hold-warning');
+
+  const applyState = () => {
+    const _forceOn = !!(forceCb && forceCb.checked && !forceCb.disabled);
+    let _canConfirm;
+    let _title;
+    if (isHold) {
+      _canConfirm = false;
+      _title = _forceOn
+        ? 'Direção é HOLD — Modo Deus não cria trade do nada, ele só força LONG/SHORT já recomendado.'
+        : 'HOLD: agentes não encontraram oportunidade direcional agora.';
+    } else if (_forceOn) {
+      _canConfirm = true;
+      _title = 'Modo Deus ativo — vai executar ' + dirUpper + ' mesmo sem consenso dos agentes (paper/testnet only).';
+    } else {
+      _canConfirm = rec.agents_consensus && rec.source !== 'mock';
+      _title = _canConfirm
+        ? 'Confirmar execução'
+        : 'Confirmar bloqueado: confiança insuficiente ou fonte mock. Marque Modo Deus para forçar (paper/testnet).';
+    }
+
+    if (_tradeConfirmBtn) {
+      _tradeConfirmBtn.disabled = !_canConfirm;
+      _tradeConfirmBtn.title = _title;
+    }
+    // Show the amber HOLD-warning banner only when both conditions match.
+    // Operator marked Modo Deus but the agents returned HOLD — explain why
+    // the button stays disabled instead of leaving them guessing.
+    if (holdBanner) {
+      holdBanner.classList.toggle('hidden', !(isHold && _forceOn));
+    }
+  };
+
+  applyState();
+
+  // Re-evaluate on every change to the Modo Deus checkbox without re-fetching
+  // analyze. Detach previous listener (idempotent) and attach a fresh one
+  // bound to this recommendation render.
+  if (forceCb) {
+    if (forceCb._tradeRecalcHandler) {
+      forceCb.removeEventListener('change', forceCb._tradeRecalcHandler);
+    }
+    forceCb._tradeRecalcHandler = applyState;
+    forceCb.addEventListener('change', applyState);
   }
 }
 

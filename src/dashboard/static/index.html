@@ -1434,6 +1434,20 @@
             <div id="trade-guardrails" class="trade-guardrails"></div>
             <div id="trade-rec-card" class="trade-rec-card"></div>
             <!--
+              HOLD warning banner — appears only when direction=HOLD AND
+              Modo Deus is checked. Explains why Modo Deus doesn't help here
+              (it overrides Batman's REJECT for LONG/SHORT, it doesn't fabricate
+              a direction from a HOLD). Shown via _tradeRenderRecommendation.
+            -->
+            <div id="trade-hold-warning" class="trade-hold-warning hidden" role="alert">
+              ℹ️ <strong>Modo Deus + HOLD não executa.</strong>
+              O Modo Deus serve para <em>forçar uma recomendação LONG ou SHORT</em>
+              quando os agentes (Batman) rejeitaram — ele não cria um trade do
+              nada quando a direção é HOLD. Aguarde os agentes encontrarem uma
+              oportunidade direcional, ou desabilite o Modo Deus se só quiser
+              ver a análise.
+            </div>
+            <!--
               FORCE EXECUTE checkbox (M22.1) — opt-in escape hatch that
               bypasses Batman's risk verdict. Hidden by default; rendered
               only in safe environments (paper mode or any testnet). The

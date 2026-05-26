@@ -1981,6 +1981,24 @@ body[data-theme="light"] .brand-mark { filter: drop-shadow(0 0 6px rgba(15,23,42
 .trade-result-success { color: var(--good); font-size: 1.1rem; font-weight: 700; }
 .trade-result-fail    { color: var(--bad);  font-size: 1.1rem; font-weight: 700; }
 
+/* HOLD + Modo Deus warning banner (bug fix 2026-05-26).
+ * Only visible when (direction == HOLD) && (force_execute checkbox is checked).
+ * Bright amber to grab the operator's attention without being alarming.
+ */
+.trade-hold-warning {
+  margin: 10px 0;
+  padding: 10px 14px;
+  background: rgba(245, 158, 11, 0.10);
+  border: 1px solid rgba(245, 158, 11, 0.40);
+  border-left: 3px solid #f59e0b;
+  border-radius: 6px;
+  color: #fde68a;
+  font-size: 0.93rem;
+  line-height: 1.45;
+}
+.trade-hold-warning strong { color: #fbbf24; }
+.trade-hold-warning em { color: #fcd34d; font-style: italic; }
+
 /* Page section visibility */
 .page-section-hidden { display: none !important; }
 
