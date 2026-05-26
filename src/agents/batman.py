@@ -183,6 +183,129 @@ class Batman(BaseAgent[RiskApproval]):
                 )
         return None
 
+    async def _gate_3l_max_trades_per_symbol_day(
+        self,
+        symbol: str,
+        reasons: list[str],
+        breached: list[str],
+    ) -> Optional[RiskApproval]:
+        """Gate 3l — Max trades per symbol per day (Story 086).
+
+        Prevents over-trading a single symbol within the same UTC day.
+        Counts FILLED + PAPER trades already executed today for ``symbol``.
+        Fails open: DB error → gate skipped silently.
+        """
+        if settings.max_trades_per_symbol_day < 99:
+            try:
+                from src.persistence.repository import MekkaRepository as _Repo  # noqa: WPS433
+                _sym_today = await _Repo.count_trades_today_for_symbol(symbol)
+                if _sym_today >= settings.max_trades_per_symbol_day:
+                    reasons.append(
+                        f"[3l] Max trades/symbol/day: {symbol} already has "
+                        f"{_sym_today} trade(s) today "
+                        f"(limit={settings.max_trades_per_symbol_day})."
+                    )
+                    breached.append("max_trades_per_symbol_day")
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        breached_limits=breached,
+                    )
+                else:
+                    reasons.append(
+                        f"[3l] Trades/{symbol}/day OK: {_sym_today}/{settings.max_trades_per_symbol_day}"
+                    )
+            except Exception as _tpsd_exc:  # noqa: BLE001
+                self._log.debug("[Batman] Max trades/symbol/day gate skipped: %s", _tpsd_exc)
+        return None
+
+    async def _gate_3n_symbol_weekly_drawdown(
+        self,
+        equity_usd: float,
+        symbol: str,
+        reasons: list[str],
+        breached: list[str],
+    ) -> Optional[RiskApproval]:
+        """Gate 3n — Max drawdown per symbol per week (Story 100).
+
+        Rejects new entries in a symbol that has already lost more than
+        max_symbol_drawdown_pct × equity this UTC week.
+        Fails open: DB error → gate skipped silently.
+        """
+        if settings.max_symbol_drawdown_pct < 1.0 and equity_usd > 0:
+            try:
+                from src.persistence.repository import MekkaRepository as _Repo2  # noqa: WPS433
+                _sym_week_pnl = await _Repo2.get_symbol_week_pnl(symbol)
+                _sym_draw_limit = -(equity_usd * settings.max_symbol_drawdown_pct)
+                if _sym_week_pnl < _sym_draw_limit:
+                    reasons.append(
+                        f"[3n] Symbol weekly drawdown: {symbol} PnL this week "
+                        f"${_sym_week_pnl:.2f} < limit ${_sym_draw_limit:.2f} "
+                        f"({settings.max_symbol_drawdown_pct:.1%} of equity)."
+                    )
+                    breached.append("max_symbol_drawdown_pct")
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        breached_limits=breached,
+                    )
+            except Exception as _msd_exc:  # noqa: BLE001
+                self._log.debug("[Batman] Symbol weekly drawdown gate skipped: %s", _msd_exc)
+        return None
+
+    async def _gate_3o_consecutive_losses(
+        self,
+        symbol: str,
+        reasons: list[str],
+        breached: list[str],
+    ) -> Optional[RiskApproval]:
+        """Gate 3o — Max consecutive losses (Story 102).
+
+        Reject new entries when the last N completed trades across all
+        symbols were losses (realized_pnl < 0). Resets on any win/TP.
+        Fails open: DB error → gate skipped silently.
+        Emits GATE_REJECTED audit (Story 112).
+        """
+        if settings.max_consecutive_losses < 99:
+            try:
+                from src.persistence.repository import MekkaRepository as _Repo3o  # noqa: WPS433
+                _recent_trades = await _Repo3o.list_recent_closed_trades(
+                    limit=settings.max_consecutive_losses
+                )
+                if len(_recent_trades) >= settings.max_consecutive_losses:
+                    _all_losses = all(
+                        (getattr(t, "realized_pnl_usd", None) or 0.0) < 0
+                        for t in _recent_trades[: settings.max_consecutive_losses]
+                    )
+                    if _all_losses:
+                        reasons.append(
+                            f"[3o] {settings.max_consecutive_losses} perdas consecutivas "
+                            f"detectadas — pausando novas entradas até próxima vitória."
+                        )
+                        breached.append("max_consecutive_losses")
+                        # Story 112 — audit gate rejection
+                        try:
+                            await _Repo3o.log_event(
+                                agent="Batman", event="GATE_REJECTED", severity="WARNING",
+                                symbol=symbol,
+                                message=reasons[-1],
+                                payload={"gate_id": "3o", "symbol": symbol,
+                                         "reason": reasons[-1], "breached": list(breached)},
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                        return RiskApproval(
+                            symbol=symbol,
+                            verdict=RiskVerdict.REJECTED,
+                            reasons=reasons,
+                            breached_limits=breached,
+                        )
+            except Exception as _cl_exc:  # noqa: BLE001
+                self._log.debug("[Batman] Consecutive losses gate skipped: %s", _cl_exc)
+        return None
+
     async def _run(  # type: ignore[override]
         self,
         signal: TradingSignal,
@@ -868,35 +991,13 @@ class Batman(BaseAgent[RiskApproval]):
                 )
 
         # ---------------------------------------------------------------
-        # 3l. Max trades per symbol per day — Story 086
-        #
-        # Prevents over-trading a single symbol within the same UTC day.
-        # Counts FILLED + PAPER trades already executed today for 'symbol'.
-        # Fails open: DB error → gate skipped silently.
+        # 3l. Max trades per symbol per day — Story 086 (helper extraído #73)
         # ---------------------------------------------------------------
-        if settings.max_trades_per_symbol_day < 99:
-            try:
-                from src.persistence.repository import MekkaRepository as _Repo  # noqa: WPS433
-                _sym_today = await _Repo.count_trades_today_for_symbol(symbol)
-                if _sym_today >= settings.max_trades_per_symbol_day:
-                    reasons.append(
-                        f"[3l] Max trades/symbol/day: {symbol} already has "
-                        f"{_sym_today} trade(s) today "
-                        f"(limit={settings.max_trades_per_symbol_day})."
-                    )
-                    breached.append("max_trades_per_symbol_day")
-                    return RiskApproval(
-                        symbol=symbol,
-                        verdict=RiskVerdict.REJECTED,
-                        reasons=reasons,
-                        breached_limits=breached,
-                    )
-                else:
-                    reasons.append(
-                        f"[3l] Trades/{symbol}/day OK: {_sym_today}/{settings.max_trades_per_symbol_day}"
-                    )
-            except Exception as _tpsd_exc:  # noqa: BLE001
-                self._log.debug("[Batman] Max trades/symbol/day gate skipped: %s", _tpsd_exc)
+        _gate_3l_result = await self._gate_3l_max_trades_per_symbol_day(
+            symbol=symbol, reasons=reasons, breached=breached,
+        )
+        if _gate_3l_result is not None:
+            return _gate_3l_result
 
         # ---------------------------------------------------------------
         # 3m. Minimum trade notional — Story 096 (helper extraído #73)
@@ -909,76 +1010,22 @@ class Batman(BaseAgent[RiskApproval]):
             return _gate_3m_result
 
         # ---------------------------------------------------------------
-        # 3n. Max drawdown per symbol per week — Story 100
-        #
-        # Rejects new entries in a symbol that has already lost more than
-        # max_symbol_drawdown_pct × equity this UTC week.
-        # Fails open: DB error → gate skipped silently.
+        # 3n. Symbol weekly drawdown — Story 100 (helper extraído #73)
         # ---------------------------------------------------------------
-        if settings.max_symbol_drawdown_pct < 1.0 and equity_usd > 0:
-            try:
-                from src.persistence.repository import MekkaRepository as _Repo2  # noqa: WPS433
-                _sym_week_pnl = await _Repo2.get_symbol_week_pnl(symbol)
-                _sym_draw_limit = -(equity_usd * settings.max_symbol_drawdown_pct)
-                if _sym_week_pnl < _sym_draw_limit:
-                    reasons.append(
-                        f"[3n] Symbol weekly drawdown: {symbol} PnL this week "
-                        f"${_sym_week_pnl:.2f} < limit ${_sym_draw_limit:.2f} "
-                        f"({settings.max_symbol_drawdown_pct:.1%} of equity)."
-                    )
-                    breached.append("max_symbol_drawdown_pct")
-                    return RiskApproval(
-                        symbol=symbol,
-                        verdict=RiskVerdict.REJECTED,
-                        reasons=reasons,
-                        breached_limits=breached,
-                    )
-            except Exception as _msd_exc:  # noqa: BLE001
-                self._log.debug("[Batman] Symbol weekly drawdown gate skipped: %s", _msd_exc)
+        _gate_3n_result = await self._gate_3n_symbol_weekly_drawdown(
+            equity_usd=equity_usd, symbol=symbol, reasons=reasons, breached=breached,
+        )
+        if _gate_3n_result is not None:
+            return _gate_3n_result
 
         # ---------------------------------------------------------------
-        # 3o. Max consecutive losses — Story 102
-        #
-        # Reject new entries when the last N completed trades across all
-        # symbols were losses (realized_pnl < 0). Resets on any win/TP.
-        # Fails open: DB error → gate skipped silently.
+        # 3o. Max consecutive losses — Story 102 (helper extraído #73)
         # ---------------------------------------------------------------
-        if settings.max_consecutive_losses < 99:
-            try:
-                from src.persistence.repository import MekkaRepository as _Repo3o  # noqa: WPS433
-                _recent_trades = await _Repo3o.list_recent_closed_trades(
-                    limit=settings.max_consecutive_losses
-                )
-                if len(_recent_trades) >= settings.max_consecutive_losses:
-                    _all_losses = all(
-                        (getattr(t, "realized_pnl_usd", None) or 0.0) < 0
-                        for t in _recent_trades[: settings.max_consecutive_losses]
-                    )
-                    if _all_losses:
-                        reasons.append(
-                            f"[3o] {settings.max_consecutive_losses} perdas consecutivas "
-                            f"detectadas — pausando novas entradas até próxima vitória."
-                        )
-                        breached.append("max_consecutive_losses")
-                        # Story 112 — audit gate rejection
-                        try:
-                            await _Repo3o.log_event(
-                                agent="Batman", event="GATE_REJECTED", severity="WARNING",
-                                symbol=symbol,
-                                message=reasons[-1],
-                                payload={"gate_id": "3o", "symbol": symbol,
-                                         "reason": reasons[-1], "breached": list(breached)},
-                            )
-                        except Exception:  # noqa: BLE001
-                            pass
-                        return RiskApproval(
-                            symbol=symbol,
-                            verdict=RiskVerdict.REJECTED,
-                            reasons=reasons,
-                            breached_limits=breached,
-                        )
-            except Exception as _cl_exc:  # noqa: BLE001
-                self._log.debug("[Batman] Consecutive losses gate skipped: %s", _cl_exc)
+        _gate_3o_result = await self._gate_3o_consecutive_losses(
+            symbol=symbol, reasons=reasons, breached=breached,
+        )
+        if _gate_3o_result is not None:
+            return _gate_3o_result
 
         # ---------------------------------------------------------------
         # 3p. Directional bias guard — Story 106
