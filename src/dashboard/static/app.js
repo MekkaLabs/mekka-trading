@@ -1709,45 +1709,98 @@ function renderPnlCards(summary) {
   // Banner é prepended (vai para fora dos cards) — clique abre o playbook.
   const ddPct = Math.abs(Number(w.max_drawdown_pct || 0) * 100);
   let bannerHtml = '';
+  // UX B: role=alert + aria-live=assertive (>=9% crítico, interrompe screen reader);
+  // role=status + aria-live=polite (>=7% atenção, não interrompe).
   if (ddPct >= 9.0) {
     bannerHtml = `<div class="pnl-banner pnl-banner-crit" role="alert"
+      aria-live="assertive" aria-atomic="true"
       title="Drawdown da janela próximo do kill switch (10%/dia). Revisar urgência.">
       🚨 Drawdown <b>${ddPct.toFixed(2)}%</b> está ≥ 9% — próximo do kill switch (10%/dia).
       Considere engajar manualmente ou consultar o
       <a href="#" onclick="alert('Consulte: docs/obsidian/30 - Resources/Runbooks/INCIDENT-PLAYBOOK.md');return false">runbook de incidente</a>.
     </div>`;
   } else if (ddPct >= 7.0) {
-    bannerHtml = `<div class="pnl-banner pnl-banner-warn"
+    bannerHtml = `<div class="pnl-banner pnl-banner-warn" role="status"
+      aria-live="polite" aria-atomic="true"
       title="Drawdown elevado — observe próximos trades de perto.">
       ⚠️ Drawdown <b>${ddPct.toFixed(2)}%</b> está ≥ 7% — atenção elevada, próximos trades sob observação.
     </div>`;
   }
   const winRateW = w.win_rate == null ? '-' : `${(w.win_rate * 100).toFixed(1)}%`;
   const winRateA = a.win_rate == null ? '-' : `${(a.win_rate * 100).toFixed(1)}%`;
+
+  // UX C — Bullet card builder (ui-ux-pro-max #18 "Bullet Chart compacto").
+  // Renderiza o card padrão + uma barra horizontal com:
+  //   - zona vermelha (BAD), amarela (OK), verde (GOOD)
+  //   - barra de performance preenchida proporcional ao valor atual
+  //   - tick (linha vertical) no target
+  // Mantém a mesma altura/largura do pnl-card original — bullet cabe abaixo
+  // do valor sem inflar layout.
+  //
+  // Args:
+  //   value: número atual (na mesma unidade dos thresholds)
+  //   max:   limite máximo do eixo (BAD termina aqui em métricas "bigger=better"
+  //          ou começa aqui em "smaller=better")
+  //   target: linha de meta (ex: 50% para win rate)
+  //   zones: { bad:[start,end], ok:[start,end], good:[start,end] }
+  //   inverse: se true, métrica é "smaller=better" (ex: drawdown)
+  function bulletBar(value, max, target, zones, inverse) {
+    if (value == null || !isFinite(value)) return '';
+    const pctOf = v => Math.max(0, Math.min(100, (v / max) * 100));
+    const valuePct = pctOf(value);
+    const targetPct = pctOf(target);
+    return `
+      <div class="bullet-bar" role="img" aria-label="Atual ${value.toFixed(1)}, meta ${target}, máximo ${max}">
+        <div class="bullet-zone bullet-zone-bad" style="left:${pctOf(zones.bad[0])}%; width:${pctOf(zones.bad[1]) - pctOf(zones.bad[0])}%"></div>
+        <div class="bullet-zone bullet-zone-ok"  style="left:${pctOf(zones.ok[0])}%;  width:${pctOf(zones.ok[1])  - pctOf(zones.ok[0])}%"></div>
+        <div class="bullet-zone bullet-zone-good" style="left:${pctOf(zones.good[0])}%; width:${pctOf(zones.good[1]) - pctOf(zones.good[0])}%"></div>
+        <div class="bullet-perf ${inverse ? 'bullet-perf-inverse' : ''}" style="width:${valuePct}%"></div>
+        <div class="bullet-target" style="left:${targetPct}%" title="Meta: ${target}"></div>
+      </div>
+    `;
+  }
+
+  const winValuePct = (w.win_rate == null) ? null : (w.win_rate * 100);
+  const ddValuePct = Math.abs(Number(w.max_drawdown_pct || 0) * 100);
+
   const cards = [
     {
       label: `PnL ${summary.window_days}d`,
       value: fmtMoneyDelta(w.pnl_usd),
       sub: `${w.trades || 0} trades · ${w.days_with_data || 0} dias`,
       cls: pnlPosNegClass(w.pnl_usd),
+      bullet: '', // PnL não tem target fixo (depende do operador)
     },
     {
       label: 'PnL all-time',
       value: fmtMoneyDelta(a.pnl_usd),
       sub: `${a.trades || 0} trades · ${a.trading_days || 0} dias`,
       cls: pnlPosNegClass(a.pnl_usd),
+      bullet: '',
     },
     {
       label: 'Win rate',
       value: winRateW,
-      sub: `all-time ${winRateA}`,
+      sub: `all-time ${winRateA} · meta 50%`,
       cls: '',
+      // bigger=better: BAD < 35%, OK 35-50%, GOOD >= 50%. Eixo 0-100%.
+      bullet: bulletBar(
+        winValuePct, 100, 50,
+        { bad: [0, 35], ok: [35, 50], good: [50, 100] },
+        false
+      ),
     },
     {
       label: 'Max drawdown',
-      value: `${(Number(w.max_drawdown_pct || 0) * 100).toFixed(2)}%`,
-      sub: `equity ${Number(w.latest_equity_usd || 0).toLocaleString('en-US', {style: 'currency', currency: 'USD', maximumFractionDigits: 0})}`,
-      cls: 'neg',
+      value: `${ddValuePct.toFixed(2)}%`,
+      sub: `equity ${Number(w.latest_equity_usd || 0).toLocaleString('en-US', {style: 'currency', currency: 'USD', maximumFractionDigits: 0})} · limite 10%`,
+      cls: ddValuePct >= 7 ? 'neg' : '',
+      // smaller=better: GOOD < 5%, OK 5-7%, BAD >= 7%. Eixo 0-10% (kill switch).
+      bullet: bulletBar(
+        ddValuePct, 10, 7,
+        { good: [0, 5], ok: [5, 7], bad: [7, 10] },
+        true
+      ),
     },
   ];
   pnlCards.innerHTML = bannerHtml + cards.map((c) => (
@@ -1755,6 +1808,7 @@ function renderPnlCards(summary) {
        <span class="pnl-label">${escapeHtml(c.label)}</span>
        <span class="pnl-value ${c.cls}">${escapeHtml(c.value)}</span>
        <span class="pnl-sub">${escapeHtml(c.sub)}</span>
+       ${c.bullet}
      </div>`
   )).join('');
 }
@@ -4286,9 +4340,18 @@ async function _tradeExecute() {
           ${data.is_paper ? '<p class="muted-line">⚠️ Paper mode — nenhuma ordem real foi enviada.</p>' : ''}
         `;
       } else {
+        // UX D — Inline error claro: classifica o motivo da falha em PT-BR
+        // com sugestão de ação para o operador. Lê reason + error em qualquer
+        // campo do payload e tenta casar com padrões conhecidos. Cai de volta
+        // para a mensagem crua se nenhum padrão casar (assim novos modos de
+        // falha aparecem no UI mesmo sem tradução prévia).
+        const dx = _tradeDiagnose(data);
         resultEl.innerHTML = `
           <p class="trade-result-fail">🚫 ${escapeHtml(data.status?.toUpperCase() || 'ERRO')}</p>
-          <p>${escapeHtml(data.reason || 'Execução bloqueada.')}</p>
+          <p><strong>${escapeHtml(dx.title)}</strong></p>
+          <p>${escapeHtml(dx.detail)}</p>
+          ${dx.suggestion ? `<p class="muted-line">💡 ${escapeHtml(dx.suggestion)}</p>` : ''}
+          ${dx.rawHidden ? `<details class="muted-line"><summary>Detalhes técnicos</summary><pre style="white-space:pre-wrap;font-size:0.8rem;">${escapeHtml(JSON.stringify(data, null, 2))}</pre></details>` : ''}
         `;
       }
     }
@@ -4301,6 +4364,105 @@ async function _tradeExecute() {
   if (_tradeNowBtn) _tradeNowBtn.disabled = false;
   // Refresh topbar after trade
   setTimeout(_mkLoadTopBar, 2000);
+}
+
+/**
+ * UX D — Diagnose a failed trade-execute response into PT-BR title/detail/suggestion.
+ *
+ * Scans data.reason + data.error + nested execution.error for patterns that
+ * the operator commonly faces. Returns:
+ *   { title, detail, suggestion?, rawHidden }
+ *
+ * rawHidden=true when we found a known pattern (suppresses noisy JSON);
+ * false when the message is unmatched (operator sees raw payload as fallback).
+ */
+function _tradeDiagnose(data) {
+  // Coalesce all possible error strings from the response
+  const candidates = [
+    data.reason,
+    data.error,
+    data.message,
+    data.execution_error,
+    data.execution?.error,
+    data.execution?.metadata?.raw_order?.info?.msg,
+  ].filter(Boolean).map(String);
+  const blob = candidates.join(' | ').toLowerCase();
+  const raw = candidates[0] || 'Sem detalhes.';
+
+  // Pattern matchers — ordem importa (mais específico primeiro)
+  const dx = (title, detail, suggestion) => ({ title, detail, suggestion, rawHidden: true });
+
+  if (blob.includes('limit_ioc') && blob.includes('0 units')) {
+    return dx(
+      'Ordem IOC não casou no book (testnet com liquidez baixa)',
+      'A ordem foi de tipo limit-IOC (Immediate-or-Cancel) e o book da testnet não tinha contraparte disponível no preço exato. Não houve fill.',
+      'Marque Modo Deus e tente de novo — em testnet o sistema agora usa market order quando Modo Deus está ativo.'
+    );
+  }
+  if (blob.includes('hold') && (blob.includes('não há trade') || blob.includes('não direcional'))) {
+    return dx(
+      'Recomendação atual é HOLD',
+      'Os agentes não encontraram oportunidade direcional (LONG ou SHORT) neste momento. Modo Deus não cria trade do nada — só força uma direção já recomendada.',
+      'Aguarde a próxima análise (1 ciclo ~ 60s) ou ative Super Agressivo para baixar o limiar de confiança.'
+    );
+  }
+  if (blob.includes('kill switch')) {
+    return dx(
+      'Kill switch está engatado',
+      'O sistema está em halt de segurança e não executa nenhum trade até liberar.',
+      'Vá em Kill Switch no topo do dashboard e libere com motivo claro. Verifique a causa raiz antes (drawdown? streak de erros?).'
+    );
+  }
+  if (blob.includes('exceed absolute cap') || blob.includes('notional')) {
+    return dx(
+      'Posição excederia o limite absoluto de notional',
+      raw,
+      'Reduza o leverage ou troque para Modo Conservador. O cap absoluto é uma proteção do Modo Global e não pode ser furado nem por Modo Deus.'
+    );
+  }
+  if (blob.includes('insufficient') && (blob.includes('balance') || blob.includes('margin'))) {
+    return dx(
+      'Saldo insuficiente para cobrir a margem',
+      raw,
+      'Veja a aba Carteira. Em testnet, recarregue o saldo pelo painel da Binance/Bybit.'
+    );
+  }
+  if (blob.includes('mainnet') && blob.includes('force')) {
+    return dx(
+      'Modo Deus bloqueado em mainnet/live',
+      raw,
+      'Em ambiente de produção com dinheiro real, Modo Deus é hard-rejeitado por regra de segurança. Use paper ou testnet para forçar trades.'
+    );
+  }
+  if (blob.includes('timeout') || blob.includes('econnreset') || blob.includes('network')) {
+    return dx(
+      'Erro de rede com a corretora',
+      raw,
+      'Tente de novo em alguns segundos. Se persistir, verifique status da Binance/Bybit e conexão.'
+    );
+  }
+  if (blob.includes('confiança') || blob.includes('consensus') || blob.includes('agents_consensus')) {
+    return dx(
+      'Confiança dos agentes abaixo do limiar',
+      raw,
+      'Marque Modo Deus para forçar (paper/testnet). Ou ajuste o Modo Global para um perfil mais agressivo se quiser limiar menor.'
+    );
+  }
+  if (blob.includes('rejected') && data.status === 'rejected') {
+    return dx(
+      'Ordem rejeitada pela corretora',
+      raw,
+      'Veja os detalhes técnicos abaixo. Causas comuns: símbolo inválido, preço fora do tick size, alavancagem não suportada.'
+    );
+  }
+
+  // Fallback — pattern desconhecido: mostra raw + JSON para investigação
+  return {
+    title: 'Execução bloqueada',
+    detail: raw,
+    suggestion: null,
+    rawHidden: false,
+  };
 }
 
 function _mkBootTradeNow() {

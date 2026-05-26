@@ -210,7 +210,11 @@
         <div class="killswitch-row">
           <div>
             <h2>Kill Switch</h2>
-            <div id="killswitch-status" class="muted-line">Verificando...</div>
+            <!-- aria-live=assertive: kill switch é o status mais crítico do
+                 sistema; mudança DEVE interromper screen reader imediatamente.
+                 atomic=true: anuncia o texto inteiro em vez de só o diff. -->
+            <div id="killswitch-status" class="muted-line" role="status"
+                 aria-live="assertive" aria-atomic="true">Verificando...</div>
           </div>
           <div class="killswitch-actions">
             <button id="killswitch-engage" type="button" class="btn-engage">Engage</button>
@@ -1465,7 +1469,11 @@
             </div>
           </div>
           <div id="trade-modal-result" class="hidden">
-            <div id="trade-result-content"></div>
+            <!-- aria-live=polite: resultado do trade é importante mas
+                 não interrompe o que o screen reader já estava lendo.
+                 atomic=true: lê o resultado inteiro (sucesso/falha/motivo). -->
+            <div id="trade-result-content" role="status"
+                 aria-live="polite" aria-atomic="true"></div>
             <button id="trade-result-close" type="button" class="prefs-reset-btn">Fechar</button>
           </div>
         </div>

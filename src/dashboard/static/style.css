@@ -1981,6 +1981,43 @@ body[data-theme="light"] .brand-mark { filter: drop-shadow(0 0 6px rgba(15,23,42
 .trade-result-success { color: var(--good); font-size: 1.1rem; font-weight: 700; }
 .trade-result-fail    { color: var(--bad);  font-size: 1.1rem; font-weight: 700; }
 
+/* ===================================================================
+   UX C — Bullet bar (ui-ux-pro-max #18 "Bullet Chart compacto")
+   ===================================================================
+   Componente compacto para KPIs com target/threshold visíveis. Substitui
+   a necessidade de um gauge cheio em cards pequenos.
+
+   Estrutura: 3 zonas (bad/ok/good) + barra de performance + tick de target.
+   Width: 100% do card · Height: 8px · Aria-labeled na div pai.
+   =================================================================== */
+.bullet-bar {
+  position: relative;
+  width: 100%;
+  height: 8px;
+  margin-top: 8px;
+  background: var(--surface-alt, rgba(255,255,255,0.04));
+  border-radius: 4px;
+  overflow: hidden;
+}
+.bullet-zone { position: absolute; top: 0; height: 100%; }
+.bullet-zone-bad  { background: rgba(244, 67, 54, 0.18); }
+.bullet-zone-ok   { background: rgba(255, 193, 7, 0.18); }
+.bullet-zone-good { background: rgba(76, 175, 80, 0.20); }
+.bullet-perf {
+  position: absolute; top: 1px; height: 6px; left: 0;
+  background: var(--accent, #4897ff);
+  border-radius: 3px;
+  transition: width 0.4s ease-out;
+}
+.bullet-perf-inverse { background: var(--bad, #ef5350); }
+.bullet-target {
+  position: absolute; top: -2px; width: 2px; height: 12px;
+  background: #fff;
+  transform: translateX(-1px);
+  border-radius: 1px;
+}
+/* prefers-reduced-motion já cobre via *::after */
+
 /* HOLD + Modo Deus warning banner (bug fix 2026-05-26).
  * Only visible when (direction == HOLD) && (force_execute checkbox is checked).
  * Bright amber to grab the operator's attention without being alarming.
@@ -4718,3 +4755,42 @@ body[data-theme="light"] .page-nav-sub a { color: var(--muted); }
 }
 .godmode em { font-weight: 500; opacity: 0.8; font-style: italic; }
 .godmode input { accent-color: var(--bad); }
+
+/* ===================================================================
+   UX A — prefers-reduced-motion (bug fix 2026-05-26, ui-ux-pro-max #6/24)
+   ===================================================================
+   Respeita a preferência do operador (OS-level) para reduzir animações.
+   Aplicado quando o usuário marca "Reduzir movimento" em System Settings
+   (macOS Accessibility, Windows Ease of Access, etc).
+
+   Estratégia em duas camadas:
+     1. Reset duro de transitions/animations no escopo todo
+     2. Override específico para classes/seletores que dependem de
+        animação para comunicar estado (KEEP color/opacity, KILL motion)
+
+   Não toca em layout. Sprites permanecem visíveis em frame estático
+   (não param de existir, só não animam — Office v2/v4 já desenha frame
+   idle por default no roster, então isso só afeta os offices animados).
+   =================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    /* 0.01ms (não 0) para preservar onTransitionEnd handlers do JS */
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  /* Pausa explícita do parallax/scrolling smoothness em sprites e
+     headers — JS pode confiar no estilo para detectar reduced-motion
+     sem precisar do matchMedia. */
+  .sprite-v4, .sprite-pixel, .office-stage, .sprite3d {
+    animation-play-state: paused !important;
+  }
+  /* Banner pulse — KS ATIVO precisa chamar atenção MESMO em
+     reduced-motion. Substituímos o pulse animado por borda fixa. */
+  .pnl-banner-crit, .killswitch-state-active {
+    animation: none !important;
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+  }
+}
