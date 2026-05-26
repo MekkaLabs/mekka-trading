@@ -440,6 +440,22 @@ const AGENTS = [
     overlay: { sprite: "HELMET", palette: { A:"#fde047", a:"#fbbf24", e:"#1a0a1a" } },
   },
   {
+    // VisionCritic — par dialético do Vision. Mesma layer L2, paleta
+    // mais sóbria (índigo profundo + dourado escuro) sugerindo "voz crítica
+    // do Vision". Overlay GLASSES = papel de revisor/auditor (não decisor).
+    id: "visioncritic",
+    name: "VisionCritic",
+    role: "Decision Review",
+    layer: "L2",
+    color: "#818cf8",
+    summary: "Revisa a decisão do Vision e aplica freios quando ela vacila.",
+    task: "Reavaliando sinal — checagem cruzada de evidência",
+    palette: { k:"#0a0a1a", h:"#3730a3", H:"#1e1b4b", s:"#c7d2fe", S:"#6366f1",
+               e:"#000000", m:"#312e81", c:"#312e81", C:"#1e1b4b",
+               a:"#fbbf24", A:"#92400e", p:"#312e81", P:"#1e1b4b" },
+    overlay: { sprite: "GLASSES", palette: { A:"#0a0a1a", a:"#0a0a1a" } },
+  },
+  {
     id: "professorx",
     name: "ProfessorX",
     role: "Strategy Reasoning",
