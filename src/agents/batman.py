@@ -971,6 +971,251 @@ class Batman(BaseAgent[RiskApproval]):
             self._log.debug(f"[Batman] Symbol blacklist gate skipped: {_bl_exc}")
         return None
 
+    def _gate_3k_pyramid_bypass(
+        self,
+        signal: TradingSignal,
+        symbol: str,
+        open_positions: int,
+        current_positions: Optional[list[PositionSummary]],
+        reasons: list[str],
+        breached: list[str],
+    ) -> tuple[bool, TradingSignal]:
+        """Gate 3k — Pyramid / Scale-In Bypass (Story 080).
+
+        Before hard-rejecting for max_open_positions, check whether this
+        signal is a pyramid opportunity: same symbol, same direction, and
+        the existing position is already profitable.
+
+        Conditions for pyramid allowance:
+          1. settings.pyramid_enabled is True
+          2. open_positions >= settings.max_open_positions (would otherwise block)
+          3. current_positions contains a position in 'symbol'
+          4. That position is in the SAME direction as signal.action
+          5. That position has unrealized_pnl_usd >= pyramid_min_profit_pct% gain
+
+        Effect: size is capped at pyramid_max_add_pct, the caller may then
+        skip the max_open_positions gate for this symbol.
+
+        Returns:
+          (is_pyramid_entry, possibly-modified signal)
+        """
+        _is_pyramid_entry = False
+        if (
+            settings.pyramid_enabled
+            and open_positions >= settings.max_open_positions
+            and current_positions
+        ):
+            try:
+                _signal_side = signal.action.value.lower()  # 'long' or 'short'
+                for _pos in current_positions:
+                    _pos_sym = (getattr(_pos, "symbol", "") or "").upper()
+                    _pos_side = (getattr(_pos, "side", "") or "").lower()
+                    if _pos_sym != symbol.upper():
+                        continue
+                    if _pos_side != _signal_side:
+                        continue
+                    # Check profitability threshold
+                    _unreal_pnl = float(getattr(_pos, "unrealized_pnl_usd", 0) or 0)
+                    _entry_p = float(getattr(_pos, "entry_price", 0) or 0)
+                    _qty = float(getattr(_pos, "size", 0) or 0)
+                    _notional = _entry_p * _qty if _entry_p > 0 and _qty > 0 else 0.0
+                    _profit_pct = (_unreal_pnl / _notional * 100) if _notional > 0 else 0.0
+                    _min_pct = settings.pyramid_min_profit_pct
+                    if _profit_pct >= _min_pct:
+                        _is_pyramid_entry = True
+                        reasons.append(
+                            f"[3k] Pyramid entry approved: existing {symbol} {_signal_side.upper()} "
+                            f"position at +{_profit_pct:.2f}% unrealised profit "
+                            f"(min={_min_pct:.1f}%) — scale-in with capped size."
+                        )
+                        # Cap size at pyramid_max_add_pct
+                        if signal.size_pct > settings.pyramid_max_add_pct:
+                            signal = signal.model_copy(
+                                update={"size_pct": settings.pyramid_max_add_pct}
+                            )
+                            breached.append("pyramid_size_cap")
+                        break
+                    else:
+                        reasons.append(
+                            f"[3k] Pyramid skipped: {symbol} unrealised profit "
+                            f"{_profit_pct:.2f}% < min {_min_pct:.1f}% — position not profitable enough."
+                        )
+            except Exception as _pyr_exc:  # noqa: BLE001
+                self._log.debug("[Batman] Pyramid gate error (fail-open): %s", _pyr_exc)
+        return _is_pyramid_entry, signal
+
+    def _gate_3r_flash_divergence(
+        self,
+        signal: TradingSignal,
+        analysis: Optional[object],
+        reasons: list[str],
+    ) -> float:
+        """Gate 3r — Flash Momentum Divergence (Story 247).
+
+        SOFT gate — adjusts size but does NOT veto the trade.
+        When Flash signals STRONG momentum opposing the trade direction,
+        returns the reduction pct (default 30%) for the section-5 size
+        adjuster to apply. Fails open with 0.0 on any error.
+
+        Returns:
+          Reduction pct in [0.0, 1.0). 0.0 means "no reduction".
+        """
+        if analysis is None:
+            return 0.0
+        try:
+            _momentum = getattr(analysis, "momentum", None)
+            if _momentum is None:
+                return 0.0
+            from src.models.signal import MomentumDirection  # noqa: WPS433
+            _mom_dir = getattr(_momentum, "direction", None)
+            _mom_strong = getattr(_momentum, "is_strong", False)
+            _flash_reduction = getattr(settings, "flash_divergence_size_reduction", 0.30)
+            _signal_is_long = signal.action.upper() == "LONG"
+            _diverges = (
+                _mom_strong
+                and _mom_dir is not None
+                and (
+                    (_signal_is_long and _mom_dir == MomentumDirection.DOWN)
+                    or (not _signal_is_long and _mom_dir == MomentumDirection.UP)
+                )
+            )
+            if _diverges:
+                reasons.append(
+                    f"[3r] Flash divergence: signal={signal.action.upper()}, "
+                    f"momentum={_mom_dir.value} STRONG — "
+                    f"size reduced by {_flash_reduction:.0%}."
+                )
+                return _flash_reduction
+            if _mom_strong and _mom_dir is not None:
+                reasons.append(
+                    f"[3r] Flash confirms {signal.action.upper()}: "
+                    f"momentum={_mom_dir.value} STRONG — no size adjustment."
+                )
+            return 0.0
+        except Exception as _flash_exc:  # noqa: BLE001
+            self._log.debug("[Batman] Flash divergence gate skipped: %s", _flash_exc)
+            return 0.0
+
+    def _gate_5b_market_regime(
+        self,
+        signal: TradingSignal,
+        symbol: str,
+        adjusted_size: float,
+        adjusted_leverage: int,
+        reasons: list[str],
+        breached: list[str],
+    ) -> tuple[Optional[RiskApproval], float, int]:
+        """Gate 5b — Market Regime Gate (Story 148).
+
+        Uses MarketRegimeDetector output (signal.metadata["market_regime"])
+        to apply regime-aware adjustments:
+
+          BEAR:     leverage capped to bear_regime_max_leverage
+                    LONG rejected when signal RSI >= bear_long_max_rsi
+          VOLATILE: size × volatile_regime_size_multiplier
+          BULL:     no restrictions
+          SIDEWAYS: no restrictions
+
+        Fails open when metadata is missing or detector is unavailable.
+
+        Returns:
+          (RiskApproval or None, new adjusted_size, new adjusted_leverage)
+        """
+        if not settings.market_regime_gate_enabled:
+            return None, adjusted_size, adjusted_leverage
+        try:
+            _regime_str = (signal.metadata or {}).get("market_regime", "")
+            if _regime_str:
+                _regime_str = _regime_str.upper()
+                if _regime_str == "BEAR":
+                    # Cap leverage for BEAR regime
+                    _bear_lev = settings.bear_regime_max_leverage
+                    if adjusted_leverage > _bear_lev:
+                        reasons.append(
+                            f"[5b] BEAR regime: leverage {adjusted_leverage}x → {_bear_lev}x"
+                        )
+                        breached.append("bear_regime_max_leverage")
+                        adjusted_leverage = _bear_lev
+                    # LONG gate: RSI must be oversold
+                    _signal_rsi = (signal.metadata or {}).get("rsi")
+                    if (
+                        signal.action == TradeAction.LONG
+                        and _signal_rsi is not None
+                        and float(_signal_rsi) >= settings.bear_regime_long_max_rsi
+                    ):
+                        reasons.append(
+                            f"[5b] BEAR regime: LONG rejected — RSI {_signal_rsi:.1f} "
+                            f">= {settings.bear_regime_long_max_rsi:.0f} (not oversold enough)"
+                        )
+                        breached.append("bear_regime_long_rsi_gate")
+                        return RiskApproval(
+                            symbol=symbol,
+                            verdict=RiskVerdict.REJECTED,
+                            reasons=reasons,
+                            breached_limits=breached,
+                        ), adjusted_size, adjusted_leverage
+                elif _regime_str == "VOLATILE":
+                    # Reduce size in volatile regime
+                    _vmult = settings.volatile_regime_size_multiplier
+                    if _vmult < 1.0:
+                        _prev_sz = adjusted_size
+                        adjusted_size = round(adjusted_size * _vmult, 6)
+                        reasons.append(
+                            f"[5b] VOLATILE regime: size ×{_vmult:.2f} "
+                            f"({_prev_sz:.4f} → {adjusted_size:.4f})"
+                        )
+                        breached.append("volatile_regime_size_reduction")
+        except Exception as _regime_exc:  # noqa: BLE001
+            self._log.debug("[Batman] Market regime gate skipped: %s", _regime_exc)
+        return None, adjusted_size, adjusted_leverage
+
+    def _gate_5c_asset_classifier(
+        self,
+        signal: TradingSignal,
+        symbol: str,
+        adjusted_leverage: int,
+        max_lev: int,
+        reasons: list[str],
+        breached: list[str],
+    ) -> int:
+        """Gate 5c — Asset Classifier Gate (Story 149).
+
+        Uses AssetClassifier cap tier to apply per-tier leverage limits:
+          SMALL_CAP -> settings.small_cap_max_leverage
+          MID_CAP   -> settings.mid_cap_max_leverage
+          LARGE_CAP -> max_lev (no extra restriction)
+
+        Falls back to AssetClassifier.cap_tier(symbol) when metadata missing.
+        Fails open when classifier is unavailable.
+
+        Returns:
+          (possibly-capped) adjusted_leverage.
+        """
+        if not settings.asset_classifier_gate_enabled:
+            return adjusted_leverage
+        try:
+            _cap_tier_str = (signal.metadata or {}).get("cap_tier", "")
+            if not _cap_tier_str:
+                # Resolve tier dynamically (stateless — no I/O)
+                from src.services.asset_classifier import AssetClassifier  # noqa: WPS433
+                _cap_tier_str = AssetClassifier().cap_tier(symbol).value
+            _cap_tier_str = _cap_tier_str.upper()
+            if _cap_tier_str == "SMALL_CAP":
+                _tier_lev_cap = settings.small_cap_max_leverage
+            elif _cap_tier_str == "MID_CAP":
+                _tier_lev_cap = settings.mid_cap_max_leverage
+            else:
+                _tier_lev_cap = max_lev  # LARGE_CAP — no extra restriction
+            if adjusted_leverage > _tier_lev_cap:
+                reasons.append(
+                    f"[5c] {_cap_tier_str}: leverage {adjusted_leverage}x → {_tier_lev_cap}x"
+                )
+                breached.append(f"{_cap_tier_str.lower()}_max_leverage")
+                adjusted_leverage = _tier_lev_cap
+        except Exception as _tier_exc:  # noqa: BLE001
+            self._log.debug("[Batman] Asset classifier gate skipped: %s", _tier_exc)
+        return adjusted_leverage
+
     def _gate_3e_portfolio_exposure(
         self,
         symbol: str,
@@ -1082,64 +1327,12 @@ class Batman(BaseAgent[RiskApproval]):
         # 3. Trade-count and concurrency breakers
         # ---------------------------------------------------------------
 
-        # ── 3k. Pyramid / Scale-In Bypass — Story 080 ──────────────────
-        #
-        # Before hard-rejecting for max_open_positions, check whether this
-        # signal is a pyramid opportunity: same symbol, same direction, and
-        # the existing position is already profitable.
-        #
-        # Conditions for pyramid allowance:
-        #   1. settings.pyramid_enabled is True
-        #   2. open_positions >= settings.max_open_positions (would otherwise block)
-        #   3. current_positions contains a position in 'symbol'
-        #   4. That position is in the SAME direction as signal.action
-        #   5. That position has unrealized_pnl_usd >= pyramid_min_profit_pct% gain
-        #
-        # Effect: size is capped at pyramid_max_add_pct, verdict may be REDUCED,
-        # and the max_open_positions gate is skipped for this symbol.
-        _is_pyramid_entry = False
-        if (
-            settings.pyramid_enabled
-            and open_positions >= settings.max_open_positions
-            and current_positions
-        ):
-            try:
-                _signal_side = signal.action.value.lower()  # 'long' or 'short'
-                for _pos in current_positions:
-                    _pos_sym = (getattr(_pos, "symbol", "") or "").upper()
-                    _pos_side = (getattr(_pos, "side", "") or "").lower()
-                    if _pos_sym != symbol.upper():
-                        continue
-                    if _pos_side != _signal_side:
-                        continue
-                    # Check profitability threshold
-                    _unreal_pnl = float(getattr(_pos, "unrealized_pnl_usd", 0) or 0)
-                    _entry_p = float(getattr(_pos, "entry_price", 0) or 0)
-                    _qty = float(getattr(_pos, "size", 0) or 0)
-                    _notional = _entry_p * _qty if _entry_p > 0 and _qty > 0 else 0.0
-                    _profit_pct = (_unreal_pnl / _notional * 100) if _notional > 0 else 0.0
-                    _min_pct = settings.pyramid_min_profit_pct
-                    if _profit_pct >= _min_pct:
-                        _is_pyramid_entry = True
-                        reasons.append(
-                            f"[3k] Pyramid entry approved: existing {symbol} {_signal_side.upper()} "
-                            f"position at +{_profit_pct:.2f}% unrealised profit "
-                            f"(min={_min_pct:.1f}%) — scale-in with capped size."
-                        )
-                        # Cap size at pyramid_max_add_pct
-                        if signal.size_pct > settings.pyramid_max_add_pct:
-                            signal = signal.model_copy(
-                                update={"size_pct": settings.pyramid_max_add_pct}
-                            )
-                            breached.append("pyramid_size_cap")
-                        break
-                    else:
-                        reasons.append(
-                            f"[3k] Pyramid skipped: {symbol} unrealised profit "
-                            f"{_profit_pct:.2f}% < min {_min_pct:.1f}% — position not profitable enough."
-                        )
-            except Exception as _pyr_exc:  # noqa: BLE001
-                self._log.debug("[Batman] Pyramid gate error (fail-open): %s", _pyr_exc)
+        # ── 3k. Pyramid / Scale-In Bypass — Story 080 (helper extraído #73) ──
+        _is_pyramid_entry, signal = self._gate_3k_pyramid_bypass(
+            signal=signal, symbol=symbol,
+            open_positions=open_positions, current_positions=current_positions,
+            reasons=reasons, breached=breached,
+        )
 
         if not _is_pyramid_entry and open_positions >= settings.max_open_positions:
             reasons.append(
@@ -1311,54 +1504,11 @@ class Batman(BaseAgent[RiskApproval]):
             return _gate_3q_result
 
         # ---------------------------------------------------------------
-        # 3r. Flash Momentum Divergence — Story 247
-        #
-        # When Flash signals STRONG momentum opposing the trade direction,
-        # reduce position size by flash_divergence_size_reduction (default 30%)
-        # rather than rejecting outright. This is a SOFT gate — it adjusts
-        # size but does NOT veto the trade. Fails open on any error.
+        # 3r. Flash Momentum Divergence — Story 247 (helper extraído #73)
         # ---------------------------------------------------------------
-        if analysis is not None:
-            try:
-                _momentum = getattr(analysis, "momentum", None)
-                if _momentum is not None:
-                    from src.models.signal import MomentumDirection  # noqa: WPS433
-                    _mom_dir = getattr(_momentum, "direction", None)
-                    _mom_strong = getattr(_momentum, "is_strong", False)
-                    _flash_reduction = getattr(settings, "flash_divergence_size_reduction", 0.30)
-                    _signal_is_long = signal.action.upper() == "LONG"
-                    _diverges = (
-                        _mom_strong
-                        and _mom_dir is not None
-                        and (
-                            (_signal_is_long and _mom_dir == MomentumDirection.DOWN)
-                            or (not _signal_is_long and _mom_dir == MomentumDirection.UP)
-                        )
-                    )
-                    if _diverges:
-                        # Record advisory — not a hard breach, just metadata
-                        reasons.append(
-                            f"[3r] Flash divergence: signal={signal.action.upper()}, "
-                            f"momentum={_mom_dir.value} STRONG — "
-                            f"size reduced by {_flash_reduction:.0%}."
-                        )
-                        # Size reduction applied in section 5 via a dedicated flag
-                        # We store it in a local variable read by the size adjuster below
-                        _flash_size_reduction_pct = _flash_reduction
-                    else:
-                        _flash_size_reduction_pct = 0.0
-                        if _mom_strong and _mom_dir is not None:
-                            reasons.append(
-                                f"[3r] Flash confirms {signal.action.upper()}: "
-                                f"momentum={_mom_dir.value} STRONG — no size adjustment."
-                            )
-                else:
-                    _flash_size_reduction_pct = 0.0
-            except Exception as _flash_exc:  # noqa: BLE001
-                self._log.debug("[Batman] Flash divergence gate skipped: %s", _flash_exc)
-                _flash_size_reduction_pct = 0.0
-        else:
-            _flash_size_reduction_pct = 0.0
+        _flash_size_reduction_pct = self._gate_3r_flash_divergence(
+            signal=signal, analysis=analysis, reasons=reasons,
+        )
 
         # ---------------------------------------------------------------
         # 4. Confidence and R:R quality gates
@@ -1532,100 +1682,24 @@ class Batman(BaseAgent[RiskApproval]):
             adjusted_leverage = _max_lev
 
         # ---------------------------------------------------------------
-        # 5b. Market Regime Gate (Story 148)
-        #
-        # Uses MarketRegimeDetector output (passed via signal.metadata
-        # or resolved from BTC data) to apply regime-aware adjustments:
-        #
-        #   BEAR:     leverage capped to bear_regime_max_leverage (default 2x)
-        #             LONG signals require signal RSI < bear_long_max_rsi (default 40)
-        #   VOLATILE: size × volatile_regime_size_multiplier (default 0.7)
-        #   BULL:     no restrictions (potentially more permissive in future)
-        #   SIDEWAYS: no restrictions
-        #
-        # Regime is read from signal.metadata["market_regime"] (string).
-        # Fails open when metadata is missing or detector is unavailable.
+        # 5b. Market Regime Gate — Story 148 (helper extraído #73)
         # ---------------------------------------------------------------
-        if settings.market_regime_gate_enabled:
-            try:
-                _regime_str = (signal.metadata or {}).get("market_regime", "")
-                if _regime_str:
-                    _regime_str = _regime_str.upper()
-                    if _regime_str == "BEAR":
-                        # Cap leverage for BEAR regime
-                        _bear_lev = settings.bear_regime_max_leverage
-                        if adjusted_leverage > _bear_lev:
-                            reasons.append(
-                                f"[5b] BEAR regime: leverage {adjusted_leverage}x → {_bear_lev}x"
-                            )
-                            breached.append("bear_regime_max_leverage")
-                            adjusted_leverage = _bear_lev
-                        # LONG gate: RSI must be oversold
-                        _signal_rsi = (signal.metadata or {}).get("rsi")
-                        if (
-                            signal.action == TradeAction.LONG
-                            and _signal_rsi is not None
-                            and float(_signal_rsi) >= settings.bear_regime_long_max_rsi
-                        ):
-                            reasons.append(
-                                f"[5b] BEAR regime: LONG rejected — RSI {_signal_rsi:.1f} "
-                                f">= {settings.bear_regime_long_max_rsi:.0f} (not oversold enough)"
-                            )
-                            breached.append("bear_regime_long_rsi_gate")
-                            return RiskApproval(
-                                symbol=symbol,
-                                verdict=RiskVerdict.REJECTED,
-                                reasons=reasons,
-                                breached_limits=breached,
-                            )
-                    elif _regime_str == "VOLATILE":
-                        # Reduce size in volatile regime
-                        _vmult = settings.volatile_regime_size_multiplier
-                        if _vmult < 1.0:
-                            _prev_sz = adjusted_size
-                            adjusted_size = round(adjusted_size * _vmult, 6)
-                            reasons.append(
-                                f"[5b] VOLATILE regime: size ×{_vmult:.2f} "
-                                f"({_prev_sz:.4f} → {adjusted_size:.4f})"
-                            )
-                            breached.append("volatile_regime_size_reduction")
-            except Exception as _regime_exc:  # noqa: BLE001
-                self._log.debug("[Batman] Market regime gate skipped: %s", _regime_exc)
+        _gate_5b_result, adjusted_size, adjusted_leverage = self._gate_5b_market_regime(
+            signal=signal, symbol=symbol,
+            adjusted_size=adjusted_size, adjusted_leverage=adjusted_leverage,
+            reasons=reasons, breached=breached,
+        )
+        if _gate_5b_result is not None:
+            return _gate_5b_result
 
         # ---------------------------------------------------------------
-        # 5c. Asset Classifier Gate (Story 149)
-        #
-        # Uses AssetClassifier cap tier to apply per-tier leverage limits:
-        #   SMALL_CAP → settings.small_cap_max_leverage (default 2x)
-        #   MID_CAP   → settings.mid_cap_max_leverage   (default 3x)
-        #   LARGE_CAP → normal _max_lev (no restriction beyond global cap)
-        #
-        # Tier is read from signal.metadata["cap_tier"] (string).
-        # Falls back to AssetClassifier.cap_tier(symbol) when missing.
-        # Fails open when classifier is unavailable.
+        # 5c. Asset Classifier Gate — Story 149 (helper extraído #73)
         # ---------------------------------------------------------------
-        if settings.asset_classifier_gate_enabled:
-            try:
-                _cap_tier_str = (signal.metadata or {}).get("cap_tier", "")
-                if not _cap_tier_str:
-                    # Resolve tier dynamically (stateless — no I/O)
-                    from src.services.asset_classifier import AssetClassifier
-                    _cap_tier_str = AssetClassifier().cap_tier(symbol).value
-                _cap_tier_str = _cap_tier_str.upper()
-                if _cap_tier_str == "SMALL_CAP":
-                    _tier_lev_cap = settings.small_cap_max_leverage
-                elif _cap_tier_str == "MID_CAP":
-                    _tier_lev_cap = settings.mid_cap_max_leverage
-                else:
-                    _tier_lev_cap = _max_lev  # LARGE_CAP — no extra restriction
-                if adjusted_leverage > _tier_lev_cap:
-                    reasons.append(
-                        f"[5c] {_cap_tier_str}: leverage {adjusted_leverage}x → {_tier_lev_cap}x"
-                    )
-                    breached.append(f"{_cap_tier_str.lower()}_max_leverage")
-                    adjusted_leverage = _tier_lev_cap
-            except Exception as _tier_exc:  # noqa: BLE001
-                self._log.debug("[Batman] Asset classifier gate skipped: %s", _tier_exc)
+        adjusted_leverage = self._gate_5c_asset_classifier(
+            signal=signal, symbol=symbol,
+            adjusted_leverage=adjusted_leverage, max_lev=_max_lev,
+            reasons=reasons, breached=breached,
+        )
 
         # ---------------------------------------------------------------
         # 5b. Mainnet first-week HARD CLAMP (real-money safety)
