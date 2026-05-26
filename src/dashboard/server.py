@@ -5458,6 +5458,20 @@ class MekkaDashboardServer:
                 "generated_at": datetime.now(timezone.utc).isoformat(),
             }, status=200)
 
+        # ── Body opcional: operator pode escolher símbolo OU forçar fresh ──
+        _body_symbol: Optional[str] = None
+        _force_fresh: bool = False
+        try:
+            if request.can_read_body:
+                _body = await request.json()
+                if isinstance(_body, dict):
+                    _bs = _body.get("symbol")
+                    if isinstance(_bs, str) and _bs.strip():
+                        _body_symbol = _bs.strip().upper()
+                    _force_fresh = bool(_body.get("force_fresh", False))
+        except Exception:  # noqa: BLE001
+            pass  # corpo inválido — segue com rotação default
+
         generated_at = datetime.now(timezone.utc).isoformat()
 
         # ── Guardrail evaluation ────────────────────────────────────────
@@ -5573,11 +5587,37 @@ class MekkaDashboardServer:
         analysis_age_s: float | None = None
         analysis_was_fresh = False
 
-        # Cache para evitar rerodar agentes em cliques sucessivos (~60s TTL).
+        # ── Seleção de símbolo com diversificação ─────────────────────────
+        # Comportamento:
+        #   1. Se o body trouxe `symbol` válido E ele está na lista permitida,
+        #      usa ele (operator escolhe explicitamente).
+        #   2. Senão, ROTACIONA round-robin entre trading_assets (+ altcoins
+        #      quando altcoins_enabled), evitando o último símbolo retornado.
+        #
+        # Motivo: antes o handler sempre pegava trading_assets[0] (= BTC),
+        # gerando a sensação de que o sistema "só sugere BTC".
+        _base_assets = list(params.get("trading_assets", ["BTC"])) or ["BTC"]
+        _eligible_assets: list[str] = [a.upper() for a in _base_assets]
+        if _altcoins_enabled:
+            for _a in _ALTCOINS:
+                if _a not in _eligible_assets:
+                    _eligible_assets.append(_a)
+
+        if _body_symbol and _body_symbol in _eligible_assets:
+            _target_symbol = _body_symbol
+        else:
+            _rot_idx = int(getattr(self, "_trade_now_rotation_idx", -1)) + 1
+            if _rot_idx >= len(_eligible_assets) or _rot_idx < 0:
+                _rot_idx = 0
+            _target_symbol = _eligible_assets[_rot_idx]
+            self._trade_now_rotation_idx = _rot_idx
+
+        # Cache por SÍMBOLO (não pela concatenação de toda a lista) — TTL 30s.
+        # Operator pode forçar fresh via {"force_fresh": true} no body.
         _tn_cache = getattr(self, "_trade_now_analysis_cache", None) or {}
-        _cache_ttl_s = 60.0
-        _cache_key = "_".join(list(params.get("trading_assets", ["BTC"])))
-        _cache_entry = _tn_cache.get(_cache_key)
+        _cache_ttl_s = 30.0
+        _cache_key = _target_symbol
+        _cache_entry = None if _force_fresh else _tn_cache.get(_cache_key)
         if _cache_entry and (datetime.now(timezone.utc) - _cache_entry["at"]).total_seconds() < _cache_ttl_s:
             row = _cache_entry["signal"]
             analysis_age_s = (datetime.now(timezone.utc) - _cache_entry["at"]).total_seconds()
@@ -5593,7 +5633,6 @@ class MekkaDashboardServer:
                 from src.agents.professor_x import ProfessorX  # noqa: WPS433
                 from src.agents.vision import Vision  # noqa: WPS433
 
-                _target_symbol = list(params.get("trading_assets", ["BTC"]))[0]
                 logger.info(f"[TradeNow] running FRESH analysis for {_target_symbol}")
                 _professor = ProfessorX()
                 _analysis = await asyncio.wait_for(
@@ -5607,8 +5646,8 @@ class MekkaDashboardServer:
                 )
                 row = _signal  # TradingSignal pydantic model
                 analysis_was_fresh = True
-                # Cache for next clicks in this window
-                _tn_cache = {_cache_key: {"signal": row, "at": datetime.now(timezone.utc)}}
+                # Cache por símbolo (preserva entradas anteriores).
+                _tn_cache[_cache_key] = {"signal": row, "at": datetime.now(timezone.utc)}
                 self._trade_now_analysis_cache = _tn_cache
                 logger.info(
                     f"[TradeNow] fresh analysis done: "

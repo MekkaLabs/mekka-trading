@@ -656,9 +656,10 @@ class MarketAnalysis(BaseModel):
         - [C5] Flash momentum signal appears after volatility (intra-session context).
         """
         sections = [
-            "You are Vision, the AI decision-making agent of the Mekka Trading System.",
-            "Below is the consolidated market analysis for a potential trade.",
-            "Your job is to output a structured trading decision.",
+            "Você é o Vision, o agente de IA de decisão do Mekka Trading System.",
+            "Abaixo está a análise consolidada de mercado para um possível trade.",
+            "Sua tarefa é emitir uma decisão de trade estruturada.",
+            "IMPORTANTE: escreva o campo `reasoning` e textos descritivos EM PORTUGUÊS DO BRASIL.",
             "",
         ]
 
@@ -714,20 +715,20 @@ class MarketAnalysis(BaseModel):
 
         sections.extend([
             "",
-            "=== Decision Required ===",
-            "Based on ALL of the above data, provide a trading decision with:",
-            "  - action: LONG, SHORT, or HOLD",
-            "  - confidence: 0.0 to 1.0",
-            "  - entry_price: your suggested entry",
-            "  - stop_loss: where to exit if wrong",
-            "  - take_profit: your primary target",
-            "  - size_pct: position size as fraction of equity (0.01–0.05)",
+            "=== Decisão Necessária ===",
+            "Com base em TODOS os dados acima, forneça uma decisão de trade com:",
+            "  - action: LONG, SHORT ou HOLD",
+            "  - confidence: 0.0 a 1.0",
+            "  - entry_price: sua entrada sugerida",
+            "  - stop_loss: onde sair se estiver errado",
+            "  - take_profit: seu alvo principal",
+            "  - size_pct: tamanho da posição como fração do equity (0.01–0.05)",
             "  - leverage: 1–5x",
-            "  - reasoning: a concise explanation (2-4 sentences)",
-            "  - agent_contributions: which agents influenced this decision most",
+            "  - reasoning: explicação concisa EM PORTUGUÊS (2–4 frases, linguagem clara)",
+            "  - agent_contributions: quais agentes mais influenciaram (descrição EM PORTUGUÊS)",
             "",
-            "Respond ONLY with valid JSON matching the TradingSignal schema.",
-            "If in doubt, output HOLD.",
+            "Responda APENAS com JSON válido conforme o schema TradingSignal.",
+            "Na dúvida, retorne HOLD.",
         ])
 
         return "\n".join(sections)
