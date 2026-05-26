@@ -170,6 +170,7 @@ class Vision(BaseAgent[TradingSignal]):
                 symbol=symbol,
                 price=price,
                 reason="Pre-flight check failed: anomaly or extreme volatility",
+                category="safety_skip",
             )
 
         prompt = analysis.to_prompt()
@@ -548,10 +549,21 @@ class Vision(BaseAgent[TradingSignal]):
             raw = await self._call_llm(prompt)
         except Exception as exc:  # noqa: BLE001
             self._log.error(f"[Vision] LLM error: {exc}")
+            # Distinguish config errors (missing API key) from real LLM
+            # degradation (timeout, rate limit, server 5xx). Only the latter
+            # should engage the kill switch after N in a row.
+            _msg = str(exc).lower()
+            _is_config = (
+                "no llm provider configured" in _msg
+                or "openai_api_key" in _msg
+                or "anthropic_api_key" in _msg
+                or "api key" in _msg and ("missing" in _msg or "not set" in _msg)
+            )
             return self._fallback_hold(
                 symbol=symbol,
                 price=price,
                 reason=f"LLM error: {type(exc).__name__}: {exc}",
+                category="config_error" if _is_config else "llm_degraded",
             )
 
         # Parse and validate
@@ -566,6 +578,7 @@ class Vision(BaseAgent[TradingSignal]):
                 symbol=symbol,
                 price=price,
                 reason=f"Output parse/validate error: {exc}",
+                category="parse_error",
             )
 
         self._log.info(f"[Vision] {signal.summary()}")
@@ -684,6 +697,7 @@ class Vision(BaseAgent[TradingSignal]):
                 symbol=symbol,
                 price=price,
                 reason="Pre-flight failed (revise)",
+                category="safety_skip",
             )
 
         prompt = analysis.to_prompt()
@@ -707,10 +721,18 @@ class Vision(BaseAgent[TradingSignal]):
             raw = await self._call_llm(prompt)
         except Exception as exc:  # noqa: BLE001
             self._log.error(f"[Vision:revise] LLM error: {exc}")
+            _msg = str(exc).lower()
+            _is_config = (
+                "no llm provider configured" in _msg
+                or "openai_api_key" in _msg
+                or "anthropic_api_key" in _msg
+                or "api key" in _msg and ("missing" in _msg or "not set" in _msg)
+            )
             return self._fallback_hold(
                 symbol=symbol,
                 price=price,
                 reason=f"LLM error (revise r{round_num}): {type(exc).__name__}: {exc}",
+                category="config_error" if _is_config else "llm_degraded",
             )
 
         try:
@@ -722,6 +744,7 @@ class Vision(BaseAgent[TradingSignal]):
                 symbol=symbol,
                 price=price,
                 reason=f"Parse error (revise r{round_num}): {exc}",
+                category="parse_error",
             )
 
         # Tag the signal with reflection metadata
@@ -944,13 +967,27 @@ class Vision(BaseAgent[TradingSignal]):
     # Fallback
     # ------------------------------------------------------------------
 
+    # Fallback categories — feed the NickFury safety-net breakers.
+    # Only ``llm_degraded`` and ``parse_error`` count as "Vision degraded"
+    # (i.e. will engage the kill switch after N in a row). The other two
+    # are legitimate safety skips that must NOT auto-engage the kill switch:
+    #   - ``safety_skip``: pre-flight (Spider-Man anomaly, EXTREME volatility)
+    #   - ``config_error``: missing API key / bad credentials (operator fix)
+    FALLBACK_CATEGORIES = ("llm_degraded", "parse_error", "safety_skip", "config_error")
+
     @staticmethod
-    def _fallback_hold(symbol: str, price: float, reason: str) -> TradingSignal:
+    def _fallback_hold(
+        symbol: str,
+        price: float,
+        reason: str,
+        category: str = "llm_degraded",
+    ) -> TradingSignal:
         """
         Return a defensive HOLD signal when anything goes wrong.
 
-        The geometry is fabricated to pass the Pydantic validator while
-        making it crystal-clear to downstream agents that this is a HOLD.
+        ``category`` classifies the failure for the safety-net breaker
+        (see FALLBACK_CATEGORIES). Default is the conservative
+        ``llm_degraded`` so unclassified call-sites still trip the breaker.
         """
         return TradingSignal(
             timestamp=datetime.now(timezone.utc),
@@ -964,5 +1001,10 @@ class Vision(BaseAgent[TradingSignal]):
             leverage=1,
             reasoning=f"FALLBACK HOLD: {reason}",
             agent_contributions={"Vision": "Fallback path — no actionable signal generated"},
-            metadata={"model": settings.openai_model, "fallback": True, "fallback_reason": reason},
+            metadata={
+                "model": settings.openai_model,
+                "fallback": True,
+                "fallback_reason": reason,
+                "fallback_category": category,
+            },
         )

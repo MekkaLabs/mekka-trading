@@ -318,7 +318,8 @@ async def test_nick_fury_vision_fallback_breaker(monkeypatch):
     monkeypatch.setattr("src.agents.nick_fury.MekkaRepository", repo_mock)
 
     def _fallback_signal() -> TradingSignal:
-        # HOLD with fallback metadata flag set
+        # HOLD with fallback metadata flag set — category=llm_degraded
+        # is what actually counts as Vision degradation (see _check_breakers).
         return TradingSignal(
             symbol="BTC",
             action=TradeAction.HOLD,
@@ -329,7 +330,11 @@ async def test_nick_fury_vision_fallback_breaker(monkeypatch):
             size_pct=0.001,
             leverage=1,
             reasoning="fallback",
-            metadata={"fallback": True, "fallback_reason": "test"},
+            metadata={
+                "fallback": True,
+                "fallback_reason": "LLM timeout",
+                "fallback_category": "llm_degraded",
+            },
         )
 
     # Two consecutive fallbacks → trip on second
@@ -379,6 +384,133 @@ async def test_nick_fury_no_breaker_trip_on_clean_cycle(monkeypatch):
     assert fury._exec_error_breaker.streak == 0
     assert fury._vision_fallback_breaker.streak == 0
     assert fury._exec_error_breaker.trip_count == 0
+    assert fury._vision_fallback_breaker.trip_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Vision fallback category gate (bug fix 2026-05-25)
+# ---------------------------------------------------------------------------
+# Only ``llm_degraded`` and ``parse_error`` count as degradation. The other
+# two categories (``safety_skip`` and ``config_error``) are legitimate
+# pauses or operator-fix scenarios that must NOT engage the kill switch
+# automatically. Without this distinction, a fresh boot without LLM keys
+# (or anomaly halts) trips the breaker in ~1min.
+
+
+def _fallback_signal_with_category(category: str) -> TradingSignal:
+    """HOLD signal tagged with a specific fallback_category."""
+    return TradingSignal(
+        symbol="BTC",
+        action=TradeAction.HOLD,
+        confidence=0.0,
+        entry_price=65_000.0,
+        stop_loss=63_000.0,
+        take_profit=67_000.0,
+        size_pct=0.001,
+        leverage=1,
+        reasoning="fallback",
+        metadata={
+            "fallback": True,
+            "fallback_reason": f"test {category}",
+            "fallback_category": category,
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("category", ["safety_skip", "config_error"])
+async def test_nick_fury_safe_categories_do_not_trip_breaker(monkeypatch, category):
+    """
+    safety_skip (anomaly/extreme vol) and config_error (no API key) are
+    pre-flight pauses, NOT LLM degradation — they must NOT advance the
+    streak even after many consecutive observations.
+    """
+    from src.agents.nick_fury import NickFury
+    from src.models.orchestration import CycleReport
+
+    fury = NickFury()
+    fury._vision_fallback_breaker.threshold = 2
+    fury._vision_fallback_breaker.reset()
+
+    repo_mock = MagicMock()
+    repo_mock.log_event = AsyncMock(return_value=1)
+    monkeypatch.setattr("src.agents.nick_fury.MekkaRepository", repo_mock)
+
+    # 5 consecutive — way past threshold — should still NOT trip
+    for _ in range(5):
+        await fury._check_breakers(
+            CycleReport(symbol="BTC", signal=_fallback_signal_with_category(category))
+        )
+
+    assert fury._vision_fallback_breaker.trip_count == 0
+    assert fury._vision_fallback_breaker.streak == 0
+    kill_calls = [
+        c
+        for c in repo_mock.log_event.await_args_list
+        if c.kwargs.get("event") == "RISK_KILL_SWITCH"
+    ]
+    assert len(kill_calls) == 0, (
+        f"Category '{category}' should not engage kill switch, got {len(kill_calls)} calls"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("category", ["llm_degraded", "parse_error"])
+async def test_nick_fury_degraded_categories_trip_breaker(monkeypatch, category):
+    """
+    llm_degraded (timeout/rate-limit/5xx) and parse_error (malformed JSON
+    from the LLM) are real degradation — N in a row engages kill switch.
+    """
+    from src.agents.nick_fury import NickFury
+    from src.models.orchestration import CycleReport
+
+    fury = NickFury()
+    fury._vision_fallback_breaker.threshold = 2
+    fury._vision_fallback_breaker.reset()
+
+    repo_mock = MagicMock()
+    repo_mock.log_event = AsyncMock(return_value=1)
+    monkeypatch.setattr("src.agents.nick_fury.MekkaRepository", repo_mock)
+
+    await fury._check_breakers(
+        CycleReport(symbol="BTC", signal=_fallback_signal_with_category(category))
+    )
+    await fury._check_breakers(
+        CycleReport(symbol="ETH", signal=_fallback_signal_with_category(category))
+    )
+
+    assert fury._vision_fallback_breaker.trip_count == 1, (
+        f"Category '{category}' should trip after threshold"
+    )
+
+
+@pytest.mark.asyncio
+async def test_nick_fury_missing_category_does_not_trip(monkeypatch):
+    """
+    Defensive: signals without ``fallback_category`` (legacy paths) must
+    NOT trip the breaker. Failing closed here would create false positives
+    every time a downstream agent forgets to set the category.
+    """
+    from src.agents.nick_fury import NickFury
+    from src.models.orchestration import CycleReport
+
+    fury = NickFury()
+    fury._vision_fallback_breaker.threshold = 2
+    fury._vision_fallback_breaker.reset()
+
+    repo_mock = MagicMock()
+    repo_mock.log_event = AsyncMock(return_value=1)
+    monkeypatch.setattr("src.agents.nick_fury.MekkaRepository", repo_mock)
+
+    sig = TradingSignal(
+        symbol="BTC", action=TradeAction.HOLD, confidence=0.0,
+        entry_price=65_000.0, stop_loss=63_000.0, take_profit=67_000.0,
+        size_pct=0.001, leverage=1, reasoning="legacy fallback",
+        metadata={"fallback": True, "fallback_reason": "no category set"},
+    )
+    for _ in range(5):
+        await fury._check_breakers(CycleReport(symbol="BTC", signal=sig))
+
     assert fury._vision_fallback_breaker.trip_count == 0
 
 

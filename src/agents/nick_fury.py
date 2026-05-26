@@ -2469,11 +2469,23 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 payload={"breaker": "exec_error", "trips_lifetime": self._exec_error_breaker.trip_count},
             )
 
-        # 2. Vision consecutive HOLD-fallback breaker
+        # 2. Vision consecutive HOLD-fallback breaker.
+        #
+        # Only ``llm_degraded`` and ``parse_error`` count as degradation. The
+        # other two fallback categories must NOT trigger the kill switch:
+        #   - ``safety_skip``  : legitimate pre-flight pause (anomaly/EXTREME vol)
+        #   - ``config_error`` : missing API key → operator fix, not auto-pause
+        #
+        # Without this distinction, a fresh boot without LLM keys (or a calm
+        # market with persistent anomaly halts) auto-engages the kill switch
+        # in ~1min, panicking the operator (observed 2026-05-25 post-restart).
+        _meta = (report.signal.metadata if report.signal is not None else {}) or {}
+        _category = _meta.get("fallback_category")
         is_vision_fallback = (
             report.signal is not None
             and report.signal.action == TradeAction.HOLD
-            and bool((report.signal.metadata or {}).get("fallback", False))
+            and bool(_meta.get("fallback", False))
+            and _category in ("llm_degraded", "parse_error")
         )
         if self._vision_fallback_breaker.observe(is_vision_fallback):
             reason = (
@@ -2487,7 +2499,11 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 severity="ERROR",
                 symbol=report.symbol,
                 message=reason,
-                payload={"breaker": "vision_fallback", "trips_lifetime": self._vision_fallback_breaker.trip_count},
+                payload={
+                    "breaker": "vision_fallback",
+                    "trips_lifetime": self._vision_fallback_breaker.trip_count,
+                    "last_category": _category,
+                },
             )
 
     # ------------------------------------------------------------------

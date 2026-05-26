@@ -2813,9 +2813,36 @@ class MekkaDashboardServer:
         return web.json_response(cfg)
 
     async def _handle_settings_set(self, request: web.Request) -> web.Response:
+        """POST /api/settings — atualiza toggles runtime e (opcional) Modo Global.
+
+        Body: ``{super_aggressive?, altcoins_enabled?, mode?|global_mode?}``
+
+        Campos aceitos:
+          - ``super_aggressive`` (bool): força mínimos no signal
+          - ``altcoins_enabled`` (bool): expande lista de assets
+          - ``mode`` ou ``global_mode`` (str): troca preset do Modo Global
+            (alias de POST /api/mode). Valores: conservative|balanced|aggressive
+
+        Campos não reconhecidos retornam 400 com lista — antes eram
+        silenciosamente ignorados (bug fix 2026-05-25, encontrado quando
+        ``global_mode`` no body parecia trocar o modo mas não trocava).
+        """
         body = await self._safe_json_body(request)
         if not body:
             return web.json_response({"error": "body required"}, status=400)
+
+        KNOWN_FIELDS = {"super_aggressive", "altcoins_enabled", "mode", "global_mode"}
+        unknown = sorted(set(body.keys()) - KNOWN_FIELDS)
+        if unknown:
+            return web.json_response({
+                "error": (
+                    f"Campos não reconhecidos: {unknown}. "
+                    f"Aceitos: {sorted(KNOWN_FIELDS)}. "
+                    f"Para trocar de exchange use POST /api/exchange."
+                ),
+                "unknown_fields": unknown,
+                "accepted_fields": sorted(KNOWN_FIELDS),
+            }, status=400)
 
         cfg = self._load_runtime_settings()
         if "super_aggressive" in body:
@@ -2825,18 +2852,45 @@ class MekkaDashboardServer:
 
         self._save_runtime_settings(cfg)
 
+        # Mode change (delegated to runtime_mode.set_mode — same audit event
+        # as POST /api/mode for trace consistency).
+        mode_changed: Optional[str] = None
+        _mode_in = body.get("mode") or body.get("global_mode")
+        if _mode_in:
+            from src.config.runtime_mode import VALID_MODES, get_params, set_mode
+            _mode_str = str(_mode_in).strip().lower()
+            if _mode_str not in VALID_MODES:
+                return web.json_response({
+                    "error": f"mode inválido '{_mode_str}'. Aceitos: {sorted(VALID_MODES)}",
+                }, status=400)
+            _preset = set_mode(_mode_str)
+            mode_changed = _mode_str
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="MODE_CHANGED",
+                payload={"mode": _mode_str, "preset": _preset, "via": "/api/settings"},
+                severity="INFO",
+            )
+
+        msg_parts = [
+            f"super_aggressive={'ON' if cfg['super_aggressive'] else 'OFF'}",
+            f"altcoins={'ON' if cfg['altcoins_enabled'] else 'OFF'}",
+        ]
+        if mode_changed:
+            msg_parts.append(f"mode={mode_changed}")
         await MekkaRepository.log_event(
             agent="Dashboard",
             event="SETTINGS_CHANGED",
             severity="INFO",
-            message=(
-                f"super_aggressive={'ON' if cfg['super_aggressive'] else 'OFF'} "
-                f"altcoins={'ON' if cfg['altcoins_enabled'] else 'OFF'}"
-            ),
-            payload=cfg,
+            message=" ".join(msg_parts),
+            payload={**cfg, "mode_changed": mode_changed},
         )
 
-        return web.json_response({"status": "ok", "settings": cfg})
+        return web.json_response({
+            "status": "ok",
+            "settings": cfg,
+            "mode_changed": mode_changed,
+        })
 
     # ── Live Price Feed ────────────────────────────────────────────────────
     # The provider implementation lives in `src.services.price_feed` and is
