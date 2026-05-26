@@ -778,12 +778,19 @@ class TelegramAlerter:
             lines.append(str(rationale)[:280])
         lines += [
             "",
-            f"Aprovar: `/aprovar {rid}`   ·   Reprovar: `/reprovar {rid}`",
-            "(ou decida na Central de Melhorias do dashboard)",
+            "Use os botões abaixo ou comandos /aprovar / /reprovar.",
+            "(Também é possível decidir na Central de Melhorias do dashboard.)",
         ]
         text = "\n".join(lines)
+        # Inline keyboard — operador aprova/reprova com 1 clique
+        reply_markup = {
+            "inline_keyboard": [[
+                {"text": "✅ Aprovar", "callback_data": f"improve_approve:{rid}"},
+                {"text": "❌ Reprovar", "callback_data": f"improve_reject:{rid}"},
+            ]]
+        }
         try:
-            return await self._post(text, parse_mode="Markdown")
+            return await self._post(text, parse_mode="Markdown", reply_markup=reply_markup)
         except Exception as exc:  # noqa: BLE001
             self._log.warning(f"improvement_proposed failed (suppressed): {exc}")
             return False
@@ -811,8 +818,18 @@ class TelegramAlerter:
     # HTTP
     # ------------------------------------------------------------------
 
-    async def _post(self, text: str, parse_mode: Optional[str] = None) -> bool:
-        """POST to Telegram sendMessage. Lazy aiohttp import."""
+    async def _post(
+        self,
+        text: str,
+        parse_mode: Optional[str] = None,
+        reply_markup: Optional[dict] = None,
+    ) -> bool:
+        """POST to Telegram sendMessage. Lazy aiohttp import.
+
+        Args:
+          reply_markup: opcional. Quando fornecido, envia inline keyboard
+            (ex.: {"inline_keyboard": [[{"text": "Aprovar", "callback_data": "..."}]]}).
+        """
         import aiohttp  # noqa: WPS433
 
         url = _tg_url(settings.telegram_bot_token)
@@ -824,6 +841,8 @@ class TelegramAlerter:
         }
         if parse_mode:
             body["parse_mode"] = parse_mode
+        if reply_markup:
+            body["reply_markup"] = reply_markup
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=body) as resp:
                 if resp.status == 200:

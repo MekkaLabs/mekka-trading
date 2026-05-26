@@ -1161,6 +1161,12 @@ class TelegramInboundPoller:
             await self._handle_lg_callback(data)
             return
 
+        # ── Improvement council inline buttons ───────────────────────────
+        # callback_data: "improve_approve:<rec_id>" | "improve_reject:<rec_id>"
+        if data.startswith("improve_approve:") or data.startswith("improve_reject:"):
+            await self._handle_improvement_callback(data, cq_chat_id)
+            return
+
         # ── Story 074 — Classic asyncio.Event path ───────────────────────
         action_str, trade_id = data.split(":", 1)
         approved = action_str.strip().lower() == "approve"
@@ -1172,6 +1178,29 @@ class TelegramInboundPoller:
                 self._log.debug("[TradeApproval] trade_id %s not found (expired?)", trade_id)
         except Exception as exc:  # noqa: BLE001
             self._log.warning("[TradeApproval] resolve error: %s", exc)
+
+    async def _handle_improvement_callback(self, data: str, chat_id: str) -> None:
+        """Handle inline keyboard for improvement-council proposals.
+
+        callback_data format:
+          "improve_approve:<rec_id>" → marca como aceita + enfileira brief
+          "improve_reject:<rec_id>"  → marca como rejeitada
+
+        Reaproveita a mesma lógica de _improve_decide para manter UI consistente
+        com os comandos /aprovar e /reprovar.
+        """
+        parts = data.split(":", 1)
+        if len(parts) != 2:
+            return
+        action_prefix, rec_id = parts
+        status = "accepted" if action_prefix == "improve_approve" else "rejected"
+        # Reusa o helper de decisão — já lida com erros e enqueue do brief.
+        reply = await self._improve_decide([rec_id], status)
+        # Resposta concisa ao operador no chat onde ele clicou.
+        try:
+            await self._send(chat_id, reply)
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning("[ImproveCallback] send reply failed: %s", exc)
 
     async def _handle_lg_callback(self, data: str) -> None:
         """
