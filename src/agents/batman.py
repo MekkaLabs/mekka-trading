@@ -142,6 +142,47 @@ class Batman(BaseAgent[RiskApproval]):
             role="Risk Guardian — deterministic validation gate",
         )
 
+    # ------------------------------------------------------------------
+    # Gate helpers (#73 refactor — incremental Extract Method).
+    #
+    # Cada helper extrai UM gate do _run() preservando a lógica BYTE-A-BYTE.
+    # Contract:
+    #   - Recebe state mutável (reasons, breached) — mesma referência do _run
+    #   - Retorna ``RiskApproval`` se o gate REJECT (short-circuit)
+    #   - Retorna ``None`` para continuar o pipeline
+    # Nenhum helper introduz nova lógica de risco — só muda escopo.
+    # Todos são pure-sync exceto onde o gate original era async.
+    # ------------------------------------------------------------------
+
+    def _gate_3m_min_notional(
+        self,
+        signal: TradingSignal,
+        equity_usd: float,
+        symbol: str,
+        reasons: list[str],
+        breached: list[str],
+    ) -> Optional[RiskApproval]:
+        """Gate 3m — Minimum trade notional (Story 096).
+
+        Reject signals that would produce a micro-position smaller than
+        min_trade_notional_usd (fees would exceed potential PnL).
+        """
+        if settings.min_trade_notional_usd > 0 and equity_usd > 0:
+            _planned_notional = equity_usd * signal.size_pct * signal.leverage
+            if _planned_notional < settings.min_trade_notional_usd:
+                reasons.append(
+                    f"[3m] Min notional: planned ${_planned_notional:.2f} < "
+                    f"min ${settings.min_trade_notional_usd:.2f} — micro-position rejected."
+                )
+                breached.append("min_trade_notional_usd")
+                return RiskApproval(
+                    symbol=symbol,
+                    verdict=RiskVerdict.REJECTED,
+                    reasons=reasons,
+                    breached_limits=breached,
+                )
+        return None
+
     async def _run(  # type: ignore[override]
         self,
         signal: TradingSignal,
@@ -858,25 +899,14 @@ class Batman(BaseAgent[RiskApproval]):
                 self._log.debug("[Batman] Max trades/symbol/day gate skipped: %s", _tpsd_exc)
 
         # ---------------------------------------------------------------
-        # 3m. Minimum trade notional — Story 096
-        #
-        # Reject signals that would produce a micro-position smaller than
-        # min_trade_notional_usd (fees would exceed potential PnL).
+        # 3m. Minimum trade notional — Story 096 (helper extraído #73)
         # ---------------------------------------------------------------
-        if settings.min_trade_notional_usd > 0 and equity_usd > 0:
-            _planned_notional = equity_usd * signal.size_pct * signal.leverage
-            if _planned_notional < settings.min_trade_notional_usd:
-                reasons.append(
-                    f"[3m] Min notional: planned ${_planned_notional:.2f} < "
-                    f"min ${settings.min_trade_notional_usd:.2f} — micro-position rejected."
-                )
-                breached.append("min_trade_notional_usd")
-                return RiskApproval(
-                    symbol=symbol,
-                    verdict=RiskVerdict.REJECTED,
-                    reasons=reasons,
-                    breached_limits=breached,
-                )
+        _gate_3m_result = self._gate_3m_min_notional(
+            signal=signal, equity_usd=equity_usd,
+            symbol=symbol, reasons=reasons, breached=breached,
+        )
+        if _gate_3m_result is not None:
+            return _gate_3m_result
 
         # ---------------------------------------------------------------
         # 3n. Max drawdown per symbol per week — Story 100
