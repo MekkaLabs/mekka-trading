@@ -64,3 +64,81 @@ def prompt_version_full(prompt_text: str) -> str:
     """
     normalized = prompt_text.strip()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Prometheus bridge — opt-in, NUNCA bloqueia o trading loop.
+# ---------------------------------------------------------------------------
+#
+# A função abaixo é uma "ponte" para o módulo `src.prompt_engineering`
+# (agente Prometheus). Se o módulo estiver disponível E o catálogo estiver
+# habilitado via `PROMETHEUS_CATALOG_ENABLED=true`, registra o prompt no
+# catálogo persistente. Senão, é no-op silencioso.
+#
+# Garantias:
+# - prompt_version() acima permanece 100% inalterado.
+# - Esta função é OPCIONAL e nunca chamada automaticamente.
+# - Falha em importar/registrar nunca propaga exceção.
+# - Custo zero quando desabilitado (early return).
+
+
+def register_prompt_for_audit(
+    prompt_text: str,
+    *,
+    name: str | None = None,
+    source_hint: str | None = None,
+) -> str:
+    """
+    Registra um prompt para auditoria offline pelo Prometheus.
+
+    Sempre retorna o fingerprint (compatível com prompt_version()).
+    O registro no catálogo é best-effort — falha silencia.
+
+    Parameters
+    ----------
+    prompt_text : str
+        Texto do prompt.
+    name : str, optional
+        Nome canônico no catálogo (ex.: "vision_system_prompt").
+    source_hint : str, optional
+        Caminho relativo do arquivo de origem (ex.: "src/agents/vision.py").
+
+    Returns
+    -------
+    str
+        Fingerprint 16-char hex (mesmo que prompt_version()).
+    """
+    fp = prompt_version(prompt_text)
+
+    # Early return se Prometheus desabilitado — custo zero no trading loop.
+    import os
+    if os.environ.get("PROMETHEUS_CATALOG_ENABLED", "false").lower() not in (
+        "1", "true", "yes", "on"
+    ):
+        return fp
+
+    try:
+        # Import lazy: nunca falha o arquivo se o módulo não existir.
+        from src.prompt_engineering import Prometheus
+        from src.prompt_engineering.models import ExtractedPrompt
+
+        prompt = ExtractedPrompt(
+            source_file=source_hint or "runtime",
+            variable_name=name or "anonymous_prompt",
+            line_number=0,
+            content=prompt_text,
+            fingerprint=fp,
+            detected_role="",
+        )
+        p = Prometheus()
+        sc = p.audit(prompt)
+        p.register(prompt, scorecard=sc, name=name)
+    except Exception as exc:  # noqa: BLE001 — registro nunca pode quebrar trading
+        # Log de DEBUG apenas (loguru não é mandatório aqui)
+        try:
+            from loguru import logger
+            logger.debug(f"[prompt_registry] Prometheus register no-op: {exc}")
+        except ImportError:
+            pass
+
+    return fp
