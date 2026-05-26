@@ -44,6 +44,10 @@ def _isolate_from_db_and_runtime():
         patch("src.persistence.repository.MekkaRepository.list_recent_closed_trades", new_callable=AsyncMock, return_value=[]),
         patch("src.persistence.repository.MekkaRepository.get_symbol_week_pnl", new_callable=AsyncMock, return_value=0.0),
         patch("src.config.runtime_overrides.get_runtime_overrides", return_value={}),
+        # Neutraliza caches globais (funding/MTF/ATR) que poluem batch.
+        patch("src.analytics.funding.get_funding_rate_pct", new_callable=AsyncMock, return_value=0.0),
+        patch("src.analytics.trend.compute_htf_trend", new_callable=AsyncMock, return_value=None),
+        patch("src.analytics.atr.compute_atr_pct", new_callable=AsyncMock, return_value=None),
     ):
         yield
 

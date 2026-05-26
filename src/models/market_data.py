@@ -601,6 +601,17 @@ class MarketAnalysis(BaseModel):
             "+ rsi + timeframe. Auto-computed — do not set manually."
         ),
     )
+    # Fase 2.4 do AGENT-INTEGRATION-PLAN — qualidade da análise.
+    # ProfessorX preenche este dict com sources_count, degraded, missing_sources.
+    # Vision e Batman leem `quality["degraded"]` para aplicar postura conservadora
+    # quando a análise chegou incompleta (Layer 1 com agentes que falharam silenciosamente).
+    quality: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Análise de qualidade preenchida pelo ProfessorX. Chaves: "
+            "sources_count (int 1-7), degraded (bool), missing_sources (list[str])."
+        ),
+    )
 
     @model_validator(mode="after")
     def _compute_snapshot_id(self) -> "MarketAnalysis":

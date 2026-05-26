@@ -559,6 +559,7 @@ class Vision(BaseAgent[TradingSignal]):
             try:
                 payload250 = _structured250.model_dump()
                 signal = self._build_signal(payload250, symbol=symbol, fallback_price=price)
+                signal = self._apply_degraded_quality_clamp(signal, analysis)
                 self._log.info(f"[Vision:250] structured ✓ {signal.summary()}")
                 return signal
             except Exception as _b250_exc:  # noqa: BLE001
@@ -604,7 +605,62 @@ class Vision(BaseAgent[TradingSignal]):
                 category="parse_error",
             )
 
+        signal = self._apply_degraded_quality_clamp(signal, analysis)
         self._log.info(f"[Vision] {signal.summary()}")
+        return signal
+
+    def _apply_degraded_quality_clamp(
+        self,
+        signal: TradingSignal,
+        analysis: MarketAnalysis,
+    ) -> TradingSignal:
+        """
+        Fase 2.4 — Postura conservadora quando análise é degradada.
+
+        Se ProfessorX flaggou `analysis.quality["degraded"]=True` (poucas
+        fontes Layer 1 responderam), aplicamos clamps determinísticos sobre
+        a decisão do LLM:
+
+          - confidence × 0.7 (cap em 0.6) — para reduzir o tamanho de aposta
+          - size_pct × 0.5 — corta posição pela metade
+
+        Cumulativamente isso resulta em ~30% do tamanho original em condições
+        degradadas. Determinístico — não depende do LLM ler a instrução.
+
+        HOLD não sofre clamp (já é "não opera").
+        """
+        try:
+            quality = getattr(analysis, "quality", None) or {}
+            if not quality.get("degraded", False):
+                return signal
+            if signal.action == TradeAction.HOLD:
+                return signal
+
+            _orig_conf = signal.confidence
+            _orig_size = signal.size_pct
+            _new_conf = min(_orig_conf * 0.7, 0.6)
+            _new_size = _orig_size * 0.5
+
+            missing = quality.get("missing_sources") or []
+            _new_meta = dict(signal.metadata or {})
+            _new_meta["quality_degraded"] = True
+            _new_meta["quality_missing"] = missing
+            _new_meta["confidence_pre_clamp"] = round(_orig_conf, 4)
+            _new_meta["size_pct_pre_clamp"] = round(_orig_size, 6)
+
+            signal = signal.model_copy(update={
+                "confidence": round(_new_conf, 4),
+                "size_pct": round(_new_size, 6),
+                "metadata": _new_meta,
+            })
+            self._log.warning(
+                f"[Vision] análise DEGRADADA — clamp aplicado: "
+                f"conf {_orig_conf:.2f}→{_new_conf:.2f}, "
+                f"size {_orig_size:.4f}→{_new_size:.4f} "
+                f"(faltando: {', '.join(missing) if missing else '?'})"
+            )
+        except Exception as _clamp_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision] degraded clamp skipped: {_clamp_exc}")
         return signal
 
     # ------------------------------------------------------------------

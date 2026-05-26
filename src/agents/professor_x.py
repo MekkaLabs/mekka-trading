@@ -132,6 +132,32 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
             self._log.warning(f"[ProfessorX] SpiderMan skipped: {exc}")
             anomaly = None
 
+        # Fase 2.4 — Qualidade mínima da análise.
+        # Mapeia quantas fontes Layer 1 efetivamente respondem (chart é hard-required).
+        # Se chegamos com poucas fontes além de chart, marcamos `degraded=True`
+        # para que Vision/Batman sejam mais conservadores.
+        _sources_present: dict[str, bool] = {
+            "chart": chart is not None,
+            "confirmation_chart": confirmation_chart is not None,
+            "sentiment": sentiment is not None,
+            "onchain": onchain is not None,
+            "volatility": volatility is not None,
+            "liquidity": liquidity is not None,
+            "anomaly": anomaly is not None,
+            "momentum": momentum is not None,
+        }
+        _sources_count = sum(1 for present in _sources_present.values() if present)
+        _missing_sources = [k for k, present in _sources_present.items() if not present]
+        # Degraded: só chart + (no máximo confirmation_chart). Significa que
+        # quase todos os Layer 1 falharam silenciosamente — Vision precisa
+        # ser conservador.
+        _degraded = _sources_count <= 2
+        _quality = {
+            "sources_count": _sources_count,
+            "degraded": _degraded,
+            "missing_sources": _missing_sources,
+        }
+
         analysis = MarketAnalysis(
             chart=chart,
             confirmation_chart=confirmation_chart,  # [C1]
@@ -141,7 +167,15 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
             liquidity=liquidity,
             anomaly=anomaly,
             momentum=momentum,  # [C5]
+            quality=_quality,
         )
+
+        if _degraded:
+            self._log.warning(
+                f"[ProfessorX] {symbol} análise DEGRADADA — apenas {_sources_count}/8 "
+                f"fontes disponíveis. Faltando: {', '.join(_missing_sources)}. "
+                f"Vision aplicará postura conservadora."
+            )
 
         # ── Story 243 — Multiagent Debate (Milestone 39) ──────────────────────
         # Optional: run DebateModerator between L1 agents before handing off to
