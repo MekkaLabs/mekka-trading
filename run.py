@@ -30,6 +30,18 @@ for _k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
     if os.environ.get(_k, None) == "":
         del os.environ[_k]
 
+# Explicit .env load (defensive): pydantic-settings reads ``.env`` only when
+# the cwd matches at import-time and no shell env shadows the keys. Launching
+# under nohup/systemd/cron sometimes loses cwd or inherits placeholder vars,
+# leaving Vision without LLM keys → 5 consecutive HOLD-fallbacks engage the
+# kill switch automatically (observed 2026-05-25 after manual server restart).
+# load_dotenv is idempotent and respects already-set env vars by default.
+try:
+    from dotenv import load_dotenv as _load_dotenv  # python-dotenv
+    _load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=False)
+except ImportError:
+    pass  # python-dotenv optional — pydantic-settings still tries by itself
+
 from loguru import logger
 
 from src.agents.nick_fury import NickFury, run_forever
