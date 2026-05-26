@@ -1,0 +1,102 @@
+name: Obsidian Coverage Audit
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'docs/obsidian/**'
+      - 'docs/stories/**'
+      - 'docs/adr/**'
+      - 'scripts/obsidian_*.py'
+      - '.github/workflows/obsidian-audit.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'docs/obsidian/**'
+      - 'docs/stories/**'
+      - 'docs/adr/**'
+  workflow_dispatch: {}
+
+jobs:
+  audit:
+    name: Audit second-brain coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # O auditor opera contra um vault. No CI usamos docs/obsidian como
+      # proxy do vault — assim a auditoria valida o que está VERSIONADO.
+      # Para auditoria contra o vault canônico real, rode local.
+      - name: Run sync (dry-run) — fonte versionada vs ela mesma
+        run: |
+          python scripts/obsidian_sync.py --vault docs/obsidian
+        # Como source == vault, esperado: NEW=0, CONFLICT=0, todos IDENTICAL.
+        # Falha aqui = bug no script ou inconsistência interna.
+
+      - name: Run coverage audit (JSON)
+        id: audit
+        run: |
+          python scripts/obsidian_coverage_audit.py --vault docs/obsidian --json > audit.json
+          python scripts/obsidian_coverage_audit.py --vault docs/obsidian > audit.txt
+          echo "summary<<EOF" >> $GITHUB_OUTPUT
+          head -20 audit.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Upload audit artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obsidian-audit-${{ github.run_id }}
+          path: |
+            audit.json
+            audit.txt
+          retention-days: 30
+
+      - name: Comment on PR (if PR)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync('audit.json', 'utf8'));
+            const s = report.summary;
+            const total = Object.values(s).reduce((a, b) => a + b, 0);
+            const status = total === 0 ? '✅ vault em dia' : `⚠️ ${total} gaps`;
+            const body = [
+              `## 🧠 Segundo cérebro — auditoria`,
+              ``,
+              `${status} (vs \`docs/obsidian/\` versionado)`,
+              ``,
+              `| Métrica | Gaps |`,
+              `|---|---|`,
+              `| Agentes sem nota | ${s.agents_missing} |`,
+              `| Notas órfãs | ${s.agents_orphan_notes} |`,
+              `| Serviços sem menção | ${s.services_uncovered} |`,
+              `| Modelos sem menção | ${s.models_uncovered} |`,
+              `| Stories sem nota | ${s.stories_missing} |`,
+              `| ADRs sem reflexo | ${s.adrs_missing} |`,
+              `| Daily notes faltantes | ${s.daily_gaps} |`,
+              ``,
+              `Artefato completo: **obsidian-audit-${{ github.run_id }}**`,
+              ``,
+              `_Auditoria informativa — não bloqueia merge._`,
+            ].join('\n');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });

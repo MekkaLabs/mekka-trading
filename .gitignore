@@ -162,6 +162,21 @@ docs/obsidian/.obsidian/workspaces.json
 docs/obsidian/.obsidian/cache/
 docs/obsidian/.trash/
 
+# Configs locais do Obsidian (aparência/grafo/posições) — não versionar.
+# A config canônica (app.json, plugins, daily-notes, templates) SIM é versionada.
+docs/obsidian/.obsidian/appearance.json
+docs/obsidian/.obsidian/graph.json
+
+# Artefatos do sincronizador (scripts/obsidian_sync.py cria backups)
+# Casa .bak-YYYYMMDD-HHMMSS gerados antes de overwrite
+*.bak-*
+
+# Artefatos da auditoria de cobertura (geração local não deve commitar)
+audit.json
+audit.txt
+/audit-*.json
+/audit-*.txt
+
 # =============================================================================
 # Dados de mercado / Backtesting (artefatos pesados)
 # =============================================================================

@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+#
+# pre-commit-obsidian — sugere atualizações no segundo cérebro
+# ============================================================
+#
+# Quando arquivos relevantes do sistema estão staged (src/agents,
+# docs/stories, docs/adr, configs centrais), este hook:
+#
+# 1. Lista quais notas no segundo cérebro provavelmente precisam de
+#    atualização (NÃO altera nada — apenas sugere).
+# 2. Rejeita o commit se houver CONFLICT pendente em docs/obsidian -> vault
+#    (estado inconsistente entre fonte versionada e vault canônico).
+#
+# É um hook SEGURO: não modifica o working tree, não roda sync com --apply,
+# não interrompe commits por mero falta de nota (apenas avisa).
+#
+# Instalação:
+#     scripts/install-git-hooks.sh
+#
+# Bypass:
+#     SKIP_OBSIDIAN_HOOK=1 git commit ...
+#
+# Desativação:
+#     rm .git/hooks/pre-commit
+#
+
+set -u
+
+if [[ "${SKIP_OBSIDIAN_HOOK:-0}" == "1" ]]; then
+    exit 0
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# ---------------------------------------------------------------------------
+# 1) Sugerir notas a atualizar (informativo, sem bloquear)
+# ---------------------------------------------------------------------------
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
+
+if [[ -z "$STAGED" ]]; then
+    exit 0
+fi
+
+SUGGESTIONS=()
+
+while IFS= read -r f; do
+    case "$f" in
+        src/agents/*.py)
+            name=$(basename "$f" .py)
+            SUGGESTIONS+=("  · agente '$name' mudou → revisar 20 - Areas/Agentes IA/${name}.md")
+            ;;
+        docs/adr/ADR-*.md)
+            fname=$(basename "$f" .md)
+            SUGGESTIONS+=("  · ADR $fname mudou → revisar 30 - Resources/Decisoes Tecnicas/")
+            ;;
+        docs/stories/story-*.md)
+            fname=$(basename "$f" .md)
+            SUGGESTIONS+=("  · Story $fname mudou → revisar 10 - Projects/Mekka Trading/06 - Stories and Roadmap/")
+            ;;
+        src/config/settings.py)
+            SUGGESTIONS+=("  · settings.py mudou → revisar Operacional + ADRs sobre safety gates")
+            ;;
+        AGENTS.md|README.md|CLAUDE.md|HANDOFF.md|SECOND_BRAIN.md)
+            SUGGESTIONS+=("  · $f mudou → revisar Home.md + MOCs relevantes")
+            ;;
+        scripts/obsidian_*.py|scripts/install-git-hooks.sh)
+            SUGGESTIONS+=("  · $f mudou → revisar 30 - Resources/Guia de Manutenção do Segundo Cérebro.md")
+            ;;
+    esac
+done <<< "$STAGED"
+
+if [[ ${#SUGGESTIONS[@]} -gt 0 ]]; then
+    echo ""
+    echo "🧠 Segundo cérebro — sugestões de revisão:"
+    printf '%s\n' "${SUGGESTIONS[@]}"
+    echo ""
+    echo "  → não bloqueia o commit. Para auditoria completa:"
+    echo "      python scripts/obsidian_coverage_audit.py"
+    echo ""
+fi
+
+# ---------------------------------------------------------------------------
+# 2) Bloquear se docs/obsidian vs vault tem CONFLICT (inconsistência ativa)
+# ---------------------------------------------------------------------------
+
+# Só roda se commit toca docs/obsidian (evita lentidão em commits de código puro).
+TOUCHES_OBSIDIAN=0
+while IFS= read -r f; do
+    if [[ "$f" == docs/obsidian/* ]]; then
+        TOUCHES_OBSIDIAN=1
+        break
+    fi
+done <<< "$STAGED"
+
+if [[ "$TOUCHES_OBSIDIAN" == "1" ]] && [[ -d "$HOME/Documents/mekka-trading-obsidian" ]]; then
+    SYNC_OUTPUT=$(python3 scripts/obsidian_sync.py 2>&1)
+    SYNC_EXIT=$?
+    if [[ $SYNC_EXIT -ne 0 ]]; then
+        echo ""
+        echo "❌ Commit bloqueado: docs/obsidian diverge do vault canônico."
+        echo ""
+        echo "$SYNC_OUTPUT" | grep -A 100 "CONFLICT (" | head -30
+        echo ""
+        echo "Como resolver:"
+        echo "  - se versão do repo é a boa: python scripts/obsidian_sync.py --apply --update"
+        echo "  - se versão do vault é a boa: copie do vault para docs/obsidian e re-stage"
+        echo "  - para pular este check (não recomendado): SKIP_OBSIDIAN_HOOK=1 git commit ..."
+        exit 1
+    fi
+fi
+
+exit 0
