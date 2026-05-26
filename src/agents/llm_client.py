@@ -127,7 +127,25 @@ class LLMClient:
         if self._has_anthropic:
             logger.debug(f"[LLMClient] Fallback: Anthropic Claude ({self._anthropic_model})")
         if not self._has_openai and not self._has_anthropic:
-            logger.warning("[LLMClient] No LLM provider configured — Vision will HOLD on every call")
+            # Loud, structured diagnostic so the operator immediately knows WHY.
+            # Without this, Vision silently HOLDs every cycle and the kill
+            # switch eventually engages — operator sees only the symptom.
+            diag = []
+            if not _OPENAI_AVAILABLE:
+                diag.append("openai package NOT INSTALLED")
+            elif not bool(self._openai_key):
+                diag.append("OPENAI_API_KEY missing/empty")
+            elif self._openai_key.startswith("sk-your-"):
+                diag.append("OPENAI_API_KEY is a placeholder")
+            if not _ANTHROPIC_AVAILABLE:
+                diag.append("anthropic package NOT INSTALLED")
+            elif not bool(self._anthropic_key):
+                diag.append("ANTHROPIC_API_KEY missing/empty")
+            logger.warning(
+                f"[LLMClient] No LLM provider configured — Vision will HOLD on every call. "
+                f"Diagnosis: {'; '.join(diag) if diag else 'unknown'}. "
+                f"Fix in .env or `pip install -r requirements.txt`."
+            )
 
     @property
     def active_provider(self) -> str:
