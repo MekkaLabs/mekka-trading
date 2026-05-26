@@ -96,6 +96,7 @@ class IronMan(BaseAgent[ExecutionResult]):
         super().__init__(
             codename="IronMan",
             role=f"Execution Engineer ({settings.active_exchange} / {settings.hyperliquid_network})",
+            timeout_s=20.0,  # Order placement na exchange (1-2 round trips)
         )
         self._exchange: Optional[Any] = None  # hyperliquid Exchange instance
         self._info: Optional[Any] = None      # hyperliquid Info instance

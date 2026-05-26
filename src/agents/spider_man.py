@@ -68,7 +68,11 @@ class SpiderMan(BaseAgent[AnomalyReport]):
     """
 
     def __init__(self) -> None:
-        super().__init__("SpiderMan", "Anomaly Detector — market irregularities and divergences")
+        super().__init__(
+            "SpiderMan",
+            "Anomaly Detector — market irregularities and divergences",
+            timeout_s=15.0,  # Computação local sobre candles existentes
+        )
 
     async def _run(  # type: ignore[override]
         self,

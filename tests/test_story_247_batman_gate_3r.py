@@ -72,6 +72,9 @@ class TestBatmanGate3r:
             patch("src.persistence.repository.MekkaRepository.list_recent_closed_trades", new_callable=AsyncMock, return_value=[]),
             patch("src.persistence.repository.MekkaRepository.get_symbol_week_pnl", new_callable=AsyncMock, return_value=0.0),
             patch("src.config.runtime_overrides.get_runtime_overrides", return_value={}),
+            # Neutraliza cache global de funding (gate 3i pode aplicar size
+            # reduction colateral dependendo do estado anterior do cache).
+            patch("src.analytics.funding.get_funding_rate_pct", new_callable=AsyncMock, return_value=0.0),
         ):
             approval = await batman.run(
                 signal=signal,
@@ -107,6 +110,9 @@ class TestBatmanGate3r:
             patch("src.persistence.repository.MekkaRepository.list_recent_closed_trades", new_callable=AsyncMock, return_value=[]),
             patch("src.persistence.repository.MekkaRepository.get_symbol_week_pnl", new_callable=AsyncMock, return_value=0.0),
             patch("src.config.runtime_overrides.get_runtime_overrides", return_value={}),
+            # Neutraliza cache global de funding (gate 3i pode aplicar size
+            # reduction colateral dependendo do estado anterior do cache).
+            patch("src.analytics.funding.get_funding_rate_pct", new_callable=AsyncMock, return_value=0.0),
         ):
             approval = await batman.run(
                 signal=signal,
@@ -138,6 +144,9 @@ class TestBatmanGate3r:
             patch("src.persistence.repository.MekkaRepository.list_recent_closed_trades", new_callable=AsyncMock, return_value=[]),
             patch("src.persistence.repository.MekkaRepository.get_symbol_week_pnl", new_callable=AsyncMock, return_value=0.0),
             patch("src.config.runtime_overrides.get_runtime_overrides", return_value={}),
+            # Neutraliza cache global de funding (gate 3i pode aplicar size
+            # reduction colateral dependendo do estado anterior do cache).
+            patch("src.analytics.funding.get_funding_rate_pct", new_callable=AsyncMock, return_value=0.0),
         ):
             approval = await batman.run(
                 signal=signal,
@@ -166,6 +175,9 @@ class TestBatmanGate3r:
             patch("src.persistence.repository.MekkaRepository.list_recent_closed_trades", new_callable=AsyncMock, return_value=[]),
             patch("src.persistence.repository.MekkaRepository.get_symbol_week_pnl", new_callable=AsyncMock, return_value=0.0),
             patch("src.config.runtime_overrides.get_runtime_overrides", return_value={}),
+            # Neutraliza cache global de funding (gate 3i pode aplicar size
+            # reduction colateral dependendo do estado anterior do cache).
+            patch("src.analytics.funding.get_funding_rate_pct", new_callable=AsyncMock, return_value=0.0),
         ):
             approval = await batman.run(
                 signal=signal,
@@ -195,6 +207,9 @@ class TestBatmanGate3r:
             patch("src.persistence.repository.MekkaRepository.list_recent_closed_trades", new_callable=AsyncMock, return_value=[]),
             patch("src.persistence.repository.MekkaRepository.get_symbol_week_pnl", new_callable=AsyncMock, return_value=0.0),
             patch("src.config.runtime_overrides.get_runtime_overrides", return_value={}),
+            # Neutraliza cache global de funding (gate 3i pode aplicar size
+            # reduction colateral dependendo do estado anterior do cache).
+            patch("src.analytics.funding.get_funding_rate_pct", new_callable=AsyncMock, return_value=0.0),
         ):
             approval = await batman.run(
                 signal=signal,

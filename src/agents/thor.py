@@ -75,7 +75,11 @@ class Thor(BaseAgent[VolatilityData]):
     """
 
     def __init__(self) -> None:
-        super().__init__("Thor", "Volatility Engine — regime classification and position sizing")
+        super().__init__(
+            "Thor",
+            "Volatility Engine — regime classification and position sizing",
+            timeout_s=15.0,  # Cálculos locais sobre candles já fornecidos
+        )
 
     async def _run(  # type: ignore[override]
         self,

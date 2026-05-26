@@ -85,6 +85,7 @@ class VisionCritic(BaseAgent[VisionCritique]):
         super().__init__(
             codename="VisionCritic",
             role=f"Second-look reviewer ({self._llm.active_provider})",
+            timeout_s=30.0,  # LLM call (reflection é mais curta que Vision)
         )
 
     # ------------------------------------------------------------------

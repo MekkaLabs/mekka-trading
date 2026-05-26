@@ -136,6 +136,7 @@ class Superman(BaseAgent[MarketData]):
         super().__init__(
             codename="Superman",
             role="Chief Market Overseer — multi-asset technical analysis",
+            timeout_s=30.0,  # Binance/Hyperliquid candles + TA
         )
         self._exchange: Optional[Any] = None  # CCXT exchange instance, set lazily
         # [C2] Track which exchange is active to pick the right symbol format.

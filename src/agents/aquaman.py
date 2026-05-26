@@ -132,7 +132,11 @@ class Aquaman(BaseAgent[LiquidityData]):
     """
 
     def __init__(self) -> None:
-        super().__init__("Aquaman", "Liquidity Analyst — order book depth and slippage")
+        super().__init__(
+            "Aquaman",
+            "Liquidity Analyst — order book depth and slippage",
+            timeout_s=15.0,  # 1 chamada de L2 book + cálculos locais
+        )
 
     async def _run(self, symbol: str) -> LiquidityData:  # type: ignore[override]
         async with aiohttp.ClientSession() as session:

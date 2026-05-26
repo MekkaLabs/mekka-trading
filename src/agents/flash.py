@@ -89,6 +89,7 @@ class Flash(BaseAgent[MomentumSignal]):
         super().__init__(
             codename="Flash",
             role="Momentum Scalper — intra-candle burst detector",
+            timeout_s=10.0,  # Intra-candle, dados em cache
         )
         # Story 050 — per-symbol result cache: {symbol: (timestamp, MomentumSignal)}
         # Acts as a circuit breaker: if called again within _CACHE_TTL_SECONDS,

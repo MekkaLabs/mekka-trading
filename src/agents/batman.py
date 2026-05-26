@@ -140,6 +140,10 @@ class Batman(BaseAgent[RiskApproval]):
         super().__init__(
             codename="Batman",
             role="Risk Guardian — deterministic validation gate",
+            # Batman roda ~15 gates, alguns async (MTF, funding, ATR) que fazem
+            # network. Cada um fail-open com seu próprio timeout interno
+            # (~5-10s). Worst case empilhado: ~30s. Acima disso é hang real.
+            timeout_s=45.0,
         )
 
     # ------------------------------------------------------------------

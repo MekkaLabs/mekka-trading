@@ -53,6 +53,7 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
         super().__init__(
             codename="ProfessorX",
             role="Swarm Coordinator — parallel analysis-layer orchestration",
+            timeout_s=60.0,  # Coordena vários L1 — soma dos piores casos
         )
         self._superman: Optional[Superman] = None
         self._strange = DoctorStrange()

@@ -111,7 +111,11 @@ class BlackPanther(BaseAgent[OnchainData]):
     """
 
     def __init__(self) -> None:
-        super().__init__("BlackPanther", "Onchain Intelligence — Hyperliquid derivatives data")
+        super().__init__(
+            "BlackPanther",
+            "Onchain Intelligence — Hyperliquid derivatives data",
+            timeout_s=30.0,  # Funding/OI/whale flow API calls
+        )
 
     async def _run(self, symbol: str) -> OnchainData:  # type: ignore[override]
         """

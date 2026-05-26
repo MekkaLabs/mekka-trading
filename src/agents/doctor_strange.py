@@ -100,7 +100,11 @@ class DoctorStrange(BaseAgent[SentimentData]):
     """
 
     def __init__(self) -> None:
-        super().__init__("DoctorStrange", "Macro Probability Analyst")
+        super().__init__(
+            "DoctorStrange",
+            "Macro Probability Analyst",
+            timeout_s=30.0,  # Fear & Greed API + sentiment fetches
+        )
 
     async def _run(self, symbol: str = "BTC") -> SentimentData:  # type: ignore[override]
         async with aiohttp.ClientSession() as session:

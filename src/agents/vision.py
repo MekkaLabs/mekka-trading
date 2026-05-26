@@ -140,6 +140,7 @@ class Vision(BaseAgent[TradingSignal]):
         super().__init__(
             codename="Vision",
             role=f"Predictive Analyst — strategic LLM ({self._llm.active_provider})",
+            timeout_s=45.0,  # LLM call (já tem fallback streak para HOLD)
         )
         # Story 128 — SemanticEpisodicStore injetado pelo LangGraph quando disponível.
         # None = fallback para AgentMemoryStore SQL (Story 063).
