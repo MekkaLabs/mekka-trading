@@ -255,6 +255,232 @@ class Batman(BaseAgent[RiskApproval]):
                 self._log.debug("[Batman] Symbol weekly drawdown gate skipped: %s", _msd_exc)
         return None
 
+    async def _gate_3h_mtf_confluence(
+        self,
+        signal: TradingSignal,
+        symbol: str,
+        reasons: list[str],
+        breached: list[str],
+    ) -> tuple[Optional[RiskApproval], TradingSignal]:
+        """Gate 3h — Multi-Timeframe Confluence (Story 072).
+
+        Checks that the prevailing trend on a higher timeframe (default 4h)
+        agrees with the signal direction before approving entry.
+
+        Rules:
+          - LONG signal + DOWNTREND on HTF → REDUCED (size × 0.6) or REJECTED
+          - SHORT signal + UPTREND on HTF  → REDUCED (size × 0.6) or REJECTED
+          - NEUTRAL HTF  → pass-through (no penalty)
+          - Confirming trend → positive note in reasons
+
+        The hard-reject mode is controlled by settings.mtf_reject_on_opposite.
+        Falls open on any error — never blocks due to infra failure.
+
+        Returns:
+          (RiskApproval or None, possibly-modified signal)
+        """
+        if not settings.mtf_confluence_enabled:
+            return None, signal
+        try:
+            from src.analytics.trend import compute_htf_trend as _htf, HTFTrend as _HTFTrend  # noqa: WPS433
+            _htf_trend = await _htf(
+                symbol=symbol,
+                interval=settings.mtf_interval,
+                lookback=settings.mtf_lookback_candles,
+            )
+            _sig_dir = signal.action.value.lower()  # "long" or "short"
+            _opposing = (
+                (_sig_dir == "long"  and _htf_trend == _HTFTrend.DOWNTREND) or
+                (_sig_dir == "short" and _htf_trend == _HTFTrend.UPTREND)
+            )
+            _confirming = (
+                (_sig_dir == "long"  and _htf_trend == _HTFTrend.UPTREND) or
+                (_sig_dir == "short" and _htf_trend == _HTFTrend.DOWNTREND)
+            )
+
+            if _opposing:
+                if settings.mtf_reject_on_opposite:
+                    reasons.append(
+                        f"MTF Confluence VETO: {_sig_dir.upper()} signal opposes "
+                        f"{settings.mtf_interval} trend ({_htf_trend.value}) — hard reject."
+                    )
+                    breached.append("mtf_confluence_reject")
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        breached_limits=breached,
+                        metadata={"htf_trend": _htf_trend.value, "htf_interval": settings.mtf_interval},
+                    ), signal
+                else:
+                    _mtf_mult = 0.60
+                    _prev_size = signal.size_pct
+                    signal = signal.model_copy(
+                        update={"size_pct": round(signal.size_pct * _mtf_mult, 6)}
+                    )
+                    reasons.append(
+                        f"MTF Confluence WARNING: {_sig_dir.upper()} opposes "
+                        f"{settings.mtf_interval} {_htf_trend.value} → "
+                        f"size ×{_mtf_mult:.0%} ({_prev_size:.4f} → {signal.size_pct:.4f})"
+                    )
+                    breached.append("mtf_confluence_penalty")
+            elif _confirming:
+                reasons.append(
+                    f"MTF Confluence OK: {_sig_dir.upper()} confirmed by "
+                    f"{settings.mtf_interval} {_htf_trend.value}."
+                )
+            else:
+                reasons.append(
+                    f"MTF Confluence NEUTRAL: {settings.mtf_interval} trend is "
+                    f"{_htf_trend.value} — no confluence bonus or penalty."
+                )
+        except Exception as _mtf_exc:  # noqa: BLE001
+            self._log.debug(f"[Batman] MTF confluence gate skipped: {_mtf_exc}")
+        return None, signal
+
+    async def _gate_3i_funding_rate(
+        self,
+        signal: TradingSignal,
+        symbol: str,
+        reasons: list[str],
+        breached: list[str],
+    ) -> tuple[Optional[RiskApproval], TradingSignal]:
+        """Gate 3i — Funding Rate (Story 075).
+
+        Extreme funding rates signal overcrowded positioning that is
+        expensive to hold and prone to violent reversals (long/short squeezes).
+
+        Rules (configurable thresholds):
+          LONG:  rate ≥ block → REJECT; rate ≥ warn → size × 0.60
+          SHORT: rate ≤ block → REJECT; rate ≤ warn → size × 0.60
+
+        Falls open on any network/cache error — never blocks due to infra failure.
+
+        Returns:
+          (RiskApproval or None, possibly-modified signal)
+        """
+        if not settings.funding_gate_enabled:
+            return None, signal
+        try:
+            from src.analytics.funding import get_funding_rate_pct as _get_fr  # noqa: WPS433
+            _fr_pct = await _get_fr(symbol)
+            if _fr_pct is not None:
+                _sig_dir = signal.action.value.lower()
+                _fr_label = f"{_fr_pct:+.5f}%/8h"
+
+                if _sig_dir == "long":
+                    if _fr_pct >= settings.funding_long_block_pct:
+                        reasons.append(
+                            f"Funding Rate VETO: rate {_fr_label} ≥ "
+                            f"block threshold {settings.funding_long_block_pct:+.4f}% "
+                            f"— LONG is extremely expensive, high squeeze risk."
+                        )
+                        breached.append("funding_rate_block")
+                        return RiskApproval(
+                            symbol=symbol,
+                            verdict=RiskVerdict.REJECTED,
+                            reasons=reasons,
+                            breached_limits=breached,
+                            metadata={"funding_rate_pct": _fr_pct},
+                        ), signal
+                    elif _fr_pct >= settings.funding_long_warn_pct:
+                        _fr_mult = 0.60
+                        _prev_fr = signal.size_pct
+                        signal = signal.model_copy(
+                            update={"size_pct": round(signal.size_pct * _fr_mult, 6)}
+                        )
+                        reasons.append(
+                            f"Funding Rate WARNING: rate {_fr_label} elevated for LONG "
+                            f"(≥ warn threshold {settings.funding_long_warn_pct:+.4f}%) "
+                            f"→ size ×{_fr_mult:.0%} ({_prev_fr:.4f} → {signal.size_pct:.4f})"
+                        )
+                        breached.append("funding_rate_penalty")
+                    else:
+                        reasons.append(f"Funding Rate OK: {_fr_label} within normal range for LONG.")
+
+                elif _sig_dir == "short":
+                    if _fr_pct <= settings.funding_short_block_pct:
+                        reasons.append(
+                            f"Funding Rate VETO: rate {_fr_label} ≤ "
+                            f"block threshold {settings.funding_short_block_pct:+.4f}% "
+                            f"— SHORT is extremely expensive, high short-squeeze risk."
+                        )
+                        breached.append("funding_rate_block")
+                        return RiskApproval(
+                            symbol=symbol,
+                            verdict=RiskVerdict.REJECTED,
+                            reasons=reasons,
+                            breached_limits=breached,
+                            metadata={"funding_rate_pct": _fr_pct},
+                        ), signal
+                    elif _fr_pct <= settings.funding_short_warn_pct:
+                        _fr_mult = 0.60
+                        _prev_fr = signal.size_pct
+                        signal = signal.model_copy(
+                            update={"size_pct": round(signal.size_pct * _fr_mult, 6)}
+                        )
+                        reasons.append(
+                            f"Funding Rate WARNING: rate {_fr_label} elevated for SHORT "
+                            f"(≤ warn threshold {settings.funding_short_warn_pct:+.4f}%) "
+                            f"→ size ×{_fr_mult:.0%} ({_prev_fr:.4f} → {signal.size_pct:.4f})"
+                        )
+                        breached.append("funding_rate_penalty")
+                    else:
+                        reasons.append(f"Funding Rate OK: {_fr_label} within normal range for SHORT.")
+        except Exception as _fr_exc:  # noqa: BLE001
+            self._log.debug(f"[Batman] Funding rate gate skipped: {_fr_exc}")
+        return None, signal
+
+    def _gate_3j_trading_hours(
+        self,
+        symbol: str,
+        reasons: list[str],
+        breached: list[str],
+    ) -> Optional[RiskApproval]:
+        """Gate 3j — Trading Hours (Story 076).
+
+        Restricts new entries to a configured UTC hour window to avoid
+        low-liquidity periods (e.g., Asian pre-session 00:00-06:59 UTC).
+
+        Set trading_hours_enabled=True in settings to activate.
+        Default window: 07:00-23:59 UTC (blocks 00:00-06:59 UTC).
+        Does not mutate signal — sync helper.
+        """
+        if not settings.trading_hours_enabled:
+            return None
+        from datetime import datetime, timezone as _tz  # noqa: WPS433
+        _now_h = datetime.now(_tz.utc).hour
+        _start = settings.trading_hours_start_utc
+        _end   = settings.trading_hours_end_utc
+
+        # Handle overnight windows (e.g. start=22, end=6)
+        if _start <= _end:
+            _in_window = _start <= _now_h <= _end
+        else:
+            _in_window = _now_h >= _start or _now_h <= _end
+
+        if not _in_window:
+            _next_open = _start
+            reasons.append(
+                f"Trading Hours Gate: current UTC hour {_now_h:02d}:xx is outside "
+                f"the allowed window {_start:02d}:00-{_end:02d}:59 UTC. "
+                f"Next open: {_next_open:02d}:00 UTC."
+            )
+            breached.append("trading_hours")
+            return RiskApproval(
+                symbol=symbol,
+                verdict=RiskVerdict.REJECTED,
+                reasons=reasons,
+                breached_limits=breached,
+                metadata={"current_hour_utc": _now_h, "window": f"{_start:02d}-{_end:02d}"},
+            )
+        else:
+            reasons.append(
+                f"Trading Hours OK: {_now_h:02d}:xx UTC within window "
+                f"{_start:02d}:00-{_end:02d}:59 UTC."
+            )
+        return None
+
     async def _gate_3o_consecutive_losses(
         self,
         symbol: str,
@@ -791,204 +1017,31 @@ class Batman(BaseAgent[RiskApproval]):
             self._log.debug(f"[Batman] Symbol blacklist gate skipped: {_bl_exc}")
 
         # ---------------------------------------------------------------
-        # 3h. Multi-Timeframe Confluence Gate — Story 072
-        #
-        # Checks that the prevailing trend on a higher timeframe (default 4h)
-        # agrees with the signal direction before approving entry.
-        #
-        # Rules:
-        #   - LONG signal + DOWNTREND on HTF → REDUCED (size × 0.6) or REJECTED
-        #   - SHORT signal + UPTREND on HTF  → REDUCED (size × 0.6) or REJECTED
-        #   - NEUTRAL HTF  → pass-through (no penalty)
-        #   - Confirming trend → positive note in reasons
-        #
-        # The hard-reject mode is controlled by settings.mtf_reject_on_opposite.
-        # Falls open on any error — never blocks due to infra failure.
+        # 3h. MTF Confluence — Story 072 (helper extraído #73)
         # ---------------------------------------------------------------
-        if settings.mtf_confluence_enabled:
-            try:
-                from src.analytics.trend import compute_htf_trend as _htf, HTFTrend as _HTFTrend  # noqa: WPS433
-                _htf_trend = await _htf(
-                    symbol=symbol,
-                    interval=settings.mtf_interval,
-                    lookback=settings.mtf_lookback_candles,
-                )
-                _sig_dir = signal.action.value.lower()  # "long" or "short"
-                _opposing = (
-                    (_sig_dir == "long"  and _htf_trend == _HTFTrend.DOWNTREND) or
-                    (_sig_dir == "short" and _htf_trend == _HTFTrend.UPTREND)
-                )
-                _confirming = (
-                    (_sig_dir == "long"  and _htf_trend == _HTFTrend.UPTREND) or
-                    (_sig_dir == "short" and _htf_trend == _HTFTrend.DOWNTREND)
-                )
-
-                if _opposing:
-                    if settings.mtf_reject_on_opposite:
-                        reasons.append(
-                            f"MTF Confluence VETO: {_sig_dir.upper()} signal opposes "
-                            f"{settings.mtf_interval} trend ({_htf_trend.value}) — hard reject."
-                        )
-                        breached.append("mtf_confluence_reject")
-                        return RiskApproval(
-                            symbol=symbol,
-                            verdict=RiskVerdict.REJECTED,
-                            reasons=reasons,
-                            breached_limits=breached,
-                            metadata={"htf_trend": _htf_trend.value, "htf_interval": settings.mtf_interval},
-                        )
-                    else:
-                        _mtf_mult = 0.60
-                        _prev_size = signal.size_pct
-                        signal = signal.model_copy(
-                            update={"size_pct": round(signal.size_pct * _mtf_mult, 6)}
-                        )
-                        reasons.append(
-                            f"MTF Confluence WARNING: {_sig_dir.upper()} opposes "
-                            f"{settings.mtf_interval} {_htf_trend.value} → "
-                            f"size ×{_mtf_mult:.0%} ({_prev_size:.4f} → {signal.size_pct:.4f})"
-                        )
-                        breached.append("mtf_confluence_penalty")
-                elif _confirming:
-                    reasons.append(
-                        f"MTF Confluence OK: {_sig_dir.upper()} confirmed by "
-                        f"{settings.mtf_interval} {_htf_trend.value}."
-                    )
-                else:
-                    reasons.append(
-                        f"MTF Confluence NEUTRAL: {settings.mtf_interval} trend is "
-                        f"{_htf_trend.value} — no confluence bonus or penalty."
-                    )
-            except Exception as _mtf_exc:  # noqa: BLE001
-                self._log.debug(f"[Batman] MTF confluence gate skipped: {_mtf_exc}")
+        _gate_3h_result, signal = await self._gate_3h_mtf_confluence(
+            signal=signal, symbol=symbol, reasons=reasons, breached=breached,
+        )
+        if _gate_3h_result is not None:
+            return _gate_3h_result
 
         # ---------------------------------------------------------------
-        # 3i. Funding Rate Gate — Story 075
-        #
-        # Extreme funding rates signal overcrowded positioning that is
-        # expensive to hold and prone to violent reversals (long/short squeezes).
-        #
-        # Rules (configurable thresholds):
-        #   LONG signal:
-        #     rate ≥ funding_long_block_pct  → hard REJECT
-        #     rate ≥ funding_long_warn_pct   → REDUCED (size × 0.60)
-        #   SHORT signal:
-        #     rate ≤ funding_short_block_pct → hard REJECT
-        #     rate ≤ funding_short_warn_pct  → REDUCED (size × 0.60)
-        #
-        # Falls open on any network/cache error — never blocks due to infra failure.
+        # 3i. Funding Rate — Story 075 (helper extraído #73)
         # ---------------------------------------------------------------
-        if settings.funding_gate_enabled:
-            try:
-                from src.analytics.funding import get_funding_rate_pct as _get_fr  # noqa: WPS433
-                _fr_pct = await _get_fr(symbol)
-                if _fr_pct is not None:
-                    _sig_dir = signal.action.value.lower()
-                    _fr_label = f"{_fr_pct:+.5f}%/8h"
-
-                    if _sig_dir == "long":
-                        if _fr_pct >= settings.funding_long_block_pct:
-                            reasons.append(
-                                f"Funding Rate VETO: rate {_fr_label} ≥ "
-                                f"block threshold {settings.funding_long_block_pct:+.4f}% "
-                                f"— LONG is extremely expensive, high squeeze risk."
-                            )
-                            breached.append("funding_rate_block")
-                            return RiskApproval(
-                                symbol=symbol,
-                                verdict=RiskVerdict.REJECTED,
-                                reasons=reasons,
-                                breached_limits=breached,
-                                metadata={"funding_rate_pct": _fr_pct},
-                            )
-                        elif _fr_pct >= settings.funding_long_warn_pct:
-                            _fr_mult = 0.60
-                            _prev_fr = signal.size_pct
-                            signal = signal.model_copy(
-                                update={"size_pct": round(signal.size_pct * _fr_mult, 6)}
-                            )
-                            reasons.append(
-                                f"Funding Rate WARNING: rate {_fr_label} elevated for LONG "
-                                f"(≥ warn threshold {settings.funding_long_warn_pct:+.4f}%) "
-                                f"→ size ×{_fr_mult:.0%} ({_prev_fr:.4f} → {signal.size_pct:.4f})"
-                            )
-                            breached.append("funding_rate_penalty")
-                        else:
-                            reasons.append(f"Funding Rate OK: {_fr_label} within normal range for LONG.")
-
-                    elif _sig_dir == "short":
-                        if _fr_pct <= settings.funding_short_block_pct:
-                            reasons.append(
-                                f"Funding Rate VETO: rate {_fr_label} ≤ "
-                                f"block threshold {settings.funding_short_block_pct:+.4f}% "
-                                f"— SHORT is extremely expensive, high short-squeeze risk."
-                            )
-                            breached.append("funding_rate_block")
-                            return RiskApproval(
-                                symbol=symbol,
-                                verdict=RiskVerdict.REJECTED,
-                                reasons=reasons,
-                                breached_limits=breached,
-                                metadata={"funding_rate_pct": _fr_pct},
-                            )
-                        elif _fr_pct <= settings.funding_short_warn_pct:
-                            _fr_mult = 0.60
-                            _prev_fr = signal.size_pct
-                            signal = signal.model_copy(
-                                update={"size_pct": round(signal.size_pct * _fr_mult, 6)}
-                            )
-                            reasons.append(
-                                f"Funding Rate WARNING: rate {_fr_label} elevated for SHORT "
-                                f"(≤ warn threshold {settings.funding_short_warn_pct:+.4f}%) "
-                                f"→ size ×{_fr_mult:.0%} ({_prev_fr:.4f} → {signal.size_pct:.4f})"
-                            )
-                            breached.append("funding_rate_penalty")
-                        else:
-                            reasons.append(f"Funding Rate OK: {_fr_label} within normal range for SHORT.")
-            except Exception as _fr_exc:  # noqa: BLE001
-                self._log.debug(f"[Batman] Funding rate gate skipped: {_fr_exc}")
+        _gate_3i_result, signal = await self._gate_3i_funding_rate(
+            signal=signal, symbol=symbol, reasons=reasons, breached=breached,
+        )
+        if _gate_3i_result is not None:
+            return _gate_3i_result
 
         # ---------------------------------------------------------------
-        # 3j. Trading Hours Gate — Story 076
-        #
-        # Restricts new entries to a configured UTC hour window to avoid
-        # low-liquidity periods (e.g., Asian pre-session 00:00-06:59 UTC).
-        #
-        # Set trading_hours_enabled=True in settings to activate.
-        # Default window: 07:00-23:59 UTC (blocks 00:00-06:59 UTC).
+        # 3j. Trading Hours — Story 076 (helper extraído #73)
         # ---------------------------------------------------------------
-        if settings.trading_hours_enabled:
-            from datetime import datetime, timezone as _tz  # noqa: WPS433
-            _now_h = datetime.now(_tz.utc).hour
-            _start = settings.trading_hours_start_utc
-            _end   = settings.trading_hours_end_utc
-
-            # Handle overnight windows (e.g. start=22, end=6)
-            if _start <= _end:
-                _in_window = _start <= _now_h <= _end
-            else:
-                _in_window = _now_h >= _start or _now_h <= _end
-
-            if not _in_window:
-                _next_open = _start
-                reasons.append(
-                    f"Trading Hours Gate: current UTC hour {_now_h:02d}:xx is outside "
-                    f"the allowed window {_start:02d}:00-{_end:02d}:59 UTC. "
-                    f"Next open: {_next_open:02d}:00 UTC."
-                )
-                breached.append("trading_hours")
-                return RiskApproval(
-                    symbol=symbol,
-                    verdict=RiskVerdict.REJECTED,
-                    reasons=reasons,
-                    breached_limits=breached,
-                    metadata={"current_hour_utc": _now_h, "window": f"{_start:02d}-{_end:02d}"},
-                )
-            else:
-                reasons.append(
-                    f"Trading Hours OK: {_now_h:02d}:xx UTC within window "
-                    f"{_start:02d}:00-{_end:02d}:59 UTC."
-                )
+        _gate_3j_result = self._gate_3j_trading_hours(
+            symbol=symbol, reasons=reasons, breached=breached,
+        )
+        if _gate_3j_result is not None:
+            return _gate_3j_result
 
         # ---------------------------------------------------------------
         # 3l. Max trades per symbol per day — Story 086 (helper extraído #73)
