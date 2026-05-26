@@ -158,6 +158,18 @@ class NickFury(BaseAgent[list[CycleReport]]):
         """Start the persistence layer and emit a boot audit event."""
         await MekkaRepository.initialize()
 
+        # Fase 2.3 — Observabilidade de degradação silenciosa de agentes.
+        # Subscriber escuta agent.error / agent.timeout no event bus e dispara
+        # banner no dashboard + Telegram WARNING quando o mesmo agente acumula
+        # 3 falhas em 5min. Best-effort — não bloqueia boot se falhar.
+        try:
+            from src.services.agent_degradation_detector import (  # noqa: WPS433
+                start_agent_degradation_detector,
+            )
+            start_agent_degradation_detector()
+        except Exception as _dd_exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury] degradation detector skipped: {_dd_exc}")
+
         # Restore peak_equity from DB so a mid-day restart does not hide
         # intra-day drawdown from Batman's daily drawdown guard (Story 057).
         try:
