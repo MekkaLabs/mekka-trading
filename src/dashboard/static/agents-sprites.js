@@ -713,6 +713,57 @@ const AGENTS = [
                a:"#a78bfa", A:"#7c3aed", p:"#5b21b6", P:"#3b0764" },
     overlay: { sprite: "HELMET", palette: { A:"#7c3aed", a:"#a78bfa", e:"#e6ccff" } },
   },
+  {
+    // Mentor — Charles Xavier learning loop (T1 fix, 2026-05-25). Closes
+    // the loop that Beast leaves open: turns audit insights into actionable
+    // parameter suggestions, sent via Telegram. Bald + telepathic aura.
+    // Cobalt suit + gold underlay (mind-power tones). Read-only, L4 council.
+    id: "mentor",
+    name: "Mentor",
+    role: "Learning Loop",
+    layer: "L4",
+    color: "#3b82f6",  // cobalt blue
+    summary: "Turns Beast's findings into concrete parameter suggestions for the operator.",
+    task: "Convertendo insights em sugestões — 2 propostas em revisão",
+    // Bald head + cobalt suit. 'h' is hair color → use skin tone so no hair shows.
+    palette: { k:"#0a1830", h:"#f0c8a0", H:"#d4a880", s:"#f0c8a0", S:"#c89870",
+               e:"#fcd34d", m:"#1e3a8a", c:"#1e3a8a", C:"#0c1f6e",
+               a:"#3b82f6", A:"#1e40af", p:"#1e3a8a", P:"#0c1f6e" },
+    overlay: { sprite: "GLASSES", palette: { A:"#0a1830", a:"#1e3a8a", e:"#fcd34d" } },
+  },
+  {
+    // Ice Man (Bobby Drake) — external-research scanner (2026-05-25).
+    // Looks OUTSIDE the system: market regimes, news, peer strategies.
+    // Cool blue body + frost overlay. Cyan/ice palette, read-only L4.
+    id: "iceman",
+    name: "IceMan",
+    role: "External Research",
+    layer: "L4",
+    color: "#67e8f9",  // ice cyan
+    summary: "Scans market regimes and external research for ideas Beast can't see.",
+    task: "Lendo pesquisas externas — 1 regime change detectado",
+    palette: { k:"#082f49", h:"#67e8f9", H:"#0e7490", s:"#bae6fd", S:"#7dd3fc",
+               e:"#e0f2fe", m:"#0c4a6e", c:"#22d3ee", C:"#0891b2",
+               a:"#67e8f9", A:"#0891b2", p:"#22d3ee", P:"#0e7490" },
+    overlay: { sprite: "VISOR", palette: { A:"#0c4a6e", a:"#22d3ee", e:"#e0f2fe" } },
+  },
+  {
+    // Sage (Tessa) — measurement baselines (Story 251, 2026-05-22).
+    // Mind that works like a computer: keeps baseline metrics so we know
+    // when something drifts. Dark suit + signature glasses. Earth tones
+    // (terracotta + olive) — grounded analyst, opposite of flashy Vision.
+    id: "sage",
+    name: "Sage",
+    role: "Measurement Baselines",
+    layer: "L4",
+    color: "#c2410c",  // earthy terracotta
+    summary: "Keeps the baseline metrics — flags drift before symptoms show.",
+    task: "Comparando métricas com baseline — 0 drifts detectados",
+    palette: { k:"#1c1917", h:"#451a03", H:"#292524", s:"#f3d5a0", S:"#c89870",
+               e:"#1c1917", m:"#44403c", c:"#78350f", C:"#451a03",
+               a:"#c2410c", A:"#7c2d12", p:"#78350f", P:"#451a03" },
+    overlay: { sprite: "GLASSES", palette: { A:"#1c1917", a:"#44403c", e:"#fef3c7" } },
+  },
 ];
 
 // Visor overlay — Cyclops style horizontal red band across eyes
