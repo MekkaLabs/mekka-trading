@@ -431,6 +431,112 @@ class Batman(BaseAgent[RiskApproval]):
             self._log.debug(f"[Batman] Funding rate gate skipped: {_fr_exc}")
         return None, signal
 
+    async def _gate_3p_directional_bias(
+        self,
+        signal: TradingSignal,
+        symbol: str,
+        reasons: list[str],
+        breached: list[str],
+    ) -> Optional[RiskApproval]:
+        """Gate 3p — Directional bias guard (Story 106).
+
+        Reject new entries when the last N completed trades were all in
+        the same direction (all LONG or all SHORT), indicating the
+        model may have a runaway directional bias.
+        Fails open: DB error → gate skipped silently.
+        """
+        if settings.max_same_direction_streak < 99:
+            try:
+                from src.persistence.repository import MekkaRepository as _Repo3p  # noqa: WPS433
+                _dir_trades = await _Repo3p.list_recent_closed_trades(
+                    limit=settings.max_same_direction_streak
+                )
+                if len(_dir_trades) >= settings.max_same_direction_streak:
+                    _sides = [
+                        (getattr(t, "side", "") or "").upper()
+                        for t in _dir_trades[: settings.max_same_direction_streak]
+                    ]
+                    if len(set(_sides)) == 1 and _sides[0] in ("LONG", "SHORT"):
+                        _dom_side = _sides[0]
+                        _new_side = (signal.action.value if hasattr(signal.action, "value") else str(signal.action)).upper()
+                        if _new_side == _dom_side:
+                            reasons.append(
+                                f"[3p] Directional bias: últimos "
+                                f"{settings.max_same_direction_streak} trades todos "
+                                f"{_dom_side} — novo sinal {_new_side} rejeitado."
+                            )
+                            breached.append("max_same_direction_streak")
+                            # Story 112 — audit gate rejection
+                            try:
+                                await _Repo3p.log_event(
+                                    agent="Batman", event="GATE_REJECTED", severity="WARNING",
+                                    symbol=symbol,
+                                    message=reasons[-1],
+                                    payload={"gate_id": "3p", "symbol": symbol,
+                                             "reason": reasons[-1], "breached": list(breached)},
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
+                            return RiskApproval(
+                                symbol=symbol,
+                                verdict=RiskVerdict.REJECTED,
+                                reasons=reasons,
+                                breached_limits=breached,
+                            )
+            except Exception as _db_exc:  # noqa: BLE001
+                self._log.debug("[Batman] Directional bias gate skipped: %s", _db_exc)
+        return None
+
+    async def _gate_3q_min_atr(
+        self,
+        symbol: str,
+        reasons: list[str],
+        breached: list[str],
+    ) -> Optional[RiskApproval]:
+        """Gate 3q — Min ATR filter (Story 110).
+
+        Reject signals when the symbol's ATR% is below min_atr_pct,
+        indicating a paused/quiet market with insufficient volatility.
+        0.0 (default) disables the gate. Fails open on errors.
+        Emits GATE_REJECTED audit (Story 112).
+        """
+        if settings.min_atr_pct > 0.0:
+            try:
+                from src.analytics.atr import compute_atr_pct as _atr3q  # noqa: WPS433
+                _current_atr_3q = await _atr3q(
+                    symbol=symbol,
+                    lookback=settings.atr_lookback_candles,
+                )
+                if _current_atr_3q is not None and _current_atr_3q < settings.min_atr_pct:
+                    reasons.append(
+                        f"[3q] Min ATR: ATR% {_current_atr_3q:.4f} < mínimo "
+                        f"{settings.min_atr_pct:.4f} — mercado parado."
+                    )
+                    breached.append("min_atr_pct")
+                    # Story 112 — audit gate rejection
+                    try:
+                        from src.persistence.repository import MekkaRepository as _Repo3q  # noqa: WPS433
+                        await _Repo3q.log_event(
+                            agent="Batman", event="GATE_REJECTED", severity="WARNING",
+                            symbol=symbol,
+                            message=reasons[-1],
+                            payload={"gate_id": "3q", "symbol": symbol,
+                                     "reason": reasons[-1], "breached": list(breached),
+                                     "atr_pct": round(_current_atr_3q, 6),
+                                     "min_atr_pct": settings.min_atr_pct},
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        breached_limits=breached,
+                    )
+            except Exception as _atr3q_exc:  # noqa: BLE001
+                self._log.debug("[Batman] Min ATR gate skipped: %s", _atr3q_exc)
+        return None
+
     def _gate_3j_trading_hours(
         self,
         symbol: str,
@@ -1081,96 +1187,22 @@ class Batman(BaseAgent[RiskApproval]):
             return _gate_3o_result
 
         # ---------------------------------------------------------------
-        # 3p. Directional bias guard — Story 106
-        #
-        # Reject new entries when the last N completed trades were all in
-        # the same direction (all LONG or all SHORT), indicating the
-        # model may have a runaway directional bias.
-        # Fails open: DB error → gate skipped silently.
+        # 3p. Directional bias — Story 106 (helper extraído #73)
         # ---------------------------------------------------------------
-        if settings.max_same_direction_streak < 99:
-            try:
-                from src.persistence.repository import MekkaRepository as _Repo3p  # noqa: WPS433
-                _dir_trades = await _Repo3p.list_recent_closed_trades(
-                    limit=settings.max_same_direction_streak
-                )
-                if len(_dir_trades) >= settings.max_same_direction_streak:
-                    _sides = [
-                        (getattr(t, "side", "") or "").upper()
-                        for t in _dir_trades[: settings.max_same_direction_streak]
-                    ]
-                    if len(set(_sides)) == 1 and _sides[0] in ("LONG", "SHORT"):
-                        _dom_side = _sides[0]
-                        _new_side = (signal.action.value if hasattr(signal.action, "value") else str(signal.action)).upper()
-                        if _new_side == _dom_side:
-                            reasons.append(
-                                f"[3p] Directional bias: últimos "
-                                f"{settings.max_same_direction_streak} trades todos "
-                                f"{_dom_side} — novo sinal {_new_side} rejeitado."
-                            )
-                            breached.append("max_same_direction_streak")
-                            # Story 112 — audit gate rejection
-                            try:
-                                await _Repo3p.log_event(
-                                    agent="Batman", event="GATE_REJECTED", severity="WARNING",
-                                    symbol=symbol,
-                                    message=reasons[-1],
-                                    payload={"gate_id": "3p", "symbol": symbol,
-                                             "reason": reasons[-1], "breached": list(breached)},
-                                )
-                            except Exception:  # noqa: BLE001
-                                pass
-                            return RiskApproval(
-                                symbol=symbol,
-                                verdict=RiskVerdict.REJECTED,
-                                reasons=reasons,
-                                breached_limits=breached,
-                            )
-            except Exception as _db_exc:  # noqa: BLE001
-                self._log.debug("[Batman] Directional bias gate skipped: %s", _db_exc)
+        _gate_3p_result = await self._gate_3p_directional_bias(
+            signal=signal, symbol=symbol, reasons=reasons, breached=breached,
+        )
+        if _gate_3p_result is not None:
+            return _gate_3p_result
 
         # ---------------------------------------------------------------
-        # 3q. Min ATR filter — Story 110
-        #
-        # Reject signals when the symbol's ATR% is below min_atr_pct,
-        # indicating a paused/quiet market with insufficient volatility.
-        # 0.0 (default) disables the gate. Fails open on errors.
+        # 3q. Min ATR filter — Story 110 (helper extraído #73)
         # ---------------------------------------------------------------
-        if settings.min_atr_pct > 0.0:
-            try:
-                from src.analytics.atr import compute_atr_pct as _atr3q  # noqa: WPS433
-                _current_atr_3q = await _atr3q(
-                    symbol=symbol,
-                    lookback=settings.atr_lookback_candles,
-                )
-                if _current_atr_3q is not None and _current_atr_3q < settings.min_atr_pct:
-                    reasons.append(
-                        f"[3q] Min ATR: ATR% {_current_atr_3q:.4f} < mínimo "
-                        f"{settings.min_atr_pct:.4f} — mercado parado."
-                    )
-                    breached.append("min_atr_pct")
-                    # Story 112 — audit gate rejection
-                    try:
-                        from src.persistence.repository import MekkaRepository as _Repo3q  # noqa: WPS433
-                        await _Repo3q.log_event(
-                            agent="Batman", event="GATE_REJECTED", severity="WARNING",
-                            symbol=symbol,
-                            message=reasons[-1],
-                            payload={"gate_id": "3q", "symbol": symbol,
-                                     "reason": reasons[-1], "breached": list(breached),
-                                     "atr_pct": round(_current_atr_3q, 6),
-                                     "min_atr_pct": settings.min_atr_pct},
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-                    return RiskApproval(
-                        symbol=symbol,
-                        verdict=RiskVerdict.REJECTED,
-                        reasons=reasons,
-                        breached_limits=breached,
-                    )
-            except Exception as _atr3q_exc:  # noqa: BLE001
-                self._log.debug("[Batman] Min ATR gate skipped: %s", _atr3q_exc)
+        _gate_3q_result = await self._gate_3q_min_atr(
+            symbol=symbol, reasons=reasons, breached=breached,
+        )
+        if _gate_3q_result is not None:
+            return _gate_3q_result
 
         # ---------------------------------------------------------------
         # 3r. Flash Momentum Divergence — Story 247
