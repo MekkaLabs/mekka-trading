@@ -6956,38 +6956,55 @@ def _build_global_alerts(
             }
         )
 
-    # Kill-switch + CYCLE_SKIPPED banner: time-windowed, ENGAGED-only.
-    # The on-disk KILL_SWITCH_FILE check above already covers current state.
-    # This block surfaces RECENT activity only (last 10 min), and never raises
-    # an alert for a RELEASE event — those mean the switch is OFF.
+    # Kill-switch + CYCLE_SKIPPED banner: time-windowed, ENGAGED-only,
+    # AND respeita um RELEASE posterior. Bug fix 2026-05-25:
+    #   - Antes: filtro só excluía eventos RELEASED. Se houvesse um
+    #     KILL_SWITCH_ENGAGED ou CYCLE_SKIPPED dentro da janela de 10min,
+    #     o banner surfaceava ele mesmo APÓS um RELEASE posterior — o
+    #     operador via "KILL_SWITCH ATIVO" no banner com o kill switch
+    #     já liberado no disco.
+    #   - Agora: pegamos o evento MAIS RECENTE da família KS no audit_log;
+    #     se for um RELEASED, NÃO mostramos banner. Caso contrário, banner
+    #     mostra o evento ativo mais recente.
     try:
         from datetime import datetime as _dt_ks, timedelta as _td_ks, timezone as _tz_ks
         _now_ks = _dt_ks.now(_tz_ks.utc)
         _window_ks = _td_ks(minutes=10)
-        _is_ks_event = lambda ev: (  # noqa: E731
-            "KILL_SWITCH" in ev and "RELEASED" not in ev
-        ) or "CYCLE_SKIPPED" in ev
-        kill_rows = []
+        _is_engage_event = lambda ev: (  # noqa: E731
+            ("KILL_SWITCH" in ev and "RELEASED" not in ev)
+            or "CYCLE_SKIPPED" in ev
+        )
+        _is_release_event = lambda ev: "KILL_SWITCH_RELEASED" in ev  # noqa: E731
+
+        # Coleta TODOS os eventos KS na janela (engage + release) para
+        # decidir qual é o último estado relevante.
+        ks_rows = []
         for r in audits:
             ev = r.event or ""
-            if not _is_ks_event(ev):
+            if not (_is_engage_event(ev) or _is_release_event(ev)):
                 continue
             ts = r.timestamp
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=_tz_ks.utc)
             if (_now_ks - ts) <= _window_ks:
-                kill_rows.append((ts, r))
-        if kill_rows:
-            kill_rows.sort(key=lambda x: x[0], reverse=True)
-            ts_recent, row = kill_rows[0]
-            alerts.append(
-                {
-                    "code": "KILL_SWITCH_EVENT",
-                    "severity": "CRITICAL",
-                    "message": f"{row.agent} reportou {row.event}",
-                    "timestamp": ts_recent.isoformat(),
-                }
-            )
+                ks_rows.append((ts, r))
+
+        if ks_rows:
+            ks_rows.sort(key=lambda x: x[0], reverse=True)
+            latest_ts, latest_row = ks_rows[0]
+            # Banner aparece SÓ se o evento mais recente é engage/skip E
+            # nenhum RELEASE veio depois. Como já ordenamos desc, basta
+            # checar se o primeiro é engage.
+            if _is_engage_event(latest_row.event or ""):
+                alerts.append(
+                    {
+                        "code": "KILL_SWITCH_EVENT",
+                        "severity": "CRITICAL",
+                        "message": f"{latest_row.agent} reportou {latest_row.event}",
+                        "timestamp": latest_ts.isoformat(),
+                    }
+                )
+            # Se o mais recente é RELEASED → não emite banner; KS está OFF
     except Exception:  # noqa: BLE001
         pass
 
