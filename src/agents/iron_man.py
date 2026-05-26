@@ -310,13 +310,18 @@ class IronMan(BaseAgent[ExecutionResult]):
                     size_pct=size_pct,
                 )
             else:
-                # [Bybit/Binance] CCXT unified execution path
+                # [Bybit/Binance] CCXT unified execution path.
+                # ``force_execute`` (Modo Deus) flows in via approval.metadata
+                # — IronMan honors it by forcing a market order in testnet
+                # so the IOC limit doesn't silently fill 0 (book is thin).
+                _force_execute = bool((approval.metadata or {}).get("force_execute", False))
                 result = await self._place_ccxt_order(
                     signal=signal,
                     quantity=quantity,
                     leverage=leverage,
                     size_pct=size_pct,
                     exchange_id=active,
+                    force_market_in_testnet=_force_execute,
                 )
             self._log.info(result.summary())
             return result
@@ -645,12 +650,21 @@ class IronMan(BaseAgent[ExecutionResult]):
         leverage: int,
         size_pct: float,
         exchange_id: str,
+        force_market_in_testnet: bool = False,
     ) -> ExecutionResult:
         """Place a live order via CCXT unified API (Bybit / Binance perps).
 
         Uses the standard CCXT perp symbol format ``BTC/USDT:USDT`` and
         the create_order unified API. SL/TP are placed as separate reduce-only
         stop orders after the entry fills.
+
+        Args:
+            force_market_in_testnet: when True AND running in testnet, use a
+                market order regardless of ``binance_entry_order_type``. This
+                is the Modo Deus path — testnet books are too thin for a
+                limit-IOC to fill reliably (observed 2026-05-26: IOC filled
+                0 units, Modo Deus appeared broken to the operator).
+                Ignored in mainnet — slippage protection still applies there.
         """
         exchange = await self._get_ccxt_exchange(exchange_id)
         # Normalise the incoming symbol before composing the CCXT format.
@@ -787,6 +801,16 @@ class IronMan(BaseAgent[ExecutionResult]):
             # ticks (no surprise behavior change at go-live).
             _dry_run = bool(getattr(settings, "mainnet_dry_run", False))
             _etype = "market" if (_is_testnet and not _dry_run) else "limit_ioc"
+        # Modo Deus override (force_execute): testnet IOC is unreliable (book
+        # thin, 0 fills). Force a market order so the operator's "execute
+        # anyway" intent actually executes. Mainnet untouched — slippage cap
+        # still active there.
+        if force_market_in_testnet and _is_testnet and _etype != "market":
+            self._log.warning(
+                f"[IronMan/{exchange_id}] Modo Deus + testnet → overriding "
+                f"{_etype} → market to avoid IOC zero-fill (book is thin)"
+            )
+            _etype = "market"
         use_market = _etype == "market"
         self._log.info(f"[IronMan/{exchange_id}] entry order type={_etype} (testnet={_is_testnet})")
 
