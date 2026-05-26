@@ -18,12 +18,34 @@ para _run() async. Mostramos que:
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 import pytest_asyncio
 
 from src.agents.batman import BatmanAgent
 from src.models.risk import RiskVerdict
 from src.models.signal import TradeAction, TradingSignal
+
+
+@pytest.fixture(autouse=True)
+def _isolate_from_db_and_runtime():
+    """
+    Isola o Batman do estado real (DB + runtime overrides) para que os
+    gates 3l/3n/3o/3f/3g/3p/3q e o modo super_aggressive não interfiram
+    nos testes específicos de gates 5b/5c.
+    """
+    with (
+        patch("src.agents.batman.is_kill_switch_active", return_value=False),
+        patch("src.persistence.repository.MekkaRepository.log_event", new_callable=AsyncMock),
+        patch("src.persistence.repository.MekkaRepository.count_trades_today_for_symbol", new_callable=AsyncMock, return_value=0),
+        patch("src.persistence.repository.MekkaRepository.get_last_sl_close_time", new_callable=AsyncMock, return_value=None),
+        patch("src.persistence.repository.MekkaRepository.count_consecutive_sl_hits", new_callable=AsyncMock, return_value=0),
+        patch("src.persistence.repository.MekkaRepository.list_recent_closed_trades", new_callable=AsyncMock, return_value=[]),
+        patch("src.persistence.repository.MekkaRepository.get_symbol_week_pnl", new_callable=AsyncMock, return_value=0.0),
+        patch("src.config.runtime_overrides.get_runtime_overrides", return_value={}),
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------

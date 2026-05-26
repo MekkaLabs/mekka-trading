@@ -35,7 +35,10 @@ class TestBatmanGate3r:
     """
 
     def _make_signal(self, action: str = "LONG", size_pct: float = 0.02):
-        from src.models.signal import TradingSignal, SignalAction
+        # NOTE: importava `SignalAction` que não existe — `TradeAction` é o nome correto.
+        # O construtor aceita a string diretamente (Pydantic faz a coerção), então
+        # nem é preciso importar o enum aqui.
+        from src.models.signal import TradingSignal
         return TradingSignal(
             symbol="BTC",
             action=action,
@@ -62,8 +65,13 @@ class TestBatmanGate3r:
 
         with (
             patch("src.agents.batman.is_kill_switch_active", return_value=False),
-            patch("src.persistence.repository.MekkaRepository.get_open_positions_count", new_callable=AsyncMock, return_value=0),
             patch("src.persistence.repository.MekkaRepository.log_event", new_callable=AsyncMock),
+            patch("src.persistence.repository.MekkaRepository.count_trades_today_for_symbol", new_callable=AsyncMock, return_value=0),
+            patch("src.persistence.repository.MekkaRepository.get_last_sl_close_time", new_callable=AsyncMock, return_value=None),
+            patch("src.persistence.repository.MekkaRepository.count_consecutive_sl_hits", new_callable=AsyncMock, return_value=0),
+            patch("src.persistence.repository.MekkaRepository.list_recent_closed_trades", new_callable=AsyncMock, return_value=[]),
+            patch("src.persistence.repository.MekkaRepository.get_symbol_week_pnl", new_callable=AsyncMock, return_value=0.0),
+            patch("src.config.runtime_overrides.get_runtime_overrides", return_value={}),
         ):
             approval = await batman.run(
                 signal=signal,
@@ -92,8 +100,13 @@ class TestBatmanGate3r:
 
         with (
             patch("src.agents.batman.is_kill_switch_active", return_value=False),
-            patch("src.persistence.repository.MekkaRepository.get_open_positions_count", new_callable=AsyncMock, return_value=0),
             patch("src.persistence.repository.MekkaRepository.log_event", new_callable=AsyncMock),
+            patch("src.persistence.repository.MekkaRepository.count_trades_today_for_symbol", new_callable=AsyncMock, return_value=0),
+            patch("src.persistence.repository.MekkaRepository.get_last_sl_close_time", new_callable=AsyncMock, return_value=None),
+            patch("src.persistence.repository.MekkaRepository.count_consecutive_sl_hits", new_callable=AsyncMock, return_value=0),
+            patch("src.persistence.repository.MekkaRepository.list_recent_closed_trades", new_callable=AsyncMock, return_value=[]),
+            patch("src.persistence.repository.MekkaRepository.get_symbol_week_pnl", new_callable=AsyncMock, return_value=0.0),
+            patch("src.config.runtime_overrides.get_runtime_overrides", return_value={}),
         ):
             approval = await batman.run(
                 signal=signal,
@@ -118,8 +131,13 @@ class TestBatmanGate3r:
 
         with (
             patch("src.agents.batman.is_kill_switch_active", return_value=False),
-            patch("src.persistence.repository.MekkaRepository.get_open_positions_count", new_callable=AsyncMock, return_value=0),
             patch("src.persistence.repository.MekkaRepository.log_event", new_callable=AsyncMock),
+            patch("src.persistence.repository.MekkaRepository.count_trades_today_for_symbol", new_callable=AsyncMock, return_value=0),
+            patch("src.persistence.repository.MekkaRepository.get_last_sl_close_time", new_callable=AsyncMock, return_value=None),
+            patch("src.persistence.repository.MekkaRepository.count_consecutive_sl_hits", new_callable=AsyncMock, return_value=0),
+            patch("src.persistence.repository.MekkaRepository.list_recent_closed_trades", new_callable=AsyncMock, return_value=[]),
+            patch("src.persistence.repository.MekkaRepository.get_symbol_week_pnl", new_callable=AsyncMock, return_value=0.0),
+            patch("src.config.runtime_overrides.get_runtime_overrides", return_value={}),
         ):
             approval = await batman.run(
                 signal=signal,
@@ -141,8 +159,13 @@ class TestBatmanGate3r:
 
         with (
             patch("src.agents.batman.is_kill_switch_active", return_value=False),
-            patch("src.persistence.repository.MekkaRepository.get_open_positions_count", new_callable=AsyncMock, return_value=0),
             patch("src.persistence.repository.MekkaRepository.log_event", new_callable=AsyncMock),
+            patch("src.persistence.repository.MekkaRepository.count_trades_today_for_symbol", new_callable=AsyncMock, return_value=0),
+            patch("src.persistence.repository.MekkaRepository.get_last_sl_close_time", new_callable=AsyncMock, return_value=None),
+            patch("src.persistence.repository.MekkaRepository.count_consecutive_sl_hits", new_callable=AsyncMock, return_value=0),
+            patch("src.persistence.repository.MekkaRepository.list_recent_closed_trades", new_callable=AsyncMock, return_value=[]),
+            patch("src.persistence.repository.MekkaRepository.get_symbol_week_pnl", new_callable=AsyncMock, return_value=0.0),
+            patch("src.config.runtime_overrides.get_runtime_overrides", return_value={}),
         ):
             approval = await batman.run(
                 signal=signal,
@@ -165,8 +188,13 @@ class TestBatmanGate3r:
 
         with (
             patch("src.agents.batman.is_kill_switch_active", return_value=False),
-            patch("src.persistence.repository.MekkaRepository.get_open_positions_count", new_callable=AsyncMock, return_value=0),
             patch("src.persistence.repository.MekkaRepository.log_event", new_callable=AsyncMock),
+            patch("src.persistence.repository.MekkaRepository.count_trades_today_for_symbol", new_callable=AsyncMock, return_value=0),
+            patch("src.persistence.repository.MekkaRepository.get_last_sl_close_time", new_callable=AsyncMock, return_value=None),
+            patch("src.persistence.repository.MekkaRepository.count_consecutive_sl_hits", new_callable=AsyncMock, return_value=0),
+            patch("src.persistence.repository.MekkaRepository.list_recent_closed_trades", new_callable=AsyncMock, return_value=[]),
+            patch("src.persistence.repository.MekkaRepository.get_symbol_week_pnl", new_callable=AsyncMock, return_value=0.0),
+            patch("src.config.runtime_overrides.get_runtime_overrides", return_value={}),
         ):
             approval = await batman.run(
                 signal=signal,

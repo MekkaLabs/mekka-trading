@@ -342,15 +342,38 @@ async def test_batman_rejects_on_trades_today_cap():
     assert "max_trades_per_day" in approval.breached_limits
 
 
+@pytest.fixture
+def _batman_db_isolated():
+    """
+    Isola Batman dos gates async que batem em DB/exchange real e dos modos
+    runtime (conservative/balanced/aggressive + super_aggressive overrides).
+    Força o modo "balanced" — que tem max_pos=2%, max_lev=5x — para que os
+    testes que esperam REDUCED em 5%/10x → 2%/5x funcionem deterministicamente.
+    """
+    from src.config.runtime_mode import PRESETS
+    balanced_params = PRESETS.get("balanced", {})
+    with (
+        patch("src.persistence.repository.MekkaRepository.log_event", new_callable=AsyncMock),
+        patch("src.persistence.repository.MekkaRepository.count_trades_today_for_symbol", new_callable=AsyncMock, return_value=0),
+        patch("src.persistence.repository.MekkaRepository.get_last_sl_close_time", new_callable=AsyncMock, return_value=None),
+        patch("src.persistence.repository.MekkaRepository.count_consecutive_sl_hits", new_callable=AsyncMock, return_value=0),
+        patch("src.persistence.repository.MekkaRepository.list_recent_closed_trades", new_callable=AsyncMock, return_value=[]),
+        patch("src.persistence.repository.MekkaRepository.get_symbol_week_pnl", new_callable=AsyncMock, return_value=0.0),
+        patch("src.config.runtime_overrides.get_runtime_overrides", return_value={}),
+        patch("src.config.runtime_mode.get_params", return_value=balanced_params),
+    ):
+        yield
+
+
 @pytest.mark.asyncio
-async def test_batman_rejects_low_confidence():
+async def test_batman_rejects_low_confidence(_batman_db_isolated):
     approval = await Batman().run(signal=_good_signal(confidence=0.40))
     assert approval.verdict == RiskVerdict.REJECTED
     assert "min_confidence_threshold" in approval.breached_limits
 
 
 @pytest.mark.asyncio
-async def test_batman_rejects_low_rr():
+async def test_batman_rejects_low_rr(_batman_db_isolated):
     # tight TP makes R:R < 1.5
     bad = _good_signal(stop_loss=63_000.0, take_profit=65_500.0)
     approval = await Batman().run(signal=bad)
@@ -359,7 +382,7 @@ async def test_batman_rejects_low_rr():
 
 
 @pytest.mark.asyncio
-async def test_batman_caps_oversized_signal():
+async def test_batman_caps_oversized_signal(_batman_db_isolated):
     """Signal asks 5% size, 10x leverage → capped to 2% / 5x → REDUCED."""
     big = _good_signal(size_pct=0.05, leverage=10)
     approval = await Batman().run(signal=big)
@@ -372,7 +395,7 @@ async def test_batman_caps_oversized_signal():
 
 
 @pytest.mark.asyncio
-async def test_batman_applies_thor_volatility_multiplier():
+async def test_batman_applies_thor_volatility_multiplier(_batman_db_isolated):
     """High-vol regime → 0.6x multiplier applied → REDUCED."""
     vol = VolatilityData(
         symbol="BTC",
@@ -387,7 +410,7 @@ async def test_batman_applies_thor_volatility_multiplier():
 
 
 @pytest.mark.asyncio
-async def test_batman_approves_clean_signal():
+async def test_batman_approves_clean_signal(_batman_db_isolated):
     """All checks pass → APPROVED with original parameters."""
     approval = await Batman().run(signal=_good_signal())
     assert approval.verdict == RiskVerdict.APPROVED

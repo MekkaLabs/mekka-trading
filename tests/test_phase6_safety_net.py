@@ -17,7 +17,7 @@ Run: pytest tests/test_phase6_safety_net.py -v
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -25,6 +25,31 @@ from src.agents.batman import Batman
 from src.models.risk import RiskApproval, RiskVerdict
 from src.models.signal import TradeAction, TradingSignal
 from src.services.breakers import ConsecutiveBreaker
+
+
+@pytest.fixture
+def isolate_batman_from_db():
+    """
+    Isola Batman dos gates async/I/O que batem em DB ou rede real, para
+    que os testes de gates específicos (capital cap) não sejam rejeitados
+    por gates colaterais (max_trades, weekly drawdown, blacklist, cooldown,
+    Super Agressivo do runtime).
+
+    Use apenas nos testes que esperam APPROVED — testes que esperam
+    rejeições específicas pelo gate sob teste podem usar essa fixture
+    também, desde que os mocks não escondam a rejeição alvo.
+    """
+    with (
+        patch("src.agents.batman.is_kill_switch_active", return_value=False),
+        patch("src.persistence.repository.MekkaRepository.log_event", new_callable=AsyncMock),
+        patch("src.persistence.repository.MekkaRepository.count_trades_today_for_symbol", new_callable=AsyncMock, return_value=0),
+        patch("src.persistence.repository.MekkaRepository.get_last_sl_close_time", new_callable=AsyncMock, return_value=None),
+        patch("src.persistence.repository.MekkaRepository.count_consecutive_sl_hits", new_callable=AsyncMock, return_value=0),
+        patch("src.persistence.repository.MekkaRepository.list_recent_closed_trades", new_callable=AsyncMock, return_value=[]),
+        patch("src.persistence.repository.MekkaRepository.get_symbol_week_pnl", new_callable=AsyncMock, return_value=0.0),
+        patch("src.config.runtime_overrides.get_runtime_overrides", return_value={}),
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +145,7 @@ def test_breaker_summary_format():
 
 
 @pytest.mark.asyncio
-async def test_batman_skips_cap_when_equity_zero():
+async def test_batman_skips_cap_when_equity_zero(isolate_batman_from_db):
     """When equity_usd=0 (legacy callers), the cap section is not evaluated."""
     approval = await Batman().run(signal=_good_signal())
     # No equity passed → cap skipped, signal goes through (clean APPROVED)
@@ -143,7 +168,7 @@ async def test_batman_cap_pct_blocks_when_running_plus_new_exceeds():
 
 
 @pytest.mark.asyncio
-async def test_batman_cap_pct_allows_when_within_limit():
+async def test_batman_cap_pct_allows_when_within_limit(isolate_batman_from_db):
     """Running $0 + new $6k <= 10% of $100k = $10k → APPROVED."""
     approval = await Batman().run(
         signal=_good_signal(),
@@ -618,11 +643,24 @@ async def test_nick_fury_running_notional_starts_from_snapshot_positions(monkeyp
     repo_mock.count_trades_today = AsyncMock(return_value=0)
     monkeypatch.setattr("src.agents.nick_fury.MekkaRepository", repo_mock)
 
-    real_settings.__dict__["trading_assets"] = ["BTC"]
-    try:
+    # Pydantic v2: usar monkeypatch.setattr, não atribuir ao __dict__.
+    # Isso restringe o cycle a apenas BTC (sem altcoins/Super Agressivo do runtime).
+    monkeypatch.setattr(real_settings, "trading_assets", ["BTC"])
+    monkeypatch.setattr(
+        "src.config.runtime_overrides.get_runtime_overrides",
+        lambda: {},  # neutraliza Super Agressivo / altcoins do runtime
+    )
+
+    # Mocks para Batman gates async não baterem em DB/exchange real.
+    with (
+        patch("src.persistence.repository.MekkaRepository.log_event", new_callable=AsyncMock),
+        patch("src.persistence.repository.MekkaRepository.count_trades_today_for_symbol", new_callable=AsyncMock, return_value=0),
+        patch("src.persistence.repository.MekkaRepository.get_last_sl_close_time", new_callable=AsyncMock, return_value=None),
+        patch("src.persistence.repository.MekkaRepository.count_consecutive_sl_hits", new_callable=AsyncMock, return_value=0),
+        patch("src.persistence.repository.MekkaRepository.list_recent_closed_trades", new_callable=AsyncMock, return_value=[]),
+        patch("src.persistence.repository.MekkaRepository.get_symbol_week_pnl", new_callable=AsyncMock, return_value=0.0),
+    ):
         await fury.run_main_cycle()
-    finally:
-        real_settings.__dict__.pop("trading_assets", None)
 
     assert len(captured) == 1
     assert captured[0]["running_notional_usd"] == pytest.approx(expected_initial_running, rel=1e-9)
