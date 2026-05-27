@@ -3,7 +3,7 @@ rec_id: "4f32cc28e7bf"
 type: implementation-recipe
 area: risk
 impact: HIGH
-generated_at: 2026-05-27T18:41:06
+generated_at: 2026-05-27T19:04:11
 auto_generated: true
 ---
 

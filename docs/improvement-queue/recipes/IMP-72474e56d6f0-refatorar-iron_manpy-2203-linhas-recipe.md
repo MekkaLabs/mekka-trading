@@ -3,7 +3,7 @@ rec_id: "72474e56d6f0"
 type: implementation-recipe
 area: agents
 impact: MEDIUM
-generated_at: 2026-05-27T18:41:06
+generated_at: 2026-05-27T19:04:11
 auto_generated: true
 ---
 

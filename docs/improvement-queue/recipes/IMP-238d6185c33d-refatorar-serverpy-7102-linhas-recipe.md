@@ -3,7 +3,7 @@ rec_id: "238d6185c33d"
 type: implementation-recipe
 area: backend
 impact: HIGH
-generated_at: 2026-05-27T18:41:06
+generated_at: 2026-05-27T19:04:11
 auto_generated: true
 ---
 

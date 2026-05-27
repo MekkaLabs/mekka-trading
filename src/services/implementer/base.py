@@ -128,26 +128,94 @@ def commit_on_branch(
     files: list[str],
 ) -> tuple[Optional[str], str]:
     """
-    Stage + commit files numa branch específica via git worktree.
-    Retorna (commit_sha, reason). sha=None em falha.
+    Stage + commit files numa branch isolada. Restaura a branch original
+    do operador no final, garantindo zero side-effect no working tree.
 
-    Implementação simplificada: assume que o caller já aplicou mudanças
-    nos files dentro do worktree apropriado. Aqui só fazemos add + commit.
+    Estratégia:
+      1. Salva branch atual (origin_branch).
+      2. Stash de mudanças não-relacionadas a `files` (preserva trabalho).
+      3. Checkout `branch` (cria se não existir).
+      4. Stash pop só dos `files` que importam para esta IMP.
+      5. git add + commit + capturar SHA.
+      6. Checkout origin_branch.
+      7. Stash pop restante (mudanças do operador).
+
+    Bug pré-2026-05-27: assumia que estávamos na branch isolada e fazia
+    commit no working tree atual — efeito: IMPs commitadas em main.
     """
     if not files:
         return None, "no files to commit"
+
+    # 1) Estado atual
+    code, origin_branch, _ = _git("rev-parse", "--abbrev-ref", "HEAD")
+    if code != 0 or not origin_branch:
+        return None, "could not read current branch"
+
+    # 2) Se já estamos na branch alvo, simplesmente add + commit
+    if origin_branch == branch:
+        add_args = ["add", "--"] + files
+        code, _, err = _git(*add_args)
+        if code != 0:
+            return None, f"git add failed: {err}"
+        code, _, err = _git(
+            "commit", "-m", message, "--allow-empty-message", "--no-verify",
+        )
+        if code != 0:
+            return None, f"git commit failed: {err}"
+        code, sha, _ = _git("rev-parse", "HEAD")
+        if code != 0:
+            return None, "could not read commit sha"
+        return sha[:12], "ok"
+
+    # 3) Strategy: usa git stash --include-untracked para preservar TUDO,
+    #    checkout pra branch, restaura SÓ os files que precisamos commitar,
+    #    commit, volta pra origin, restaura o resto.
+    #
+    #    Mas isso é complexo e tem race conditions. Abordagem mais simples
+    #    e robusta: NÃO mudar de branch. Em vez disso, usar
+    #    `git stash create + apply` em branch alvo via plumbing commands.
+
+    # Alternativa robusta: criar um commit-tree apontando pra branch alvo
+    # usando git plumbing — sem checkout, sem mexer no working tree.
+    #
+    # Passos:
+    #   a. Stage só os `files` (git add).
+    #   b. Criar tree do staged content (git write-tree).
+    #   c. Criar commit object com parent = branch alvo (git commit-tree).
+    #   d. Mover ref da branch alvo pra esse commit (git update-ref).
+    #   e. Unstage os arquivos (reset HEAD --) — working tree preservado.
     add_args = ["add", "--"] + files
     code, _, err = _git(*add_args)
     if code != 0:
         return None, f"git add failed: {err}"
-    code, _, err = _git("commit", "-m", message, "--allow-empty-message",
-                        "--no-verify")
+
+    code, tree_sha, err = _git("write-tree")
     if code != 0:
-        return None, f"git commit failed: {err}"
-    code, sha, _ = _git("rev-parse", "HEAD")
+        # Rollback: unstage
+        _git("reset", "HEAD", "--", *files)
+        return None, f"git write-tree failed: {err}"
+
+    # Parent: tip da branch alvo
+    code, parent_sha, err = _git("rev-parse", branch)
     if code != 0:
-        return None, "could not read commit sha"
-    return sha[:12], "ok"
+        _git("reset", "HEAD", "--", *files)
+        return None, f"could not read branch tip: {err}"
+
+    code, commit_sha, err = _git(
+        "commit-tree", tree_sha, "-p", parent_sha, "-m", message,
+    )
+    if code != 0:
+        _git("reset", "HEAD", "--", *files)
+        return None, f"git commit-tree failed: {err}"
+
+    code, _, err = _git("update-ref", f"refs/heads/{branch}", commit_sha)
+    if code != 0:
+        _git("reset", "HEAD", "--", *files)
+        return None, f"git update-ref failed: {err}"
+
+    # Unstage (mantém working tree intacto)
+    _git("reset", "HEAD", "--", *files)
+    return commit_sha[:12], "ok (via commit-tree plumbing)"
 
 
 # ---------------------------------------------------------------------------

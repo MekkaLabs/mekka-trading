@@ -51,21 +51,26 @@ class _Pattern:
 
 
 def _pat_add_test_stub(title: str, description: str, area: str) -> _Pattern:
-    """Detecta IMPs do tipo 'X agentes/services sem teste'."""
-    matches = re.search(
-        r"(\d+)\s+(?:agentes|services|files)\s+sem\s+test",
-        title + " " + description,
-        re.IGNORECASE,
-    )
-    if not matches:
+    """Detecta IMPs do tipo 'X agentes/services sem teste'.
+
+    Aceita variações: "sem teste", "sem `tests/test_*.py`", "sem cobertura
+    de teste", "não têm arquivo de teste".
+    """
+    blob = title + " " + description
+    if not re.search(
+        r"(\d+)\s+(?:agentes|services|files|arquivos)\s+(?:sem|n[ãa]o\s+t[êe]m)\s+(?:test|cobertura|arquivo\s+de\s+test)",
+        blob, re.IGNORECASE,
+    ):
         return _Pattern("add_test_stub", False, {})
-    # Extrair lista de candidatos do description (best-effort)
+    # Extrair candidatos: filename em backticks (.py opcional, hifens OK)
     files = re.findall(r"`([a-z_][\w-]*?)(?:\.py)?`", description)
+    # Sanitiza: remove paths como tests/test_*.py
+    files = [f for f in files if not f.startswith("test") and "/" not in f and "*" not in f]
     if not files:
         return _Pattern("add_test_stub", False, {})
     return _Pattern(
         "add_test_stub", True,
-        {"area": area, "candidates": files[:5]},  # cap 5
+        {"area": area, "candidates": files[:5]},
     )
 
 
