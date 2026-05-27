@@ -213,8 +213,25 @@ def commit_on_branch(
         _git("reset", "HEAD", "--", *files)
         return None, f"git update-ref failed: {err}"
 
-    # Unstage (mantém working tree intacto)
+    # Unstage + remover os arquivos do working tree (eles agora vivem na
+    # branch imp/IMP-xxx isolada). Sem isto, os files ficariam "vazando"
+    # no working tree do operador como untracked — confuso.
     _git("reset", "HEAD", "--", *files)
+    # Para cada file: se não existe no parent (origin branch), DELETAR
+    # do working tree (era arquivo novo). Se existe, restaurar do parent.
+    for f in files:
+        file_existed = (
+            _git("cat-file", "-e", f"{origin_branch}:{f}")[0] == 0
+        )
+        if file_existed:
+            # Restaurar conteúdo do origin (estado pré-mudança)
+            _git("checkout", origin_branch, "--", f)
+        else:
+            # Arquivo novo — remover do working tree
+            try:
+                (Path(_REPO) / f).unlink()
+            except OSError:
+                pass
     return commit_sha[:12], "ok (via commit-tree plumbing)"
 
 
