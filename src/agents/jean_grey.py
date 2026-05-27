@@ -44,9 +44,31 @@ from src.agents.base import BaseAgent
 # Constants
 # ---------------------------------------------------------------------------
 
-# Default vault location relative to the repo root. Resolved lazily so the
-# agent works regardless of the process CWD.
-_DEFAULT_VAULT = Path(__file__).resolve().parents[2] / "docs" / "obsidian"
+# Default vault location.
+#
+# Canonical vault is the operator's working Obsidian vault — that's where the
+# operator edits daily and where the second-brain LIVES. The repo's
+# `docs/obsidian/` is a versioned SUBSET (curated promotions), not the source
+# of truth — see `30 - Resources/Fontes de Verdade.md` in the canonical vault.
+#
+# Resolution order:
+#   1. MEKKA_VAULT_PATH env var (operator override)
+#   2. ~/Documents/mekka-trading-obsidian/  (canonical)
+#   3. <repo>/docs/obsidian/                (legacy fallback if canonical missing)
+#
+# Pre-2026-05-27: defaulted to docs/obsidian/ and the neural-graph endpoint
+# rendered only 105 of the 170 actual notes, missing the operator's daily work.
+import os as _os
+def _resolve_default_vault() -> Path:
+    override = _os.environ.get("MEKKA_VAULT_PATH")
+    if override:
+        return Path(override).expanduser()
+    canonical = Path.home() / "Documents" / "mekka-trading-obsidian"
+    if canonical.exists():
+        return canonical
+    return Path(__file__).resolve().parents[2] / "docs" / "obsidian"
+
+_DEFAULT_VAULT = _resolve_default_vault()
 
 # Wikilink syntax: [[Target]], [[Target|alias]], [[Target#heading]],
 # [[folder/Target]]. We capture the raw inner text and normalize later.
