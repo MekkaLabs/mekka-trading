@@ -557,6 +557,11 @@ class MekkaDashboardServer:
     def _register_improvement_routes(self, r) -> None:
         r.add_get("/api/jean/health-report", self._handle_jean_health_report)
         r.add_get("/api/jean/graph", self._handle_jean_graph)
+        r.add_get("/api/second-brain/activity", self._handle_second_brain_activity)
+        r.add_get("/api/cable/snapshot", self._handle_cable_snapshot)
+        r.add_get("/api/memory/snapshot", self._handle_memory_snapshot)
+        r.add_get("/api/improvements/queued", self._handle_improvements_queued)
+        r.add_post("/api/improvements/reconcile-manual", self._handle_improvements_reconcile_manual)
         r.add_get("/api/improvements", self._handle_improvements_get)
         r.add_post("/api/improvements/decision", self._handle_improvements_decision)
         r.add_get("/api/improvements/pr-status", self._handle_improvements_pr_status)
@@ -565,6 +570,9 @@ class MekkaDashboardServer:
         r.add_get("/api/improvements/kpi", self._handle_improvements_kpi)
         r.add_get("/api/improvements/decision-history", self._handle_improvements_history)
         r.add_get("/api/mentor/suggestions", self._handle_mentor_suggestions)
+        # Implementer Squad — status do squad de implementação automática
+        r.add_get("/api/implementer/status", self._handle_implementer_status)
+        r.add_post("/api/implementer/run-once", self._handle_implementer_run_once)
 
     def _register_backtest_debate_routes(self, r) -> None:
         r.add_post("/api/backtest/run", self._handle_backtest_run)
@@ -6752,6 +6760,42 @@ class MekkaDashboardServer:
                 status=200,
             )
 
+    async def _handle_second_brain_activity(self, request: web.Request) -> web.Response:
+        """GET /api/second-brain/activity — atividade recente do segundo cérebro.
+
+        Delegado a src/dashboard/handlers/second_brain_activity.py. Mostra
+        arquivos atualizados no vault, observações/aprendizados do Prometheus
+        (se ativo) e estado do sincronizador docs/obsidian → vault.
+        Read-only, fail-soft, cache 10s.
+        """
+        from src.dashboard.handlers.second_brain_activity import handle_get
+        return await handle_get(self, request)
+
+    async def _handle_cable_snapshot(self, request: web.Request) -> web.Response:
+        """GET /api/cable/snapshot — Derivatives Intelligence (Cable agent).
+
+        Snapshot read-only de dados públicos derivativos (Binance funding,
+        OI) + reports do Cable se o agente estiver ativo. NUNCA executa
+        ordens — apenas leitura.
+        """
+        from src.dashboard.handlers.derivatives_intel import handle_get
+        return await handle_get(self, request)
+
+    async def _handle_memory_snapshot(self, request: web.Request) -> web.Response:
+        """GET /api/memory/snapshot — métricas agregadas das 6 camadas de memória."""
+        from src.dashboard.handlers.memory_hub import handle_memory_snapshot
+        return await handle_memory_snapshot(self, request)
+
+    async def _handle_improvements_queued(self, request: web.Request) -> web.Response:
+        """GET /api/improvements/queued — IMPs paradas em queued + matches."""
+        from src.dashboard.handlers.memory_hub import handle_improvements_queued
+        return await handle_improvements_queued(self, request)
+
+    async def _handle_improvements_reconcile_manual(self, request: web.Request) -> web.Response:
+        """POST /api/improvements/reconcile-manual {rec_id, commit_sha, summary}."""
+        from src.dashboard.handlers.memory_hub import handle_reconcile_manual
+        return await handle_reconcile_manual(self, request)
+
     async def _handle_jean_graph(self, _: web.Request) -> web.Response:
         """GET /api/jean/graph — link graph of the vault (second brain) for the
         neural-connections visualization. {nodes, links, total_notes,
@@ -6807,6 +6851,48 @@ class MekkaDashboardServer:
                 {"error": str(exc), "suggestions": [], "observation_summary": {}},
                 status=200,
             )
+
+    async def _handle_implementer_status(self, _: web.Request) -> web.Response:
+        """GET /api/implementer/status — snapshot do squad de implementação.
+
+        Inclui: cost cap, history recente, mapeamento area→implementer,
+        writers de trading (Mentor/Cyclops/Vision) e configuração LLM.
+        """
+        try:
+            from src.services.implementer import cost as _cost
+            from src.services.implementer.router import list_areas
+            from src.services.implementer.layers import llm as _llm
+            from src.services.implementer.worker import history_summary
+            from src.services import trading_vault_writer as _tvw
+            payload = {
+                "cost": _cost.summary(),
+                "areas": list_areas(),
+                "llm": {
+                    "enabled": _llm.is_llm_enabled(),
+                    "sdk_present": _llm._has_anthropic_sdk(),
+                    "model": _llm._get_model(),
+                },
+                "history": history_summary(limit=20),
+                "trading_writers": _tvw.stats(),
+            }
+            return web.json_response(payload, status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("implementer status failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=200)
+
+    async def _handle_implementer_run_once(self, request: web.Request) -> web.Response:
+        """POST /api/implementer/run-once — dispara worker manual (1 batch)."""
+        try:
+            body = await self._safe_json_body(request) or {}
+            max_imps = int(body.get("max", 3))
+            dry_run = bool(body.get("dry_run", False))
+            import asyncio as _asyncio
+            from src.services.implementer.worker import run_once
+            result = await _asyncio.to_thread(run_once, max_imps, dry_run)
+            return web.json_response(result, status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("implementer run failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=200)
 
     async def _handle_improvements_approve_pr(self, request: web.Request) -> web.Response:
         from src.dashboard.routers import improvements as _impr
