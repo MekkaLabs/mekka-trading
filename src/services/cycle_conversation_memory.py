@@ -124,6 +124,59 @@ class CycleConversationMemory:
         self._total_turns: int = 0
         self._total_tokens_estimated: int = 0
 
+        # Persistência JSON (2026-05-27) — restart preserva histórico.
+        try:
+            from src.services.memory_persistence import load_state
+            payload = load_state("cycle_conversation_memory")
+            if payload and isinstance(payload.get("by_symbol"), dict):
+                for sym, turns in payload["by_symbol"].items():
+                    dq: Deque[MessageTurn] = deque(maxlen=max_turns_per_symbol)
+                    for t in turns[-max_turns_per_symbol:]:
+                        try:
+                            dq.append(MessageTurn(
+                                symbol=t.get("symbol", sym),
+                                cycle_id=t.get("cycle_id", ""),
+                                user_prompt=t.get("user_prompt", ""),
+                                assistant_reply=t.get("assistant_reply", ""),
+                                timestamp=float(t.get("timestamp", 0.0)),
+                                token_estimate=int(t.get("token_estimate", 0)),
+                            ))
+                        except (ValueError, TypeError):
+                            continue
+                    self._history[sym] = dq
+                self._total_turns = int(payload.get("total_turns", 0))
+                self._total_tokens_estimated = int(payload.get("total_tokens", 0))
+                logger.info(
+                    f"[ConversationMemory] recovered "
+                    f"{sum(len(d) for d in self._history.values())} turns "
+                    f"across {len(self._history)} symbols"
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[ConversationMemory] load failed: {exc}")
+
+    def _persist(self) -> None:
+        try:
+            from src.services.memory_persistence import save_state
+            save_state("cycle_conversation_memory", {
+                "version": 1,
+                "max_turns_per_symbol": self.max_turns_per_symbol,
+                "total_turns": self._total_turns,
+                "total_tokens": self._total_tokens_estimated,
+                "by_symbol": {
+                    sym: [
+                        {
+                            "symbol": t.symbol, "cycle_id": t.cycle_id,
+                            "user_prompt": t.user_prompt, "assistant_reply": t.assistant_reply,
+                            "timestamp": t.timestamp, "token_estimate": t.token_estimate,
+                        }
+                        for t in list(dq)
+                    ]
+                    for sym, dq in self._history.items()
+                },
+            })
+        except Exception:  # noqa: BLE001
+            pass
+
     def add_turn(
         self,
         symbol: str,
@@ -151,6 +204,7 @@ class CycleConversationMemory:
         self._history[sym].append(turn)
         self._total_turns += 1
         self._total_tokens_estimated += turn.token_estimate
+        self._persist()
 
         logger.debug(
             f"[ConversationMemory] {sym} — turn added "

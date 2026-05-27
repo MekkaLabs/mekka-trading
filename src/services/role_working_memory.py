@@ -110,6 +110,57 @@ class RoleWorkingMemory:
         self._memory: Dict[str, Deque[CycleRecord]] = {}
         self._max_per_symbol = max_per_symbol
         self._total_records: int = 0
+        # Persistência leve em JSON (fail-silent). 2026-05-27.
+        try:
+            from src.services.memory_persistence import load_state
+            payload = load_state("role_working_memory")
+            if payload and isinstance(payload.get("by_symbol"), dict):
+                for sym, recs in payload["by_symbol"].items():
+                    dq: Deque[CycleRecord] = deque(maxlen=max_per_symbol)
+                    for r in recs[-max_per_symbol:]:
+                        try:
+                            dq.append(CycleRecord(
+                                symbol=r.get("symbol", sym),
+                                action=r.get("action", "HOLD"),
+                                confidence=float(r.get("confidence", 0.0)),
+                                regime=r.get("regime", "UNKNOWN"),
+                                outcome_pnl=r.get("outcome_pnl"),
+                                cycle_id=r.get("cycle_id", ""),
+                            ))
+                        except (ValueError, TypeError):
+                            continue
+                    self._memory[sym] = dq
+                self._total_records = int(payload.get("total_records", 0))
+                logger.info(
+                    f"[RoleWorkingMemory] recovered {sum(len(d) for d in self._memory.values())} "
+                    f"records across {len(self._memory)} symbols"
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[RoleWorkingMemory] load failed: {exc}")
+
+    def _persist(self) -> None:
+        """Fail-silent JSON snapshot — chamado após cada record/resolve."""
+        try:
+            from src.services.memory_persistence import save_state
+            payload = {
+                "version": 1,
+                "max_per_symbol": self._max_per_symbol,
+                "total_records": self._total_records,
+                "by_symbol": {
+                    sym: [
+                        {
+                            "symbol": r.symbol, "action": r.action,
+                            "confidence": r.confidence, "regime": r.regime,
+                            "outcome_pnl": r.outcome_pnl, "cycle_id": r.cycle_id,
+                        }
+                        for r in list(dq)
+                    ]
+                    for sym, dq in self._memory.items()
+                },
+            }
+            save_state("role_working_memory", payload)
+        except Exception:  # noqa: BLE001
+            pass
 
     def record(
         self,
@@ -148,6 +199,7 @@ class RoleWorkingMemory:
         )
         self._memory[sym].append(rec)
         self._total_records += 1
+        self._persist()
 
         logger.debug(
             f"[RoleWorkingMemory] recorded {sym} {action} conf={confidence:.0%} "
