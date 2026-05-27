@@ -387,3 +387,95 @@ class Mentor(BaseAgent[MentorReport]):
                 "observation": report.observation_summary,
             },
         )
+
+        # P1.8 (2026-05-27) — Mentor → IMP automático.
+        # Suggestions com can_auto_apply=True E confidence>=0.7 viram entry
+        # no inbox.json (visível no próximo Mekka._run como proposal).
+        # Fechamos o gap: ParameterSuggestion deixa de ser uma ilha
+        # (Telegram only) e entra no governance via Mekka council.
+        # Fail-silent — nunca afeta o ciclo do Mentor.
+        try:
+            high_conf_auto = [
+                s for s in report.suggestions
+                if s.can_auto_apply and s.confidence >= 0.7
+            ]
+            if high_conf_auto:
+                self._enqueue_in_inbox(high_conf_auto)
+                # Write-back loop: registra cada sugestão high-conf no vault.
+                # Opt-in via MENTOR_VAULT_WRITER_ENABLED. Fail-silent.
+                try:
+                    from src.services import trading_vault_writer as _tvw
+                    for s in high_conf_auto:
+                        _tvw.record_mentor_suggestion({
+                            "target": s.parameter_name,
+                            "current_value": s.current_value,
+                            "suggested_value": s.suggested_value,
+                            "confidence": s.confidence,
+                            "n_samples": s.evidence_n,
+                            "reason": s.rationale,
+                            "metric": getattr(s, "metric", "win_rate"),
+                            "scope": getattr(s, "scope", "global"),
+                            "can_auto_apply": s.can_auto_apply,
+                        })
+                except Exception as exc_vault:  # noqa: BLE001
+                    import logging
+                    logging.getLogger("mekka.mentor").debug(
+                        f"[Mentor] vault writer no-op: {exc_vault}"
+                    )
+        except Exception as exc:  # noqa: BLE001
+            import logging
+            logging.getLogger("mekka.mentor").debug(
+                f"[Mentor] inbox enqueue no-op: {exc}"
+            )
+
+    @staticmethod
+    def _enqueue_in_inbox(suggestions: list) -> int:
+        """Adiciona suggestions ao data/improvement_inbox.json.
+        Cada uma vira uma proposal-shaped dict pro Mekka council.
+        Idempotente: dedup por parameter_name (mantém o mais recente)."""
+        import json
+        from pathlib import Path
+        from datetime import datetime, timezone
+
+        inbox = Path(__file__).resolve().parents[2] / "data" / "improvement_inbox.json"
+        try:
+            inbox.parent.mkdir(parents=True, exist_ok=True)
+            current = []
+            if inbox.exists():
+                try:
+                    current = json.loads(inbox.read_text(encoding="utf-8")) or []
+                except Exception:  # noqa: BLE001
+                    current = []
+            # Dedup por parameter_name
+            existing_params = {
+                e.get("parameter_name") for e in current
+                if e.get("source") == "mentor"
+            }
+            added = 0
+            for s in suggestions:
+                if s.parameter_name in existing_params:
+                    continue
+                current.append({
+                    "title": (
+                        f"Mentor: {s.parameter_name} "
+                        f"{s.current_value} → {s.suggested_value}"
+                    ),
+                    "description": s.rationale,
+                    "impact": "MEDIUM" if s.confidence >= 0.8 else "LOW",
+                    "area": "calibration",
+                    "evidence": (
+                        f"win_rate, n={s.evidence_n}, period={s.evidence_period}, "
+                        f"mentor_conf={s.confidence:.2f}"
+                    ),
+                    "source": "mentor",
+                    "suggested_story": f"Aplicar {s.parameter_name}={s.suggested_value}",
+                    "parameter_name": s.parameter_name,
+                    "env_line": s.to_env_line(),
+                    "_mentor_ts": datetime.now(timezone.utc).isoformat(),
+                })
+                added += 1
+            if added > 0:
+                inbox.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
+            return added
+        except OSError:
+            return 0

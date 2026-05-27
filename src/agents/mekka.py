@@ -178,6 +178,11 @@ class Mekka(BaseAgent[MekkaCouncilReport]):
             ("risk_scanner", self._risk_scanner_proposals(period_days)),
             ("ops_scanner", self._ops_scanner_proposals(period_days)),
             ("memory_scanner", self._memory_scanner_proposals()),
+            ("vault_scanner", self._vault_scanner_proposals()),
+            ("agents_scanner", self._agents_scanner_proposals()),
+            ("backend_scanner", self._backend_scanner_proposals()),
+            ("frontend_scanner", self._frontend_scanner_proposals()),
+            ("dashboard_scanner", self._dashboard_scanner_proposals()),
             ("ice_man", self._ice_man_proposals()),
             ("sage", self._sage_proposals()),
         ):
@@ -190,6 +195,38 @@ class Mekka(BaseAgent[MekkaCouncilReport]):
         if not proposals:
             self._log.info("[Mekka] no proposals to consolidate")
             return report
+
+        # 1.5) Dedup semântico Jaccard (P0.4 — 2026-05-27).
+        # Sem isso, 9 scanners propondo coisas parecidas geram ruído O(n).
+        # Jaccard >= 0.6 entre tokens normalizados do (title + description).
+        # Mantém a primeira ocorrência e descarta as duplicatas.
+        before_dedup = len(proposals)
+        proposals = self._dedup_semantic(proposals, threshold=0.6)
+        dedup_removed = before_dedup - len(proposals)
+        if dedup_removed > 0:
+            self._log.info(f"[Mekka] dedup removed {dedup_removed} duplicate proposals")
+            report.errors.append(f"dedup_info: removed {dedup_removed}")
+
+        # 1.6) Memória de rejeição (P0.5 — 2026-05-27).
+        # Se uma proposta foi rejeitada >=2x no histórico de decisions,
+        # suprime auto (operador não quer ver de novo).
+        rejected_ids = self._chronically_rejected_ids(min_rejections=2)
+        if rejected_ids:
+            kept: list[dict] = []
+            suppressed = 0
+            for p in proposals:
+                # Pre-computa rec_id sem consolidar (mesmo hash)
+                pre_id = self._preview_rec_id(p)
+                if pre_id in rejected_ids:
+                    suppressed += 1
+                    continue
+                kept.append(p)
+            if suppressed > 0:
+                self._log.info(
+                    f"[Mekka] suppressed {suppressed} chronically-rejected proposals"
+                )
+                report.errors.append(f"suppressed_rejected: {suppressed}")
+            proposals = kept
 
         # 2) Galactus premortem on the whole batch.
         premortem_by_title: dict[str, PremortemVerdict] = {}
@@ -291,6 +328,63 @@ class Mekka(BaseAgent[MekkaCouncilReport]):
             })
         return out
 
+    async def _vault_scanner_proposals(self) -> list[dict]:
+        """VaultScanner — lê CONTEÚDO das notas do vault e extrai sinais
+        acionáveis (TODOs, FIXMEs, ADRs em proposta, "deveria/falta").
+        Complementa o MemoryScanner que só vê health (links/duplicados)."""
+        try:
+            from src.services.vault_scanner import scan_proposals as _vs
+            return _vs(max_proposals=30)
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"[Mekka] vault_scanner failed (non-fatal): {exc}")
+            return []
+
+    async def _agents_scanner_proposals(self) -> list[dict]:
+        """AgentsScanner — vertical para `src/agents/`."""
+        return self._run_vertical_scanner("agents_scanner",
+                                          "src.agents.agents_scanner", max_n=20)
+
+    async def _backend_scanner_proposals(self) -> list[dict]:
+        """BackendScanner — vertical para `src/services/` e `src/models/`."""
+        return self._run_vertical_scanner("backend_scanner",
+                                          "src.agents.backend_scanner", max_n=15)
+
+    async def _frontend_scanner_proposals(self) -> list[dict]:
+        """FrontendScanner — vertical para `src/dashboard/static/`."""
+        return self._run_vertical_scanner("frontend_scanner",
+                                          "src.agents.frontend_scanner", max_n=15)
+
+    async def _dashboard_scanner_proposals(self) -> list[dict]:
+        """DashboardScanner — vertical para `src/dashboard/` (Python backend)."""
+        return self._run_vertical_scanner("dashboard_scanner",
+                                          "src.agents.dashboard_scanner", max_n=15)
+
+    def _run_vertical_scanner(
+        self, source_name: str, module_path: str, max_n: int = 15,
+    ) -> list[dict]:
+        """Roda um scanner vertical e converte propostas para o formato do
+        council. DRY — vale pra todos os scanners verticais
+        (agents/backend/frontend/dashboard)."""
+        try:
+            import importlib
+            mod = importlib.import_module(module_path)
+            raw = mod.scan_proposals(max_proposals=max_n)
+            out = []
+            for p in raw:
+                out.append({
+                    "title": p.title,
+                    "description": p.description,
+                    "impact": p.impact,
+                    "area": p.area,
+                    "evidence": p.evidence,
+                    "source": source_name,
+                    "suggested_story": p.suggested_story,
+                })
+            return out
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"[Mekka] {source_name} failed (non-fatal): {exc}")
+            return []
+
     async def _ice_man_proposals(self) -> list[dict]:
         """Ice Man — external research scanner (dependency freshness/CVEs)."""
         from src.agents.ice_man import IceMan
@@ -345,6 +439,68 @@ class Mekka(BaseAgent[MekkaCouncilReport]):
     @staticmethod
     def _rec_id(title: str, area: str) -> str:
         return hashlib.sha256(f"{area}::{title}".encode("utf-8")).hexdigest()[:12]
+
+    @staticmethod
+    def _preview_rec_id(p: dict) -> str:
+        """Mesma fórmula de `_rec_id` mas a partir do proposal raw (sem
+        passar por `_consolidate`). Usado pra checar rejection memory."""
+        title = str(p.get("title") or "Proposta")
+        area = str(p.get("area") or "infra").lower()
+        return hashlib.sha256(f"{area}::{title}".encode("utf-8")).hexdigest()[:12]
+
+    @staticmethod
+    def _tokenize(text: str) -> set[str]:
+        """Tokens normalizados para Jaccard (sem dependência externa).
+        Lowercase + alfanumérico + dedup; remove stopwords mínimas."""
+        import re
+        STOP = {
+            "the", "a", "an", "o", "a", "os", "as", "de", "da", "do",
+            "em", "para", "por", "com", "que", "é", "ser", "ter",
+            "and", "or", "of", "to", "in", "for", "with", "as", "on", "at",
+            "vault", "memory", "agent", "agente",  # palavras quase universais nos titles
+        }
+        tokens = re.findall(r"[a-z0-9_]{3,}", (text or "").lower())
+        return {t for t in tokens if t not in STOP}
+
+    @classmethod
+    def _jaccard(cls, a: str, b: str) -> float:
+        ta, tb = cls._tokenize(a), cls._tokenize(b)
+        if not ta or not tb:
+            return 0.0
+        inter = len(ta & tb)
+        union = len(ta | tb)
+        return inter / union if union else 0.0
+
+    @classmethod
+    def _dedup_semantic(
+        cls, proposals: list[dict], threshold: float = 0.6
+    ) -> list[dict]:
+        """Remove proposals com Jaccard >= threshold contra alguma já mantida.
+        Preserva ordem e o primeiro de cada cluster (geralmente o de fonte mais
+        confiável vinda primeiro). Compara title+description."""
+        kept: list[dict] = []
+        for p in proposals:
+            text_p = (str(p.get("title", "")) + " " + str(p.get("description", "")))
+            duplicate = False
+            for q in kept:
+                text_q = (str(q.get("title", "")) + " " + str(q.get("description", "")))
+                if cls._jaccard(text_p, text_q) >= threshold:
+                    duplicate = True
+                    break
+            if not duplicate:
+                kept.append(p)
+        return kept
+
+    def _chronically_rejected_ids(self, min_rejections: int = 2) -> set[str]:
+        """rec_ids que aparecem como 'rejected' >= N vezes no histórico.
+        Hoje `decisions.json` tem 1 entry por rec_id (último estado), então
+        usamos o fato de que 'rejected' significa o operador escolheu não
+        manter. Em iteração futura podemos manter contador de rejections
+        em entry separada."""
+        decisions = self._load_decisions()
+        rejected = {rec_id for rec_id, v in decisions.items()
+                    if v.get("status") == "rejected"}
+        return rejected
 
     def _consolidate(
         self, p: dict, pm: Optional[PremortemVerdict]
@@ -448,5 +604,48 @@ class Mekka(BaseAgent[MekkaCouncilReport]):
                 improvement_queue.enqueue_brief(rec)
             except Exception as exc:  # noqa: BLE001
                 self._log.warning(f"[Mekka] could not enqueue brief: {exc}")
+
+            # P0.3 — Bridge hook: snapshot Sage BEFORE para attribution.
+            # Fire-and-forget; nunca afeta retorno. Pre-2026-05-27: silent debug
+            # ocultou que aceitações em handlers HTTP nunca disparavam o snapshot
+            # (DeprecationWarning + RuntimeError em get_event_loop sem loop ativo).
+            # Agora: tenta running-loop, depois novo thread com asyncio.run().
+            try:
+                import asyncio
+                import threading
+                from src.services.improvement_memory_bridge import on_improvement_accepted
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(on_improvement_accepted(rec_id))
+                except RuntimeError:
+                    # Sem event-loop ativo (ex: CLI). Roda em thread dedicada
+                    # para não criar loop no thread principal.
+                    def _run_bridge() -> None:
+                        try:
+                            asyncio.run(on_improvement_accepted(rec_id))
+                        except Exception as inner_exc:  # noqa: BLE001
+                            self._log.warning(
+                                f"[Mekka] bridge on_accepted thread failed: {inner_exc}"
+                            )
+                    threading.Thread(
+                        target=_run_bridge, name=f"bridge-accept-{rec_id[:8]}", daemon=True
+                    ).start()
+            except Exception as exc:  # noqa: BLE001
+                # Warning (não debug) porque silence quebrou o loop inteiro
+                self._log.warning(f"[Mekka] bridge on_accepted no-op: {exc}")
+
+            # Write-back loop — opt-in: registra IMP aceita no daily do vault
+            # canônico. Apenas escreve se IMPROVEMENT_VAULT_WRITER_ENABLED=true.
+            # Fail-silent + throttled internamente — nunca afeta retorno.
+            try:
+                from src.services import improvement_vault_writer
+                if improvement_vault_writer.is_writer_enabled():
+                    written = improvement_vault_writer.append_accepted_daily(rec)
+                    if written:
+                        self._log.info(
+                            f"[Mekka] IMP-{rec_id} → vault daily: {written.name}"
+                        )
+            except Exception as exc:  # noqa: BLE001
+                self._log.warning(f"[Mekka] vault writer (accepted) no-op: {exc}")
 
         return True

@@ -695,6 +695,19 @@ class Cyclops:
                     "[Cyclops] %s — %s (qty=%.6f, close_price=%.4f)",
                     symbol, trigger_reason, open_qty, mark,
                 )
+                # Write-back loop: append linha em 60-Daily/YYYY-MM-DD-trades.md
+                # Opt-in via CYCLOPS_VAULT_WRITER_ENABLED. Fail-silent.
+                try:
+                    from src.services import trading_vault_writer as _tvw
+                    _tvw.record_cyclops_close({
+                        "symbol": symbol,
+                        "side": side,
+                        "pnl_usd": pnl_usd,
+                        "holding_hours": None,  # close_position não tem hold_h direto
+                        "reason": trigger_reason,
+                    })
+                except Exception as exc_vault:  # noqa: BLE001
+                    logger.debug(f"[Cyclops] vault writer no-op: {exc_vault}")
                 # Stories 063/183/186 — resolve all memory stores via central helper.
                 # AgentMemory (063), RoleWorkingMemory (183), SignalOutcomeMemory (186)
                 # are all written from the same place so closes via SL/TP, manual or

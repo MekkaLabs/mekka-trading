@@ -607,6 +607,23 @@ class Vision(BaseAgent[TradingSignal]):
 
         signal = self._apply_degraded_quality_clamp(signal, analysis)
         self._log.info(f"[Vision] {signal.summary()}")
+
+        # Write-back loop: registra decisões de alta convicção no vault.
+        # Opt-in via VISION_VAULT_WRITER_ENABLED. Fail-silent + throttled.
+        try:
+            from src.services import trading_vault_writer as _tvw
+            _tvw.record_vision_decision({
+                "symbol": symbol,
+                "action": getattr(signal, "action", ""),
+                "confidence": float(getattr(signal, "confidence", 0.0)),
+                "price": price,
+                "size_pct": getattr(signal, "size_pct", None),
+                "cycle_id": getattr(analysis, "cycle_id", None),
+                "rationale": getattr(signal, "rationale", ""),
+            })
+        except Exception as exc_vault:  # noqa: BLE001
+            self._log.debug(f"[Vision] vault writer no-op: {exc_vault}")
+
         return signal
 
     def _apply_degraded_quality_clamp(
