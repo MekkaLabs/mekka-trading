@@ -118,14 +118,77 @@ python scripts/prometheus_cli.py audit src/agents/vision.py --json
   `system` (substring match).
 - Score é informativo. Score baixo NÃO bloqueia commit ou deploy.
 
+## Modo runtime (agente permanente — opt-in)
+
+Além da CLI offline, Prometheus existe como **`BaseAgent` runtime**
+em `src/agents/prometheus.py`. Quando habilitado via
+`PROMETHEUS_AGENT_ENABLED=true`, ele:
+
+- Subscreve aos topics `vision.signal`, `agent.error`, `agent.timeout`,
+  `cycle.end` do [[event_bus]] (Story 136 — MekkaEventBus).
+- Mantém buffers `recent_observations` e `recent_learnings` em memória
+  (deque com cap 500 e 100 respectivamente).
+- Publica `prometheus.observation` e `prometheus.learning` no bus.
+
+**Proteções obrigatórias (todas testadas):**
+- **Dedup** por SHA-256 dos campos discriminativos em janela
+  `PROMETHEUS_DEDUP_WINDOW_S` (default 60s).
+- **Throttle**: `PROMETHEUS_MAX_OBS_PER_MIN` (default 60) e
+  `PROMETHEUS_MAX_LEARNINGS_PER_HOUR` (default 12).
+- **Fail-silent**: exceções em handlers nunca propagam (logs DEBUG).
+- **Opt-in**: sem env var, `get_prometheus_agent()` retorna `None` —
+  zero overhead.
+- **Observer-only**: teste de isolamento garante que nenhum agente
+  Layer 1-3 importe `src/agents/prometheus.py`.
+
+### Lifecycle típico
+
+```python
+from src.agents.prometheus import start_prometheus_agent
+
+# Em startup (run.py / main.py):
+agent = await start_prometheus_agent()  # None se desabilitado
+
+# ... pipeline rola ...
+
+# Em shutdown:
+if agent:
+    await agent.unsubscribe()
+```
+
+### Dashboard
+
+O endpoint `GET /api/second-brain/activity` consome
+`Prometheus.snapshot()` e expõe no novo módulo
+"Atividade do Segundo Cérebro" (Frontend: `second_brain_activity.js`).
+Polling controlado de 30s; sem WebSocket inventado.
+
+## CI workflow
+
+`.github/workflows/prometheus-audit.yml` roda em PRs/push para main que
+tocam `src/agents/`. Comenta scorecard /40 por prompt no PR (informativo,
+não bloqueia merge).
+
+## Cross-provider adapter
+
+`src/prompt_engineering/adapter.py` traduz prompts entre OpenAI e
+Anthropic:
+- `adapt_to_anthropic(text)` — converte cabeçalhos em tags XML
+  semânticas (`<role>`, `<output_format>`, `<method>`, etc.)
+- `adapt_to_openai(text)` — remove tags XML e reforça
+  "Return ONLY a single JSON object" quando há schema inline.
+
+100% determinístico, sem chamada LLM.
+
 ## Roadmap
 
-1. **Cross-provider adapter.** Gerar variantes de um prompt otimizadas
-   para Anthropic vs OpenAI, registrar em catálogo com modelo compatível.
-2. **CI integration.** Workflow `.github/workflows/prometheus-audit.yml`
-   que comenta scorecard em PRs tocando `src/agents/`.
-3. **Critic loop generalizado.** Padrão Vision Critic aplicado a outros
+1. **Critic loop generalizado.** Aplicar padrão Vision Critic a outros
    agentes via prompts gerados pelo Prometheus.
+2. **Persistência de aprendizados no vault.** Hook do Prometheus que
+   escreve `60 - Daily/{date}-prometheus-learnings.md` quando
+   `learnings_emitted >= N`.
+3. **Catálogo cross-provider versionado.** Cada `PromptRecord` ter
+   variants[] com fingerprints separados por provider.
 
 ## Notas relacionadas
 

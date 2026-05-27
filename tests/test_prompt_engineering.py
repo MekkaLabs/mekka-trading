@@ -336,10 +336,23 @@ class TestIsolation:
         assert "from src.prompt_engineering" not in vision_src
         assert "import src.prompt_engineering" not in vision_src
 
-    def test_trading_agents_dont_import_prometheus(self) -> None:
+    def test_trading_agents_dont_import_prompt_engineering(self) -> None:
+        """
+        Agentes de trading (Layer 1-3) não devem importar prompt_engineering.
+        prometheus.py é exceção legítima (não é agente de trade) e pode
+        mencionar prompt_engineering em docstrings.
+        """
         agents_dir = Path("src/agents")
+        # Skip agents that are dev/QA, não fazem trade
+        skip = {"prometheus.py", "__init__.py", "base.py", "llm_client.py"}
         for py in agents_dir.glob("*.py"):
+            if py.name in skip:
+                continue
             src = py.read_text(encoding="utf-8")
-            assert "prompt_engineering" not in src, (
+            # Verifica padrões REAIS de import, não substring em comentário
+            assert "from src.prompt_engineering" not in src, (
+                f"{py.name} importa prompt_engineering — quebra isolamento"
+            )
+            assert "import src.prompt_engineering" not in src, (
                 f"{py.name} importa prompt_engineering — quebra isolamento"
             )

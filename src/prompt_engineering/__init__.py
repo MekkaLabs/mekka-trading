@@ -16,6 +16,7 @@ Submodules
 - prometheus : orchestrator de alto nível
 """
 
+from src.prompt_engineering.adapter import Provider, adapt, adapt_to_anthropic, adapt_to_openai
 from src.prompt_engineering.models import (
     AuditDimension,
     PromptRecord,
@@ -30,4 +31,8 @@ __all__ = [
     "Scorecard",
     "ExtractedPrompt",
     "Prometheus",
+    "Provider",
+    "adapt",
+    "adapt_to_anthropic",
+    "adapt_to_openai",
 ]
