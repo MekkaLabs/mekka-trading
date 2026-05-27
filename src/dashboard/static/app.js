@@ -1464,17 +1464,76 @@ function renderHeroSla(rows) {
   }).join('');
 }
 
+// Banners dispensados pelo operador (persistido por sessão do browser).
+// Chave = code + '|' + message (mesma combinação não volta enquanto durar).
+const _DISMISSED_ALERTS_KEY = 'mekka.dismissedAlerts.v1';
+function _loadDismissedAlerts() {
+  try {
+    return new Set(JSON.parse(sessionStorage.getItem(_DISMISSED_ALERTS_KEY) || '[]'));
+  } catch (e) { return new Set(); }
+}
+function _saveDismissedAlerts(set) {
+  try {
+    sessionStorage.setItem(_DISMISSED_ALERTS_KEY, JSON.stringify([...set]));
+  } catch (e) { /* quota cheia, ignora */ }
+}
+
+window.dismissAlertBanner = function (key) {
+  const set = _loadDismissedAlerts();
+  set.add(key);
+  _saveDismissedAlerts(set);
+  // Remove o DOM correspondente sem aguardar próximo poll
+  const els = document.querySelectorAll(`.alert-banner[data-alert-key="${CSS.escape(key)}"]`);
+  els.forEach((el) => {
+    el.style.opacity = '0';
+    el.style.maxHeight = '0';
+    setTimeout(() => el.remove(), 240);
+  });
+};
+
 function renderGlobalAlerts(rows) {
   hasGlobalCriticalAlert = false;
+  const dismissed = _loadDismissedAlerts();
   if (!rows || rows.length === 0) {
     globalAlerts.innerHTML = '';
     return;
   }
-  globalAlerts.innerHTML = rows.map((r) => {
-    if (String(r.severity || '').toUpperCase() === 'CRITICAL') hasGlobalCriticalAlert = true;
-    const cls = String(r.severity || '').toUpperCase() === 'WARNING' ? 'warning' : '';
-    return `<div class="alert-banner ${cls}">${escapeHtml(r.code)}: ${escapeHtml(r.message)}</div>`;
-  }).join('');
+  const visible = rows.filter((r) => {
+    const key = `${r.code || ''}|${r.message || ''}`;
+    return !dismissed.has(key);
+  });
+
+  // Render DOM diretamente (sem onclick inline frágil — escape de string
+  // dentro de atributo HTML quebra em mensagens com aspas/back-slashes).
+  globalAlerts.innerHTML = '';
+  visible.forEach((r) => {
+    const sev = String(r.severity || '').toUpperCase();
+    if (sev === 'CRITICAL') hasGlobalCriticalAlert = true;
+
+    const banner = document.createElement('div');
+    banner.className = 'alert-banner' + (sev === 'WARNING' ? ' warning' : '');
+    const key = `${r.code || ''}|${r.message || ''}`;
+    banner.dataset.alertKey = key;
+
+    const body = document.createElement('span');
+    body.className = 'alert-banner-body';
+    body.textContent = `${r.code || ''}: ${r.message || ''}`;
+    banner.appendChild(body);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'alert-banner-close';
+    btn.title = 'Fechar este alerta nesta sessão';
+    btn.setAttribute('aria-label', 'Fechar alerta');
+    btn.textContent = '×';
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      window.dismissAlertBanner(key);
+    });
+    banner.appendChild(btn);
+
+    globalAlerts.appendChild(banner);
+  });
 }
 
 function openRiskDrilldown(symbol) {

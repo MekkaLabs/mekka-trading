@@ -951,6 +951,46 @@ class IronMan(BaseAgent[ExecutionResult]):
                 break
             except Exception as _exc:  # noqa: BLE001
                 sl_error = _exc
+                _err_str = str(_exc)
+                # Binance -4045 ("Reach max stop order limit") — quota cheia
+                # por órfãos acumulados. Limpar e retry imediato no próximo
+                # loop, sem esperar o sleep escalonado (a falha foi de quota,
+                # não de rede). Mesmo padrão usado no guardian loop abaixo.
+                if "-4045" in _err_str or "max stop order" in _err_str.lower():
+                    try:
+                        # Binance Futures: limite -4045 é GLOBAL POR CONTA,
+                        # não por símbolo. Passamos ccxt_symbol=None para
+                        # varrer todos os pares (helper preserva stops de
+                        # posições ativas em outros símbolos).
+                        _cleaned = await self._cleanup_orphan_reduce_only_stops(
+                            exchange, ccxt_symbol=None
+                        )
+
+                        # ESCALATION: se cleanup convencional cancelou 0
+                        # (fantasmas que fetch_open_orders não enxerga —
+                        # bug recorrente da Testnet), escalar para
+                        # mass-cancel via cancel_all_orders por símbolo.
+                        # Só roda na 2ª/3ª tentativa para não ser agressivo
+                        # demais no caso comum.
+                        _mass = 0
+                        if _cleaned == 0 and _sl_attempt >= 2:
+                            _mass = await self._mass_cancel_orphan_symbols(
+                                exchange, ccxt_symbol_in_use=ccxt_symbol
+                            )
+
+                        self._log.warning(
+                            f"[IronMan/{exchange_id}] SL placement attempt "
+                            f"{_sl_attempt}/3 hit -4045; cleaned {_cleaned} "
+                            f"orphan stops + mass-cancelled {_mass} via "
+                            "symbol-scoped cancel_all_orders, retrying immediately"
+                        )
+                        # Imediato — sem sleep — quota acabou de ser liberada.
+                        continue
+                    except Exception as _cleanup_exc:  # noqa: BLE001
+                        self._log.warning(
+                            f"[IronMan/{exchange_id}] orphan cleanup failed: "
+                            f"{_cleanup_exc}"
+                        )
                 self._log.warning(
                     f"[IronMan/{exchange_id}] SL placement attempt {_sl_attempt}/3 failed: {_exc}"
                 )
@@ -965,7 +1005,8 @@ class IronMan(BaseAgent[ExecutionResult]):
                 f"flattening unprotected {symbol} position ({filled} units)"
             )
             close_ok, close_err = await self._emergency_flatten(
-                exchange, ccxt_symbol, is_buy, filled, exchange_id
+                exchange, ccxt_symbol, is_buy, filled, exchange_id,
+                mekka_symbol=symbol, cycle_id=cycle_id,
             )
             try:
                 from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
@@ -1060,6 +1101,9 @@ class IronMan(BaseAgent[ExecutionResult]):
         is_buy: bool,
         amount: float,
         exchange_id: str,
+        *,
+        mekka_symbol: Optional[str] = None,
+        cycle_id: Optional[str] = None,
     ) -> tuple[bool, Optional[str]]:
         """Close a just-opened position with a reduce-only MARKET order.
 
@@ -1067,9 +1111,17 @@ class IronMan(BaseAgent[ExecutionResult]):
         an unprotected position. Retries a few times; returns ``(ok, error)``.
         A market order is intentional: we want OUT now, slippage is acceptable
         versus the unbounded risk of a naked position.
+
+        IMPORTANT: this path was NOT instrumented for memory resolution until
+        2026-05-27. Without `resolve_trade_memories` here, every -4045-induced
+        flatten left AgentMemory rows PENDING, biasing Beast/Mentor learning
+        toward the rare Cyclops happy-path. We now call the resolver with
+        pnl_usd=0.0 (immediate flatten = no realized P&L; the trade was
+        cancelled before holding period).
         """
         close_side = "sell" if is_buy else "buy"
         last_err: Optional[str] = None
+        ok = False
         for _attempt in range(1, 4):
             try:
                 await exchange.create_order(
@@ -1082,7 +1134,8 @@ class IronMan(BaseAgent[ExecutionResult]):
                 self._log.warning(
                     f"[IronMan/{exchange_id}] emergency flatten OK ({amount} units)"
                 )
-                return True, None
+                ok = True
+                break
             except Exception as _exc:  # noqa: BLE001
                 last_err = str(_exc)
                 self._log.error(
@@ -1090,7 +1143,208 @@ class IronMan(BaseAgent[ExecutionResult]):
                 )
                 if _attempt < 3:
                     await asyncio.sleep(float(_attempt))
+
+        # Resolver memórias (fail-silent — não afeta o retorno do flatten).
+        if mekka_symbol:
+            try:
+                from src.services.trade_outcome_resolver import resolve_trade_memories
+                await resolve_trade_memories(
+                    symbol=mekka_symbol,
+                    pnl_usd=0.0,
+                    holding_hours=0.0,
+                    cycle_id=cycle_id,
+                )
+            except Exception as _rtm_exc:  # noqa: BLE001
+                self._log.debug(
+                    f"[IronMan/_emergency_flatten] resolve_trade_memories no-op: {_rtm_exc}"
+                )
+
+        if ok:
+            return True, None
         return False, last_err or "flatten failed after 3 attempts"
+
+    # ------------------------------------------------------------------
+    # Helper: free Binance per-symbol stop-order quota by cancelling
+    # reduce-only orphan stops/TPs. Reusable from placement + guardian.
+    # ------------------------------------------------------------------
+
+    # Símbolos comuns para mass-cancel preventivo (último recurso contra
+    # fantasmas do testnet). Mantém lista curta para não esgotar rate limit.
+    _MASS_CANCEL_SYMBOLS = (
+        "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT",
+        "BNB/USDT:USDT", "XRP/USDT:USDT", "DOGE/USDT:USDT",
+    )
+
+    async def _mass_cancel_orphan_symbols(
+        self, exchange: Any, ccxt_symbol_in_use: str,
+    ) -> int:
+        """
+        Último recurso contra `-4045` na Binance Testnet: chama
+        `cancel_all_orders(symbol)` em símbolos comuns SEM posição ativa,
+        pegando stops "fantasma" que `fetch_open_orders` não enxerga.
+
+        NÃO toca no símbolo da posição que está sendo aberta agora
+        (ccxt_symbol_in_use) — preserva eventuais stops já colocados nesse
+        ciclo.
+
+        Conservador: pula símbolos com posição ativa (preserva SL legítimo
+        que esteja invisível ao fetch). Fail-tolerante.
+        """
+        # Descobrir símbolos com posição (para preservá-los)
+        active: set[str] = set()
+        try:
+            positions = await exchange.fetch_positions()
+            for p in positions or []:
+                try:
+                    if abs(float(p.get("contracts") or 0)) > 0:
+                        sym = str(p.get("symbol") or "")
+                        if sym:
+                            active.add(sym)
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(
+                f"[IronMan/mass-cancel] fetch_positions failed: {exc} — "
+                "aborting (conservador)"
+            )
+            return 0
+
+        cancelled = 0
+        for sym in self._MASS_CANCEL_SYMBOLS:
+            # Preserva: símbolo da posição atual + símbolos com qualquer posição
+            if sym == ccxt_symbol_in_use or sym in active:
+                continue
+            try:
+                result = await exchange.cancel_all_orders(sym)
+                n = len(result) if isinstance(result, list) else 1
+                cancelled += n
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                # -2011 / "Unknown order" = nada para cancelar nesse símbolo (OK)
+                if "-2011" in msg or "unknown order" in msg.lower():
+                    continue
+                self._log.debug(
+                    f"[IronMan/mass-cancel] {sym} cancel_all_orders error: {exc}"
+                )
+        return cancelled
+
+    async def _cleanup_orphan_reduce_only_stops(
+        self, exchange: Any, ccxt_symbol: Optional[str] = None
+    ) -> int:
+        """
+        Cancela reduce-only stop/take_profit orders ÓRFÃOS (em símbolos sem
+        posição aberta). Retorna quantos foram cancelados.
+
+        Usado para liberar a quota Binance ("max stop order limit" -4045),
+        que é **global por conta** em Binance Futures (não por símbolo).
+        Por isso varremos TODOS os símbolos por padrão, não só o que está
+        tentando colocar SL.
+
+        Parâmetros
+        ----------
+        exchange : CCXT exchange instance
+        ccxt_symbol : str, opcional
+            Quando dado, restringe a busca a esse símbolo (modo legacy
+            usado pelo guardian). Quando None, varre toda a conta.
+
+        Conservador: só cancela ordens marcadas reduce-only E em símbolos
+        SEM posição aberta. Jamais toca em entradas, jamais remove o stop
+        de uma posição ativa.
+
+        Fail-tolerant: se uma cancel falhar, segue para a próxima.
+        """
+        # 1) descobrir símbolos com posição aberta (para preservar seus stops)
+        active_symbols: set[str] = set()
+        try:
+            positions = await exchange.fetch_positions()
+            for p in positions or []:
+                try:
+                    contracts = float(p.get("contracts") or 0)
+                    if abs(contracts) > 0:
+                        sym = str(p.get("symbol") or "")
+                        if sym:
+                            active_symbols.add(sym)
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception as exc:  # noqa: BLE001
+            # Se não conseguir buscar posições, sermos CONSERVADORES:
+            # só limpamos o símbolo passado (legacy) ou nada se for None.
+            self._log.warning(
+                f"[IronMan/cleanup] fetch_positions failed: {exc}; "
+                "falling back to per-symbol-only mode"
+            )
+            if ccxt_symbol is None:
+                return 0
+            active_symbols = set()  # tudo no símbolo é candidato a cancelar
+
+        # 2) buscar ordens abertas (global se ccxt_symbol=None)
+        # NOTE: CCXT emite warning como exceção em fetch_open_orders() sem
+        # símbolo na Binance. Reconhecemos a opção antes de chamar.
+        try:
+            opts = getattr(exchange, "options", None)
+            if isinstance(opts, dict):
+                opts["warnOnFetchOpenOrdersWithoutSymbol"] = False
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            if ccxt_symbol is None:
+                open_orders = await exchange.fetch_open_orders()
+            else:
+                open_orders = await exchange.fetch_open_orders(ccxt_symbol)
+        except Exception as exc:  # noqa: BLE001
+            # Se a chamada global falhar (mesmo após ack), tentamos por
+            # símbolos conhecidos a partir das posições ativas — pelo
+            # menos liberamos algum stop órfão.
+            self._log.warning(
+                f"[IronMan/cleanup] fetch_open_orders global failed: {exc}; "
+                "falling back to per-active-symbol cleanup"
+            )
+            open_orders = []
+            seed_symbols = list(active_symbols) if ccxt_symbol is None else [ccxt_symbol]
+            for s in seed_symbols:
+                try:
+                    chunk = await exchange.fetch_open_orders(s)
+                    if chunk:
+                        open_orders.extend(chunk)
+                except Exception:  # noqa: BLE001
+                    continue
+            if not open_orders:
+                return 0
+
+        cancelled = 0
+        for o in open_orders or []:
+            try:
+                typ = str(o.get("type") or "").lower()
+                info = o.get("info") or {}
+                itype = str(info.get("type") or "").lower()
+                is_algo = (
+                    "stop" in typ or "stop" in itype
+                    or "take_profit" in typ or "take_profit" in itype
+                )
+                if not is_algo:
+                    continue
+                ro = o.get("reduceOnly")
+                if ro is None:
+                    ro = info.get("reduceOnly") or info.get("reduce_only")
+                if not bool(ro):
+                    continue
+
+                order_sym = str(o.get("symbol") or "")
+                # PROTEÇÃO: não cancelar stops de posições ATIVAS de outros
+                # símbolos. Excecão: se ccxt_symbol foi passado, esse símbolo
+                # específico tem prioridade (caller sabe que precisa limpar).
+                if order_sym in active_symbols and order_sym != ccxt_symbol:
+                    continue
+
+                oid = o.get("id")
+                if not oid:
+                    continue
+                await exchange.cancel_order(oid, order_sym or ccxt_symbol)
+                cancelled += 1
+            except Exception:  # noqa: BLE001 — best-effort
+                continue
+        return cancelled
 
     # ------------------------------------------------------------------
     # Live SL Guardian — ensure every open position keeps a live stop
@@ -1532,6 +1786,20 @@ class IronMan(BaseAgent[ExecutionResult]):
                         "side": "LONG" if is_phantom_long else "SHORT",
                     }
                 )
+                # Resolver memórias para o phantom fechado (fail-silent).
+                # PnL desconhecido (já foi processado pela corretora em outra sessão),
+                # passamos 0.0 — marca como NEUTRAL no AgentMemory.
+                try:
+                    from src.services.trade_outcome_resolver import resolve_trade_memories
+                    await resolve_trade_memories(
+                        symbol=sym,
+                        pnl_usd=0.0,
+                        holding_hours=None,
+                    )
+                except Exception as _rtm_exc:  # noqa: BLE001
+                    self._log.debug(
+                        f"[IronMan/reconcile_phantom] resolve_trade_memories no-op: {_rtm_exc}"
+                    )
                 try:
                     from src.services.telegram_alerter import (  # noqa: WPS433
                         TelegramAlerter as _TA,
@@ -1593,13 +1861,88 @@ class IronMan(BaseAgent[ExecutionResult]):
 
         is_long = side.upper() == "LONG"
         close_side = "sell" if is_long else "buy"
-        order = await exchange.create_order(
-            symbol=ccxt_symbol,
-            type="market",
-            side=close_side,
-            amount=size,
-            params={"reduceOnly": True},
-        )
+
+        # Detectar position mode (one-way vs hedge). Em one-way mode, qty
+        # MARKET sem reduceOnly fecha a posição automaticamente — essa é
+        # a rota MAIS CONFIÁVEL (validada empiricamente em 2026-05-27 após
+        # bug do Testnet com -2022 em reduceOnly).
+        is_one_way = True
+        if exchange_id == "binance":
+            try:
+                mode = await exchange.fapiPrivateGetPositionSideDual()
+                is_one_way = not bool(mode.get("dualSidePosition", False))
+            except Exception:  # noqa: BLE001
+                pass
+
+        order = None
+        errs: list[str] = []
+
+        # Calcular qty truncada ao step (necessário para MARKET_LOT_SIZE)
+        try:
+            market = exchange.market(ccxt_symbol)
+            step = float(
+                (market.get("limits", {}).get("amount", {}) or {}).get("min", 0)
+                or (market.get("precision", {}) or {}).get("amount", 0)
+                or 0.001
+            )
+            truncated = (int(size / step)) * step if step > 0 else size
+        except Exception:  # noqa: BLE001
+            step = 0.0
+            truncated = size
+
+        # Estratégia 1 — One-way mode + Binance: MARKET sem reduceOnly.
+        # Funciona mesmo quando reduceOnly está bugado no Testnet (-2022).
+        # Em one-way, a Binance auto-fecha a posição. Se qty > position,
+        # abre dust no lado oposto — por isso truncamos pra baixo no step.
+        if exchange_id == "binance" and is_one_way and truncated > 0:
+            try:
+                order = await exchange.create_order(
+                    symbol=ccxt_symbol, type="market", side=close_side,
+                    amount=truncated, params={},
+                )
+                self._log.info(
+                    f"[IronMan/{exchange_id}] manual close via MARKET (one-way "
+                    f"auto-close, no reduceOnly) qty={truncated} OK"
+                )
+            except Exception as exc:  # noqa: BLE001
+                errs.append(f"MARKET one-way no-reduceOnly: {exc}")
+
+        # Estratégia 2 — STOP_MARKET closePosition (cobre dust restante e
+        # hedge mode). Funciona se quota -4045 livre.
+        if order is None and exchange_id == "binance":
+            try:
+                ticker = await exchange.fetch_ticker(ccxt_symbol)
+                last_px = float(ticker.get("last") or ticker.get("close") or 0.0)
+                if last_px > 0:
+                    stop_px = round(last_px * (0.9995 if is_long else 1.0005), 2)
+                    order = await exchange.create_order(
+                        symbol=ccxt_symbol, type="STOP_MARKET", side=close_side,
+                        amount=size,
+                        params={
+                            "closePosition": True, "stopPrice": stop_px,
+                            "workingType": "MARK_PRICE", "priceProtect": False,
+                        },
+                    )
+                    self._log.info(
+                        f"[IronMan/{exchange_id}] manual close via STOP_MARKET "
+                        f"closePosition OK"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                errs.append(f"STOP_MARKET closePosition: {exc}")
+
+        # Estratégia 3 — MARKET reduceOnly (path histórico, fallback).
+        if order is None:
+            try:
+                order = await exchange.create_order(
+                    symbol=ccxt_symbol, type="market", side=close_side,
+                    amount=truncated or size, params={"reduceOnly": True},
+                )
+                self._log.info(
+                    f"[IronMan/{exchange_id}] manual close via reduceOnly OK"
+                )
+            except Exception as exc:  # noqa: BLE001
+                errs.append(f"MARKET reduceOnly: {exc}")
+                raise type(exc)("; ".join(errs)) from exc
         # Cancel resting SL/TP so they don't fire on a now-flat position.
         try:
             await exchange.cancel_all_orders(ccxt_symbol)
@@ -1610,6 +1953,22 @@ class IronMan(BaseAgent[ExecutionResult]):
         self._log.warning(
             f"[IronMan/{exchange_id}] manual close {symbol} {side} qty={size} @ {avg}"
         )
+
+        # Resolver memórias (fail-silent). PnL é desconhecido em close manual
+        # programático — passamos 0.0 (NEUTRAL). Cyclops/dashboard chamam
+        # resolve_trade_memories diretamente quando têm PnL real.
+        try:
+            from src.services.trade_outcome_resolver import resolve_trade_memories
+            await resolve_trade_memories(
+                symbol=symbol,
+                pnl_usd=0.0,
+                holding_hours=None,
+            )
+        except Exception as _rtm_exc:  # noqa: BLE001
+            self._log.debug(
+                f"[IronMan/close_position] resolve_trade_memories no-op: {_rtm_exc}"
+            )
+
         return ExecutionResult(
             symbol=symbol,
             status=ExecutionStatus.FILLED,

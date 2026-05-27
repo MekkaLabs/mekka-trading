@@ -1004,6 +1004,158 @@ const CONFIGS = [
       power: powerStealth,
     },
   },
+  /* ---- DEV/QA: PROMETHEUS ----
+   * Prompt auditor & runtime observer. NOT a trader.
+   * Visual: orange-flame outfit (orange suit + amber belt + flame emblem),
+   * sky-blue eye glow (data lens), cowl head (focused/observing).
+   * Reuses powerSynth (no new power renderer needed for v1).
+   */
+  {
+    id: 'oracle', codename: 'PROMETHEUS', name: 'Oracle',
+    role: 'Dev/QA — Prompt auditor & observer', powerLabel: 'Audit / Learn',
+    cfg: {
+      suit: '#f97316', pants: '#7c2d12', boot: '#431407', bootCuff: '#fde68a',
+      belt: '#fbbf24', beltBuckle: '#7c2d12',
+      skin: '#f5d4b0', hair: 'cowl', hairColor: '#fdba74',
+      iris: '#bae6fd', emblem: '#fde68a',
+      chestStripe: '#fdba74',
+      power: powerSynth,
+    },
+  },
+  /* ────────────────────────────────────────────────────────────────
+   * ESCRITÓRIO ESTENDIDO — 8 agentes Python que estavam sem sprite.
+   * Adicionados em 2026-05-26. Cada um com identidade visual distinta.
+   * ──────────────────────────────────────────────────────────────── */
+
+  /* ICEMAN — External Research (src/agents/ice_man.py) */
+  {
+    id: 'frost', codename: 'ICEMAN', name: 'Frost',
+    role: 'L4 — External Research', powerLabel: 'Cold Recon',
+    cfg: {
+      suit: '#7dd3fc', pants: '#0c4a6e', boot: '#082f49', bootCuff: '#e0f2fe',
+      belt: '#bae6fd', beltBuckle: '#0369a1',
+      skin: '#f5d4b0', hair: 'short', hairColor: '#e0f2fe',
+      iris: '#bae6fd', emblem: '#bae6fd',
+      chestStripe: '#bae6fd',
+      power: powerSynth,
+    },
+  },
+
+  /* MENTOR — Charles Xavier — Self-Improvement loop (src/agents/mentor.py) */
+  {
+    id: 'xavier', codename: 'MENTOR', name: 'Xavier',
+    role: 'L4 — Self-Improvement Loop', powerLabel: 'Telepath',
+    cfg: {
+      suit: '#a3a3a3', pants: '#525252', boot: '#262626', bootCuff: '#d4d4d4',
+      belt: '#d4d4d4', beltBuckle: '#a16207',
+      skin: '#f5d4b0', hair: 'bald', hairColor: '#525252',
+      iris: '#facc15', emblem: '#a3a3a3',
+      chestStripe: '#d4d4d4',
+      power: powerSynth,
+    },
+  },
+
+  /* KPISAGE — Measurement / KPI (src/agents/sage.py) */
+  {
+    id: 'kpi', codename: 'KPISAGE', name: 'Compass',
+    role: 'L4 — Measurement / KPI', powerLabel: 'Track / Score',
+    cfg: {
+      suit: '#06b6d4', pants: '#155e75', boot: '#083344', bootCuff: '#a5f3fc',
+      belt: '#67e8f9', beltBuckle: '#0891b2',
+      skin: '#f5d4b0', hair: 'short', hairColor: '#0e7490',
+      iris: '#22d3ee', emblem: '#67e8f9',
+      chestStripe: '#67e8f9',
+      power: powerSynth,
+    },
+  },
+
+  /* CYPHER — Code Auditor (src/agents/code_auditor.py) */
+  {
+    id: 'cypher', codename: 'CYPHER', name: 'Cypher',
+    role: 'L4 — Code Auditor', powerLabel: 'Decode',
+    cfg: {
+      suit: '#10b981', pants: '#064e3b', boot: '#022c22', bootCuff: '#a7f3d0',
+      belt: '#34d399', beltBuckle: '#065f46',
+      skin: '#f5d4b0', hair: 'short', hairColor: '#065f46',
+      iris: '#10b981', emblem: '#a7f3d0',
+      chestStripe: '#34d399',
+      power: powerSynth,
+    },
+  },
+
+  /* FORGE — Ops Scanner (src/agents/ops_scanner.py) */
+  {
+    id: 'anvil', codename: 'FORGE', name: 'Anvil',
+    role: 'L4 — Ops Scanner', powerLabel: 'Tech / Build',
+    cfg: {
+      suit: '#fb923c', pants: '#7c2d12', boot: '#431407', bootCuff: '#fed7aa',
+      belt: '#fdba74', beltBuckle: '#9a3412',
+      skin: '#f5d4b0', hair: 'short', hairColor: '#1c1917',
+      iris: '#facc15', emblem: '#fed7aa',
+      chestStripe: '#fdba74',
+      power: powerSynth,
+    },
+  },
+
+  /* DOMINO — Risk Scanner (src/agents/risk_scanner.py) */
+  {
+    id: 'mark', codename: 'DOMINO', name: 'Mark',
+    role: 'L4 — Risk Scanner', powerLabel: 'Probability',
+    cfg: {
+      suit: '#1c1917', pants: '#0c0a09', boot: '#000000', bootCuff: '#f5f5f4',
+      belt: '#f5f5f4', beltBuckle: '#a8a29e',
+      skin: '#f5d4b0', hair: 'short', hairColor: '#f5f5f4',
+      iris: '#fbbf24', emblem: '#f5f5f4',
+      chestStripe: '#f5f5f4',
+      power: powerSynth,
+    },
+  },
+
+  /* NICKFURY — Mission Commander (src/agents/nick_fury.py) */
+  {
+    id: 'patch', codename: 'NICKFURY', name: 'Patch',
+    role: 'L4 — Mission Commander', powerLabel: 'Command',
+    cfg: {
+      suit: '#0a0a14', pants: '#0a0a14', boot: '#000000', bootCuff: '#3f3f46',
+      belt: '#3f3f46', beltBuckle: '#71717a',
+      skin: '#8b5a3c', hair: 'bald', hairColor: '#0a0a14',
+      iris: '#22c55e', emblem: '#22c55e',
+      chestStripe: '#1c1917',
+      power: powerSynth,
+    },
+  },
+
+  /* PORTFOLIO — Read-only equity & open-positions snapshot
+   * (src/agents/portfolio_manager.py) */
+  {
+    id: 'ledger', codename: 'PORTFOLIO', name: 'Ledger',
+    role: 'L4 — Snapshot Service', powerLabel: 'Snapshot',
+    cfg: {
+      suit: '#1e40af', pants: '#172554', boot: '#0c0a09', bootCuff: '#dbeafe',
+      belt: '#93c5fd', beltBuckle: '#1e3a8a',
+      skin: '#f5d4b0', hair: 'short', hairColor: '#1e3a8a',
+      iris: '#3b82f6', emblem: '#dbeafe',
+      chestStripe: '#93c5fd',
+      power: powerSynth,
+    },
+  },
+
+  /* CABLE (Nathan Summers) — Derivatives Intelligence Analyst
+   * (src/agents/cable.py). Read-only, sem trade, sem LLM. Soldado
+   * cyber-tech do futuro: suit cinza militar + braço biônico (chest
+   * stripe metálico), eyes glow ciano (visão de padrões), cowl curta. */
+  {
+    id: 'soldier', codename: 'CABLE', name: 'Soldier',
+    role: 'L4 — Derivatives Intel Analyst', powerLabel: 'Pattern Recon',
+    cfg: {
+      suit: '#3f3f46', pants: '#1c1917', boot: '#0c0a09', bootCuff: '#71717a',
+      belt: '#a8a29e', beltBuckle: '#404040',
+      skin: '#d4a574', hair: 'short', hairColor: '#e7e5e4',
+      iris: '#22d3ee', emblem: '#a8a29e',
+      chestStripe: '#71717a',
+      power: powerSynth,
+    },
+  },
 ];
 
 /* Build all sprite functions and registry */

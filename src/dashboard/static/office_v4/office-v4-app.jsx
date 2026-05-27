@@ -11,6 +11,7 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const STATIONS = [
   /* Wall */
   { id: 'nimbus',   x: 110,  y: 180, zone: 'wall' },
+  { id: 'oracle',   x: 945,  y: 180, zone: 'wall' },  /* Prometheus — Dev/QA observer, posted top-center */
   { id: 'sleek',    x: 1780, y: 180, zone: 'wall' },
 
   /* L1 ANALYSIS — left zone */
@@ -40,6 +41,18 @@ const STATIONS = [
   { id: 'shade',    x: 1780, y: 640, zone: 'l4' },
   { id: 'arachne',  x: 1940, y: 640, zone: 'l4' },
   { id: 'scribe',   x: 1780, y: 870, zone: 'l4' },
+
+  /* OPS CORRIDOR — nova fileira (2026-05-26): heróis Python que não tinham
+     posição no Floor. Mesma zona 'l4' para herdar random-meeting picker. */
+  { id: 'frost',    x: 200,  y: 1050, zone: 'l4' },  /* IceMan */
+  { id: 'xavier',   x: 360,  y: 1050, zone: 'l4' },  /* Mentor (Charles Xavier) */
+  { id: 'kpi',      x: 520,  y: 1050, zone: 'l4' },  /* Sage KPI */
+  { id: 'cypher',   x: 680,  y: 1050, zone: 'l4' },  /* Code Auditor */
+  { id: 'anvil',    x: 840,  y: 1050, zone: 'l4' },  /* Forge / Ops Scanner */
+  { id: 'mark',     x: 1100, y: 1050, zone: 'l4' },  /* Domino / Risk Scanner */
+  { id: 'patch',    x: 1480, y: 1050, zone: 'l4' },  /* Nick Fury */
+  { id: 'ledger',   x: 1640, y: 1050, zone: 'l4' },  /* Portfolio Manager */
+  { id: 'soldier',  x: 1800, y: 1050, zone: 'l4' },  /* Cable — Derivatives Intel */
 ];
 
 const STATIONS_BY_ID = STATIONS.reduce((m, s) => { m[s.id] = s; return m; }, {});
@@ -1277,18 +1290,34 @@ function OfficeV4App() {
     return () => clearInterval(id);
   }, [agents]);
 
-  /* Power firing — auto-cycle one random agent per ~1.6s */
+  /* Power firing — auto-cycle one random agent per ~1.6s.
+     v2 (2026-05-27): trigger imediato ao ativar + contador visível +
+     fallback para STATIONS quando `agents` ainda não populou (evita
+     primeiro ciclo "morto" no boot). */
   const [autoCycle, setAutoCycle] = useState(true);
+  const [autoCycleCount, setAutoCycleCount] = useState(0);
+
+  // Fire um power num agente random (helper reutilizável).
+  const _firePowerRandom = useCallback(() => {
+    let ids = Object.keys(agents);
+    if (ids.length === 0) {
+      // Fallback: usa STATIONS se agents ainda não populou (race no boot)
+      ids = STATIONS.map((s) => s.id);
+    }
+    if (ids.length === 0) return;
+    const aid = ids[Math.floor(Math.random() * ids.length)];
+    setActiveId(aid);
+    setFireKeys((prev) => ({ ...prev, [aid]: (prev[aid] || 0) + 1 }));
+    setAutoCycleCount((c) => c + 1);
+  }, [agents]);
+
   useEffect(() => {
     if (!autoCycle) return;
-    const id = setInterval(() => {
-      const ids = Object.keys(agents);
-      const aid = ids[Math.floor(Math.random() * ids.length)];
-      setActiveId(aid);
-      setFireKeys((prev) => ({ ...prev, [aid]: (prev[aid] || 0) + 1 }));
-    }, 1700);
+    // Trigger IMEDIATO ao ativar (não esperar 1.7s pro feedback)
+    _firePowerRandom();
+    const id = setInterval(_firePowerRandom, 1700);
     return () => clearInterval(id);
-  }, [autoCycle, agents]);
+  }, [autoCycle, _firePowerRandom]);
 
   /* TRADE FLOW EVENTS — chains L1 → L2 → L3 risk → L3 exec → L4 pnl,
      firing each agent's power + bubble in sequence, lighting up flow arrows.
@@ -1497,8 +1526,19 @@ function OfficeV4App() {
           <span style={appStyles.muted}>· conf room · drones · bubbles ativos</span>
           <button
             onClick={() => setAutoCycle((v) => !v)}
-            style={{ ...appStyles.btn, color: autoCycle ? '#9be8a4' : '#6e7c8c' }}
-          >{autoCycle ? '◉ powers auto' : '○ powers auto'}</button>
+            title={autoCycle
+              ? `Powers auto LIGADO — disparando 1 poder a cada 1.7s (${autoCycleCount} disparados). Click para PAUSAR.`
+              : 'Powers auto DESLIGADO — clique para reativar a animação cíclica de poderes.'}
+            style={{
+              ...appStyles.btn,
+              color: autoCycle ? '#9be8a4' : '#6e7c8c',
+              borderColor: autoCycle ? 'rgba(155,232,164,0.6)' : 'rgba(110,124,140,0.4)',
+              boxShadow: autoCycle ? '0 0 8px rgba(155,232,164,0.35)' : 'none',
+              transition: 'box-shadow 200ms ease, color 200ms ease',
+            }}
+          >
+            {autoCycle ? `◉ powers auto · ${autoCycleCount}` : '○ powers auto'}
+          </button>
         </div>
       </div>
 

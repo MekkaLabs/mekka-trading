@@ -216,6 +216,27 @@ def main() -> int:
             # inicia, para que o operador ligue o runtime pela UI.
             async def _run_dashboard_only() -> None:
                 controller = RuntimeController(equity_usd=args.equity)
+                # Subscreve Prometheus (opt-in via PROMETHEUS_AGENT_ENABLED)
+                try:
+                    from src.agents.prometheus import start_prometheus_agent
+                    agent = await start_prometheus_agent()
+                    if agent is not None:
+                        logger.info(
+                            "[run] Prometheus runtime agent subscribed (dashboard-only)"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[run] Prometheus subscribe failed (non-fatal): {}", exc
+                    )
+                try:
+                    from src.agents.cable import start_cable_agent
+                    cable = await start_cable_agent()
+                    if cable is not None:
+                        logger.info(
+                            "[run] Cable (Derivatives Intel) subscribed (dashboard-only)"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[run] Cable subscribe failed: {}", exc)
                 try:
                     await run_dashboard_server(
                         host=args.dashboard_host,
@@ -280,6 +301,50 @@ def main() -> int:
                         logger.warning("[run] CCXT pre-warm failed (non-fatal): {}", exc)
 
                 asyncio.create_task(_prewarm_ccxt(), name="ccxt_prewarm")
+
+                # Subscreve o agente Prometheus ao event_bus. Opt-in via
+                # PROMETHEUS_AGENT_ENABLED=true. Quando desligado, retorna
+                # None silenciosamente (zero overhead no trading loop).
+                async def _start_prometheus() -> None:
+                    try:
+                        from src.agents.prometheus import start_prometheus_agent
+                        agent = await start_prometheus_agent()
+                        if agent is not None:
+                            logger.info(
+                                "[run] Prometheus runtime agent subscribed "
+                                "to event_bus (observer/learning, read-only)"
+                            )
+                        else:
+                            logger.debug(
+                                "[run] Prometheus disabled (set "
+                                "PROMETHEUS_AGENT_ENABLED=true to enable)"
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "[run] Prometheus subscribe failed (non-fatal): {}", exc
+                        )
+
+                asyncio.create_task(_start_prometheus(), name="prometheus_boot")
+
+                # Subscreve Cable (Derivatives Intel) ao event_bus.
+                # Opt-in via CABLE_AGENT_ENABLED=true. Read-only, sem trade.
+                async def _start_cable() -> None:
+                    try:
+                        from src.agents.cable import start_cable_agent
+                        agent = await start_cable_agent()
+                        if agent is not None:
+                            logger.info(
+                                "[run] Cable (Derivatives Intel) subscribed "
+                                "to event_bus (read-only, no trade)"
+                            )
+                        else:
+                            logger.debug(
+                                "[run] Cable disabled (set CABLE_AGENT_ENABLED=true)"
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("[run] Cable subscribe failed: {}", exc)
+
+                asyncio.create_task(_start_cable(), name="cable_boot")
 
                 try:
                     await run_dashboard_server(

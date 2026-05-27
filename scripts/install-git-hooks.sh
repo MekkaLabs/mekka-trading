@@ -8,9 +8,10 @@
 #
 # Hooks instalados:
 #   - pre-commit-obsidian → .git/hooks/pre-commit
+#   - pre-push-imp-sync   → .git/hooks/pre-push
 #
 # Desinstalar:
-#   rm .git/hooks/pre-commit
+#   rm .git/hooks/pre-commit .git/hooks/pre-push
 
 set -euo pipefail
 
@@ -42,8 +43,9 @@ install_hook() {
 mkdir -p "$HOOKS_DIR"
 
 install_hook "pre-commit-obsidian" "pre-commit"
+install_hook "pre-push-imp-sync" "pre-push"
 
 echo ""
 echo "Hooks instalados em $HOOKS_DIR"
-echo "Para desinstalar: rm $HOOKS_DIR/pre-commit"
-echo "Para bypass pontual: SKIP_OBSIDIAN_HOOK=1 git commit ..."
+echo "Para desinstalar: rm $HOOKS_DIR/pre-commit $HOOKS_DIR/pre-push"
+echo "Para bypass: SKIP_OBSIDIAN_HOOK=1 git commit  |  SKIP_IMP_SYNC=1 git push"
