@@ -99,13 +99,25 @@ def to_mekka(raw: str) -> str:
 # Conversion OUT to each exchange's native format
 # ---------------------------------------------------------------------------
 
-def to_ccxt(mekka_symbol: str, exchange: ExchangeId) -> str:
+def to_ccxt(
+    mekka_symbol: str,
+    exchange: ExchangeId,
+    market_type: str = "linear",
+) -> str:
     """Bare Mekka symbol → CCXT unified perp symbol for the given exchange.
 
     Behaviour per exchange:
       - ``hyperliquid``: USDC-margined perp → ``BTC/USDC:USDC``
       - ``bybit``      : USDT-margined perp → ``BTC/USDT:USDT``
-      - ``binance``    : USDT-margined perp → ``BTC/USDT:USDT``
+      - ``binance`` + ``linear`` (USDT-M):  ``BTC/USDT:USDT``
+      - ``binance`` + ``inverse`` (COIN-M): ``BTC/USD:BTC`` (coin-settled)
+
+    Args:
+        mekka_symbol: bare ou qualquer formato aceito por ``to_mekka``.
+        exchange: hyperliquid | bybit | binance.
+        market_type: "linear" (default) ou "inverse" — só afeta binance hoje.
+            Default linear preserva backward-compat com todos os callers
+            que passam apenas 2 args. Reservado para futuro Bybit inverse.
 
     If the caller passes something that is not bare (e.g. already
     "BTC/USDT:USDT") we normalise first so the function is idempotent —
@@ -117,7 +129,11 @@ def to_ccxt(mekka_symbol: str, exchange: ExchangeId) -> str:
         return ""
     if exchange == "hyperliquid":
         return f"{coin}/USDC:USDC"
-    # Bybit and Binance both use USDT-margined perp linear.
+    # Binance suporta dois market types — COIN-M usa formato inverse.
+    if exchange == "binance" and market_type == "inverse":
+        # CCXT COIN-M symbol: settle currency é o coin (não USDT)
+        return f"{coin}/USD:{coin}"
+    # Bybit linear and Binance linear use USDT-margined perp.
     return f"{coin}/USDT:USDT"
 
 
