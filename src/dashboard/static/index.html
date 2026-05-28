@@ -1935,6 +1935,104 @@
     <!-- Improvements v2 — stats bar + tab Paradas (Bridge) -->
     <script src="/static/improvements_v2.js?v=20260527a" defer></script>
     <script src="/static/implementer_squad.js?v=20260527a" defer></script>
+    <!-- Today Summary failsafe — popula sec-today-summary independente do
+         app.js. Roda mesmo se outro boot lançar exception. Garante que o
+         operador SEMPRE vê o resultado do dia. (2026-05-28) -->
+    <script>
+      (function () {
+        'use strict';
+        var STARTED = Date.now();
+        function _fmt(n) {
+          if (n === null || n === undefined) return '—';
+          var f = parseFloat(n);
+          if (isNaN(f)) return '—';
+          return (f >= 0 ? '+' : '') + f.toFixed(2) + ' USD';
+        }
+        function _color(n) {
+          if (n === null || n === undefined || n === 0) return '';
+          return n > 0 ? 'ts-green' : 'ts-red';
+        }
+        function _setText(id, val, className) {
+          var el = document.getElementById(id);
+          if (!el) { console.warn('[ts-failsafe] missing el:', id); return; }
+          el.textContent = val;
+          if (className !== undefined) el.className = el.className.replace(/ts-(green|red|muted)/g, '').trim() + ' ' + className;
+        }
+        function paint(d) {
+          console.log('[ts-failsafe] painting:', d);
+          var openPnlNull = d.open_pnl_usd === null || d.open_pnl_usd === undefined;
+          // Cards
+          _setText('ts-realized-val', _fmt(d.daily_pnl_usd), 'ts-big-val ' + _color(d.daily_pnl_usd));
+          _setText('ts-realized-sub', (d.trades_count_today || 0) + ' trade(s) fechado(s) hoje');
+          if (openPnlNull) {
+            _setText('ts-open-val', '—', 'ts-big-val ts-muted');
+          } else {
+            _setText('ts-open-val', _fmt(d.open_pnl_usd), 'ts-big-val ' + _color(d.open_pnl_usd));
+          }
+          _setText('ts-open-sub', (d.open_count || 0) + ' posição(ões) ativa(s)' + (openPnlNull ? ' · sem cotação' : ''));
+          var netVal = openPnlNull ? d.daily_pnl_usd : d.net_pnl_usd;
+          _setText('ts-net-val', _fmt(netVal), 'ts-big-val ' + _color(netVal));
+          _setText('ts-net-sub', (d.day_emoji || '') + (openPnlNull ? ' apenas realizado' : ' realizado + aberto'));
+          // Trades list
+          var todayTrades = d.today_trades || [];
+          var recentTrades = d.recent_trades || [];
+          var showRecent = todayTrades.length === 0 && recentTrades.length > 0;
+          var trades = (showRecent ? recentTrades : todayTrades).slice(0, 20);
+          var tlist = document.getElementById('ts-trades-list');
+          var tempty = document.getElementById('ts-trades-empty');
+          var theader = document.getElementById('ts-trades-header');
+          if (theader) theader.textContent = showRecent ? '📅 Últimos trades (sem trades hoje)' : '📅 Trades de Hoje';
+          if (tempty) tempty.style.display = trades.length ? 'none' : '';
+          if (tlist) {
+            tlist.innerHTML = '';
+            trades.forEach(function (t) {
+              var pnlKnown = t.pnl_usd !== null && t.pnl_usd !== undefined;
+              var pnlText = pnlKnown ? _fmt(t.pnl_usd) : '—';
+              var pnlCls = pnlKnown ? (t.pnl_usd > 0 ? 'ts-green' : (t.pnl_usd < 0 ? 'ts-red' : '')) : 'ts-muted';
+              var time = '';
+              if (showRecent && t.date) time = t.date.slice(5) + ' ' + (t.timestamp ? t.timestamp.slice(11, 16) : '');
+              else time = t.timestamp ? t.timestamp.slice(11, 16) : '—';
+              var notional = t.notional_usd ? '$' + parseFloat(t.notional_usd).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '—';
+              var row = document.createElement('div');
+              row.className = 'ts-trade-row';
+              row.innerHTML = '<span class="ts-trade-time">' + time + '</span>' +
+                '<span class="ts-trade-symbol">' + (t.emoji || '📋') + ' ' + (t.symbol || '?') + '</span>' +
+                '<span class="ts-trade-side">' + (t.side || '?').toUpperCase() + '</span>' +
+                '<span class="ts-trade-status">' + (t.status || '?') + '</span>' +
+                '<span class="ts-trade-notional">' + notional + '</span>' +
+                '<span class="ts-trade-pnl ' + pnlCls + '">' + pnlText + '</span>';
+              tlist.appendChild(row);
+            });
+          }
+          // Footer
+          var upd = document.getElementById('ts-last-update');
+          if (upd) upd.textContent = new Date().toLocaleTimeString('pt-BR') + ' (failsafe ' + (Date.now() - STARTED) + 'ms)';
+        }
+        function load() {
+          console.log('[ts-failsafe] fetching /api/today-summary…');
+          fetch('/api/today-summary', { cache: 'no-store' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+              if (!d.ok) { console.error('[ts-failsafe] API error:', d); return; }
+              paint(d);
+            })
+            .catch(function (err) {
+              console.error('[ts-failsafe] fetch failed:', err);
+              var upd = document.getElementById('ts-last-update');
+              if (upd) upd.textContent = '⚠️ Erro: ' + err.message;
+            });
+        }
+        function start() {
+          load();
+          setInterval(function () { if (!document.hidden) load(); }, 30000);
+        }
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', start);
+        } else {
+          start();
+        }
+      })();
+    </script>
     <!-- agents-sprites.js exposes window.AGENTS / drawAgent / drawSprite
          so the main dashboard Agents Roster renders the same pixel art
          the Pixel Office uses (P0.6, HANDOFF 2026-05-20). MUST load
