@@ -3845,15 +3845,22 @@ async function _mkLoadEnvBadge() {
     const ex = String(res.exchange).toUpperCase();
     const net = String(res.network || 'unknown').toUpperCase();
     const mode = String(res.mode || 'unknown');
+    // F8 (2026-05-28): Binance pode estar em USDT-M (linear) ou COIN-M (inverse).
+    // Mostrar no badge pra operador não confundir mercado settled-em-USDT
+    // vs settled-em-BTC. Outras exchanges não têm essa distinção.
+    let marketSuffix = '';
+    if (ex === 'BINANCE' && res.binance_market_type) {
+      marketSuffix = res.binance_market_type === 'inverse' ? ' · COIN-M' : ' · USDT-M';
+    }
     // Label content: include both exchange and network so an operator
     // never has to remember which one is "current". Paper override is
     // shown explicitly so the operator knows the mainnet colour does
     // NOT mean live orders.
     let label;
-    if (mode === 'paper') label = `${ex} · PAPER`;
-    else                  label = `${ex} · ${net}`;
+    if (mode === 'paper') label = `${ex}${marketSuffix} · PAPER`;
+    else                  label = `${ex}${marketSuffix} · ${net}`;
     el.textContent = label;
-    el.title = `Exchange: ${ex}\nNetwork: ${net}\nPaper trading: ${res.paper_trading}\nLive confirmed: ${res.live_confirmed}`;
+    el.title = `Exchange: ${ex}\nNetwork: ${net}\nMarket type: ${res.binance_market_type || 'n/a'}\nPaper trading: ${res.paper_trading}\nLive confirmed: ${res.live_confirmed}\nScalp mainnet enabled: ${res.scalp_mainnet_enabled}`;
     // Reset class list before reapplying — order doesn't matter, only
     // exactly one of the four states should be present.
     el.classList.remove(

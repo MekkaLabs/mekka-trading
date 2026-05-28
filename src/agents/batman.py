@@ -1300,6 +1300,46 @@ class Batman(BaseAgent[RiskApproval]):
             )
 
         # ---------------------------------------------------------------
+        # 0.5 Scalp gates — only active when current trading_mode is 'scalp'.
+        # Reads runtime_mode.get_params() and runs batman_scalp_gates module.
+        # Fail-silent: any exception keeps Batman flow intact (defensive
+        # against import errors during dev).
+        # F7b (2026-05-28): hook minimalista (módulo já validado por testes).
+        # ---------------------------------------------------------------
+        try:
+            from src.config.runtime_mode import get_active_mode, get_params
+            from src.agents.batman_scalp_gates import evaluate_all_scalp_gates
+            if get_active_mode() == "scalp":
+                mode_params = get_params()
+                # Lazy conversion: current_positions é list[PositionSummary]
+                pos_dicts = [
+                    p.model_dump() if hasattr(p, "model_dump") else dict(p)
+                    for p in (current_positions or [])
+                ]
+                gate_results = evaluate_all_scalp_gates(
+                    mode_params=mode_params,
+                    open_positions=pos_dicts,
+                )
+                failed = [g for g in gate_results if not g.passed]
+                if failed:
+                    gate_reasons = [
+                        f"scalp_gate.{g.gate_name}: {g.reason}" for g in failed
+                    ]
+                    reasons.extend(gate_reasons)
+                    breached.extend([f"scalp.{g.gate_name}" for g in failed])
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        adjusted_size_pct=0.0,
+                        adjusted_leverage=1,
+                        breached_limits=breached,
+                    )
+        except Exception as _scalp_exc:  # noqa: BLE001
+            # Fail-silent: hook nunca quebra Batman; só log + segue
+            self._log.warning(f"[Batman] scalp gates hook no-op: {_scalp_exc}")
+
+        # ---------------------------------------------------------------
         # 1. HOLD — nothing to execute, mark REJECTED for clarity
         # ---------------------------------------------------------------
         if signal.action == TradeAction.HOLD:

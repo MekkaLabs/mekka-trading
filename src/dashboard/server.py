@@ -3653,12 +3653,21 @@ class MekkaDashboardServer:
         else:
             mode = "unknown"
 
+        # F8 (2026-05-28) — Binance market type pra badge USDT-M / COIN-M.
+        # Só relevante quando exchange=binance; outras exchanges retornam None.
+        binance_market_type = (
+            getattr(settings, "binance_market_type", "linear")
+            if settings.active_exchange == "binance" else None
+        )
+
         return web.json_response({
             "exchange": settings.active_exchange,
             "network": network,
             "paper_trading": bool(settings.paper_trading),
             "live_confirmed": bool(settings.live_trading_confirmed),
             "mode": mode,
+            "binance_market_type": binance_market_type,  # "linear" | "inverse" | None
+            "scalp_mainnet_enabled": bool(getattr(settings, "scalp_mainnet_enabled", False)),
             # Symbols the system trades — needed by UI dropdowns (filter
             # tradesTimeline by symbol etc). Always safe to expose.
             "trading_assets": list(settings.trading_assets or []),
