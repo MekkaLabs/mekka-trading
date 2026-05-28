@@ -1,6 +1,6 @@
 ---
 rec_id: "edfae3dd5deb"
-status: queued
+status: stale
 domain: "dev-squad"
 area: "memory"
 priority: "P2"

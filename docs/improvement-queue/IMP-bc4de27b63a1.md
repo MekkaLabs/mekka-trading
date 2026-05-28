@@ -1,6 +1,6 @@
 ---
 rec_id: "bc4de27b63a1"
-status: queued
+status: stale
 domain: "trading-ops"
 area: "risk"
 priority: "P2"

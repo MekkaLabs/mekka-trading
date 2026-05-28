@@ -1,6 +1,6 @@
 ---
 rec_id: "ea324fca3e06"
-status: queued
+status: stale
 domain: "dev-squad"
 area: "research"
 priority: "P2"

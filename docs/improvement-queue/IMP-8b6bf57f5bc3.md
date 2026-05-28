@@ -1,6 +1,6 @@
 ---
 rec_id: "8b6bf57f5bc3"
-status: queued
+status: stale
 domain: "dev-squad"
 area: "backend"
 priority: "P1"
