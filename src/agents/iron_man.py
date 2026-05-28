@@ -511,7 +511,13 @@ class IronMan(BaseAgent[ExecutionResult]):
             (exchange_id == "binance" and bool(getattr(settings, "binance_testnet", False)))
             or (exchange_id == "bybit" and bool(getattr(settings, "bybit_testnet", False)))
         )
-        cache_key = f"{exchange_id}:{'testnet' if _testnet else 'mainnet'}"
+        # COIN-M support (2026-05-28): cache key inclui market_type para
+        # invalidar quando operador troca de USDT-M (linear) ↔ COIN-M (inverse).
+        # Sem isso, swap não pegaria o novo CCXT client.
+        _mt = ""
+        if exchange_id == "binance":
+            _mt = f":mt={getattr(settings, 'binance_market_type', 'linear')}"
+        cache_key = f"{exchange_id}:{'testnet' if _testnet else 'mainnet'}{_mt}"
         loop = asyncio.get_event_loop()
 
         async with _CCXT_SHARED_LOCK:
@@ -552,13 +558,19 @@ class IronMan(BaseAgent[ExecutionResult]):
                     )
                 cfg["apiKey"] = settings.binance_api_key
                 cfg["secret"] = settings.binance_api_secret
+                # COIN-M Futures support (2026-05-28) — defaultSubType lido
+                # dinamicamente de settings.binance_market_type. Cache key
+                # acima já distingue testnet/mainnet; precisamos ALSO
+                # distinguir market_type pra invalidar quando muda.
+                _binance_mt = getattr(settings, "binance_market_type", "linear")
                 cfg["options"].update(
                     {
-                        "defaultSubType": "linear",
-                        "fetchMarkets": {"types": ["linear"]},
+                        "defaultSubType": _binance_mt,  # "linear" (USDT-M) ou "inverse" (COIN-M)
+                        "fetchMarkets": {"types": [_binance_mt]},
                         "disableFuturesSandboxWarning": True,
                     }
                 )
+                # cache_key já inclui :mt=... acima — não duplicar aqui
 
             exchange = getattr(ccxt, exchange_id)(cfg)
 

@@ -169,6 +169,33 @@ class Settings(BaseSettings):
             "testnet endpoints. Default True to match BYBIT_TESTNET safety posture."
         ),
     )
+    binance_market_type: Literal["linear", "inverse"] = Field(
+        default="linear",
+        alias="BINANCE_MARKET_TYPE",
+        description=(
+            "Binance Futures market type:\n"
+            "  - 'linear' (default): USDT-Margined Futures (BTCUSDT, ETHUSDT). "
+            "    Settled em USDT; PnL em USD. fapi.binance.com endpoint.\n"
+            "  - 'inverse': COIN-Margined Futures (BTCUSD_PERP). Settled em coin "
+            "    (BTC, ETH); PnL em coin convertido para USD via mark price. "
+            "    dapi.binance.com endpoint.\n"
+            "Hot-swap requer reconnect do CCXT client em IronMan (cache invalidation "
+            "automática quando setting muda). NÃO mude com posições abertas — "
+            "validator do trade_now bloqueia. Affects market_registry.to_ccxt "
+            "(symbol formato) e contract_sizer (quantity calculation)."
+        ),
+    )
+    scalp_mainnet_enabled: bool = Field(
+        default=False,
+        alias="SCALP_MAINNET_ENABLED",
+        description=(
+            "Hard gate adicional para o Modo Scalp: quando False (default), "
+            "qualquer trade em modo='scalp' + paper_trading=False + binance_testnet=False "
+            "é BLOQUEADO. Razão: scalp em loop 120s pode explodir custos LLM e "
+            "ainda não foi validado em condições mainnet. Setar True só depois "
+            "de validar end-to-end em testnet e estar confortável com o gasto."
+        ),
+    )
     binance_entry_order_type: str = Field(
         default="auto",
         description=(
