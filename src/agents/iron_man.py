@@ -96,7 +96,14 @@ class IronMan(BaseAgent[ExecutionResult]):
         super().__init__(
             codename="IronMan",
             role=f"Execution Engineer ({settings.active_exchange} / {settings.hyperliquid_network})",
-            timeout_s=20.0,  # Order placement na exchange (1-2 round trips)
+            # Force-Execute (modo deus) e ordens completas envolvem múltiplas
+            # round-trips: market-order + SL + TP + reconciliação. Em
+            # condições normais soma 5-10s; com latência variável da Binance
+            # testnet (já vi spikes >18s em single call) o ideal é deixar
+            # margem confortável acima do CCXT timeout interno (15s).
+            # Pre-2026-05-28: timeout_s=20s competia com CCXT 20s → race
+            # condition matava o agente antes do CCXT dar erro decente.
+            timeout_s=45.0,
         )
         self._exchange: Optional[Any] = None  # hyperliquid Exchange instance
         self._info: Optional[Any] = None      # hyperliquid Info instance
@@ -518,7 +525,11 @@ class IronMan(BaseAgent[ExecutionResult]):
 
             cfg: dict = {
                 "enableRateLimit": True,
-                "timeout": 20_000,
+                # 15s por request CCXT — abaixo do timeout_s=45s do agente.
+                # Se um único request travar >15s, CCXT dá NetworkError
+                # específico ANTES do BaseAgent matar com TimeoutError
+                # genérico. Melhor diagnóstico + retry logic do CCXT funciona.
+                "timeout": 15_000,
                 "options": {
                     "defaultType": "swap",
                     # 60s = Binance max recvWindow. Wide window prevents the
