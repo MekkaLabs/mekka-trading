@@ -459,6 +459,15 @@ def build_layer1_graph(professor: "ProfessorX") -> StateGraph:
                 MarketData.model_validate(conf_dict) if conf_dict else None
             )
 
+            # Scalp Mode (2026-05-28) — injeta trading_mode atual para que
+            # Vision possa renderizar prompt mode-aware. Fail-silent: se
+            # runtime_mode indisponível, mantém "" (retrocompat).
+            try:
+                from src.config.runtime_mode import get_mode as _get_mode  # noqa: WPS433
+                _current_mode = _get_mode()
+            except Exception:
+                _current_mode = ""
+
             analysis = MarketAnalysis(
                 chart=chart,
                 confirmation_chart=confirmation_chart,
@@ -468,6 +477,7 @@ def build_layer1_graph(professor: "ProfessorX") -> StateGraph:
                 liquidity=_safe_validate(LiquidityData, state.get("liquidity")),
                 anomaly=_safe_validate(AnomalyReport, state.get("anomaly")),
                 momentum=_safe_validate(MomentumSignal, state.get("momentum")),
+                trading_mode=_current_mode,
             )
 
             errors = state.get("errors", [])

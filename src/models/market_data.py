@@ -612,6 +612,18 @@ class MarketAnalysis(BaseModel):
             "sources_count (int 1-7), degraded (bool), missing_sources (list[str])."
         ),
     )
+    # Scalp Mode (2026-05-28) — trading_mode ativo no momento da análise.
+    # Vision usa para renderizar bloco scalp-aware no prompt; Batman pode
+    # aplicar gates específicos. Valores: "conservative" | "balanced" |
+    # "aggressive" | "scalp" | "" (string vazia = retrocompat).
+    trading_mode: str = Field(
+        default="",
+        description=(
+            "Trading mode ativo (runtime_mode.py) — preenchido pelo kernel "
+            "antes de despachar para Vision. Usado para renderizar prompt "
+            "mode-aware (ex: '=== MODE: SCALP ===' header)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _compute_snapshot_id(self) -> "MarketAnalysis":
@@ -673,6 +685,45 @@ class MarketAnalysis(BaseModel):
             "IMPORTANTE: escreva o campo `reasoning` e textos descritivos EM PORTUGUÊS DO BRASIL.",
             "",
         ]
+
+        # Scalp Mode (2026-05-28) — header mode-aware. Em scalp, Vision
+        # opera com horizonte intraday curto (minutos), prefere R:R 1:1
+        # com alta frequência, e dá MAIOR PESO ao Flash momentum signal.
+        if self.trading_mode == "scalp":
+            sections.append("=== MODE: SCALP (intraday curto) ===")
+            sections.append(
+                "Você está operando em modo SCALP. Horizonte de cada trade é "
+                "de minutos (alvo: 5-30 minutos). Timeframes analisados são "
+                "curtos (5m + 1m). Características esperadas:"
+            )
+            sections.append(
+                "- Prefira setups com momentum CLARO no Flash signal (peso > "
+                "indicadores de longo prazo)."
+            )
+            sections.append(
+                "- Aceite R:R 1:1 quando convicção for alta; trades de baixo "
+                "R:R são compensados por alta frequência."
+            )
+            sections.append(
+                "- Stop loss APERTADO (próximo do entry) — scalp não tem "
+                "tolerância para drawdown."
+            )
+            sections.append(
+                "- REJEITE entradas em ranges sem direção clara; aguarde "
+                "burst de volatilidade (Thor regime, ATR > 0.15%)."
+            )
+            sections.append(
+                "- Tempo máximo em posição: 30min (Cyclops fecha automaticamente). "
+                "Planeje saída antes."
+            )
+            sections.append("")
+        elif self.trading_mode in ("conservative", "balanced", "aggressive"):
+            sections.append(f"=== MODE: {self.trading_mode.upper()} (swing) ===")
+            sections.append(
+                "Modo swing — horizonte de horas a dias. Análise de 4h+1h. "
+                "Prefira setups com R:R ≥ 1.5 e confluência multi-timeframe."
+            )
+            sections.append("")
 
         # [C4] HIGH-severity anomalies go FIRST — they are the most urgent context.
         _anomaly_placed = False
