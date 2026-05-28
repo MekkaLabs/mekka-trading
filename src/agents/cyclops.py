@@ -609,11 +609,43 @@ class Cyclops:
                     continue
 
             # ----------------------------------------------------------------
-            # Check triggers (full close — SL or full TP)
+            # Check triggers (full close — SL, full TP, ou TIME-STOP em scalp)
             # ----------------------------------------------------------------
             trigger_reason: Optional[str] = None
 
-            if side == "long":
+            # Scalp Mode (2026-05-28) — time-stop: fecha posição que
+            # ultrapassou max_position_age_minutes. Vence SL/TP normais
+            # porque em scalp o objetivo é não segurar posição além do
+            # horizonte planejado. Sem-op em modos swing (max_age = None).
+            try:
+                from src.config.runtime_mode import get_params as _get_mode_params  # noqa: WPS433
+                _mp = _get_mode_params()
+                _max_age_min = _mp.get("max_position_age_minutes")
+            except Exception:
+                _max_age_min = None
+
+            if _max_age_min and _max_age_min > 0:
+                # Idade = agora - timestamp do trade ABERTO mais antigo da side
+                from datetime import datetime as _dt, timezone as _tz, timedelta as _td  # noqa: WPS433
+                _now = _dt.now(_tz.utc)
+                _cutoff = _now - _td(minutes=_max_age_min)
+                _oldest = None
+                for _t in open_trades:
+                    _ts = getattr(_t, "timestamp", None)
+                    if _ts is None:
+                        continue
+                    if _ts.tzinfo is None:
+                        _ts = _ts.replace(tzinfo=_tz.utc)
+                    if _oldest is None or _ts < _oldest:
+                        _oldest = _ts
+                if _oldest is not None and _oldest < _cutoff:
+                    _age_min = (_now - _oldest).total_seconds() / 60.0
+                    trigger_reason = (
+                        f"SCALP time-stop: position age {_age_min:.1f}min "
+                        f"> max {_max_age_min}min"
+                    )
+
+            if trigger_reason is None and side == "long":
                 if sl_trigger and mark <= sl_trigger:
                     trigger_reason = (
                         f"SL triggered: mark {mark:,.4f} ≤ sl {sl_trigger:,.4f}"
@@ -622,7 +654,7 @@ class Cyclops:
                     trigger_reason = (
                         f"TP triggered: mark {mark:,.4f} ≥ tp {tp_trigger:,.4f}"
                     )
-            else:  # short
+            elif trigger_reason is None:  # short
                 if sl_trigger and mark >= sl_trigger:
                     trigger_reason = (
                         f"SL triggered: mark {mark:,.4f} ≥ sl {sl_trigger:,.4f}"
