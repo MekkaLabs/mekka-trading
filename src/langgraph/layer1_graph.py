@@ -209,10 +209,24 @@ def build_layer1_graph(professor: "ProfessorX") -> StateGraph:
         """
         Executa Superman no primary TF (obrigatório) e opcionalmente no
         confirmation TF (best-effort). Falha fatal → chart=None.
+
+        Scalp mode override: quando o modo ativo é 'scalp' (ou variante),
+        usa scalp_primary_timeframe / scalp_confirmation_timeframe do preset
+        (ex: 5m + 1m) em vez do default 4h+1h do settings.
         """
         from src.config.settings import settings as _settings  # noqa: WPS433
+        from src.config.runtime_mode import get_params as _get_mode_params  # noqa: WPS433
 
         symbol = state["symbol"]
+
+        # Mode-aware timeframes: scalp override OR settings defaults
+        try:
+            _mp = _get_mode_params()
+            primary_tf = _mp.get("scalp_primary_timeframe") or _settings.primary_timeframe
+            conf_tf = _mp.get("scalp_confirmation_timeframe") or _settings.confirmation_timeframe
+        except Exception:
+            primary_tf = _settings.primary_timeframe
+            conf_tf = _settings.confirmation_timeframe
 
         # Lazy init Superman (detém conexão CCXT)
         if professor._superman is None:
@@ -221,10 +235,10 @@ def build_layer1_graph(professor: "ProfessorX") -> StateGraph:
 
         # Primary TF (obrigatório)
         try:
-            chart = await professor._superman.run(symbol=symbol)
+            chart = await professor._superman.run(symbol=symbol, timeframe=primary_tf)
             chart_dict = chart.model_dump(mode="json")
         except Exception as exc:  # noqa: BLE001
-            logger.error(f"[L1:superman] {symbol} primary chart failed: {exc}")
+            logger.error(f"[L1:superman] {symbol} primary chart ({primary_tf}) failed: {exc}")
             return {
                 "chart": None,
                 "confirmation_chart": None,
@@ -233,13 +247,12 @@ def build_layer1_graph(professor: "ProfessorX") -> StateGraph:
 
         # Confirmation TF (best-effort)
         conf_chart_dict: Optional[dict] = None
-        conf_tf = _settings.confirmation_timeframe
-        if conf_tf and conf_tf != _settings.primary_timeframe:
+        if conf_tf and conf_tf != primary_tf:
             try:
                 conf = await professor._superman.run(symbol=symbol, timeframe=conf_tf)
                 conf_chart_dict = conf.model_dump(mode="json")
             except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[L1:superman] {symbol} confirmation TF failed: {exc}")
+                logger.warning(f"[L1:superman] {symbol} confirmation TF ({conf_tf}) failed: {exc}")
 
         logger.debug(f"[L1:superman] {symbol} chart ready")
         return {

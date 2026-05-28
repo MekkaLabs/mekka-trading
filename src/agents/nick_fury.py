@@ -2984,14 +2984,24 @@ async def run_forever(equity_usd: Optional[float] = None) -> None:
     await fury.initialize()
 
     monitor_interval = settings.monitor_interval_seconds
-    main_interval = settings.main_loop_interval_seconds
     last_main_at = 0.0
 
     try:
         while True:
             now = asyncio.get_event_loop().time()
+            # Mode-aware loop interval: scalp mode roda em ~2min (preset value),
+            # outros modos usam o default de settings.py (4h). Lemos a cada
+            # iteração para que mode-switch via /api/mode tenha efeito imediato
+            # no próximo loop sem precisar restart do dashboard.
+            try:
+                from src.config.runtime_mode import get_params as _get_mode_params
+                _mode_interval = _get_mode_params().get("main_loop_interval_seconds")
+                main_interval = int(_mode_interval) if _mode_interval else settings.main_loop_interval_seconds
+            except Exception:
+                main_interval = settings.main_loop_interval_seconds
+
             if now - last_main_at >= main_interval:
-                logger.info("[NickFury] Starting main cycle")
+                logger.info(f"[NickFury] Starting main cycle (interval={main_interval}s)")
                 await fury.run_main_cycle(equity_usd=equity_usd)
                 last_main_at = now
             else:
