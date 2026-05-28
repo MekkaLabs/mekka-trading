@@ -7872,11 +7872,16 @@ function _tsColorClass(val) {
 }
 
 async function loadTodaySummary() {
+  console.log('[TodaySummary] fetching /api/today-summary…');
   try {
-    const res = await fetch('/api/today-summary');
+    const res = await fetch('/api/today-summary', { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const d = await res.json();
     if (!d.ok) throw new Error(d.error || 'API error');
+    console.log('[TodaySummary] data:', {
+      open_count: d.open_count, today_trades: (d.today_trades||[]).length,
+      daily_pnl: d.daily_pnl_usd, has_prices: d.has_prices,
+    });
 
     const hasPrices   = !!d.has_prices;
     const showQuoteWarn = !!d.show_quote_warning;
