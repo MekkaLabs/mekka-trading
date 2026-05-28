@@ -169,6 +169,109 @@
       });
   }
 
+  // ---- Financial topbar failsafe -------------------------------------
+  //
+  // A topbar (financial-topbar) é uma faixa de 7 cards no topo. Quando
+  // _mkBootDashboardV2 ou um boot anterior lança exception, _mkBootTopBar
+  // não roda e a topbar fica com — em tudo. Este failsafe popula
+  // independente, usando os mesmos 3 endpoints (/api/pnl/summary,
+  // /api/positions, /api/overview) que o app.js usa.
+
+  function _setFtb(id, val, cls) {
+    var el = document.getElementById(id);
+    if (!el) {
+      console.warn('[ts-failsafe] ftb DOM ausente:', id);
+      return false;
+    }
+    el.textContent = val;
+    el.className = cls ? 'ftb-value ' + cls : 'ftb-value';
+    return true;
+  }
+
+  function _fmtMoney(v) {
+    if (v === null || v === undefined) return '—';
+    var n = parseFloat(v);
+    if (isNaN(n)) return '—';
+    return '$' + n.toLocaleString('pt-BR', {
+      minimumFractionDigits: 2, maximumFractionDigits: 2,
+    });
+  }
+
+  function loadTopbar() {
+    console.log('[ts-failsafe] loading financial-topbar…');
+    // PnL summary (equity + day PnL)
+    fetch('/api/pnl/summary?window=1', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || !d.window) return;
+        var eq = d.window.latest_equity_usd;
+        var pnl = d.window.pnl_usd;
+        var startEq = (eq != null && pnl != null) ? eq - pnl : null;
+        var pnlPct = (startEq && startEq > 0) ? (pnl / startEq * 100) : null;
+        var pnlCls = pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : '';
+        _setFtb('ftb-wallet-val', _fmtMoney(eq));
+        _setFtb('ftb-daypnl-val',
+                pnl != null ? (pnl >= 0 ? '+' : '') + _fmtMoney(pnl) : '—',
+                pnlCls);
+        _setFtb('ftb-daypnl-pct-val',
+                pnlPct != null ? (pnlPct >= 0 ? '+' : '') + pnlPct.toFixed(2) + '%' : '—',
+                pnlCls);
+        console.log('[ts-failsafe] topbar wallet/pnl ok');
+      })
+      .catch(function (err) {
+        console.warn('[ts-failsafe] /api/pnl/summary failed:', err);
+      });
+
+    // Positions count
+    fetch('/api/positions', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d) return;
+        var count = d.count != null ? d.count : (Array.isArray(d.items) ? d.items.length : '—');
+        _setFtb('ftb-positions-val', String(count));
+      })
+      .catch(function (err) {
+        console.warn('[ts-failsafe] /api/positions failed:', err);
+      });
+
+    // Overview (risk + agents + mode)
+    fetch('/api/overview', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d) return;
+        // Risk
+        var dd = d.drawdown_pct != null
+          ? (d.drawdown_pct * 100).toFixed(1) + '%'
+          : '—';
+        var riskLabel = d.kill_switch_active ? '🔴 KS' : dd;
+        var riskCls = d.kill_switch_active ? 'negative' : '';
+        _setFtb('ftb-risk-val', riskLabel, riskCls);
+        // Mode
+        var mode = d.trading_mode || d.mode || '—';
+        _setFtb('ftb-mode-val', String(mode).toUpperCase());
+        // Agents
+        var breakers = d.breakers || {};
+        var total = Object.keys(breakers).length;
+        var active = Object.values(breakers).filter(function (v) { return v; }).length;
+        var agentLabel = active > 0
+          ? '⚠️ ' + active + '/' + total
+          : '🟢 ' + (total > 0 ? 'OK' : 'standby');
+        _setFtb('ftb-agents-val', agentLabel);
+        console.log('[ts-failsafe] topbar overview ok (mode=' + mode + ')');
+      })
+      .catch(function (err) {
+        console.warn('[ts-failsafe] /api/overview failed:', err);
+      });
+
+    // Update timestamp
+    var upEl = document.getElementById('ftb-update-val');
+    if (upEl) {
+      upEl.textContent = new Date().toLocaleTimeString('pt-BR', {
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+      });
+    }
+  }
+
   function start() {
     console.log('[ts-failsafe] booting (DOMContentLoaded fired)');
     // Confirma que a section existe
@@ -180,8 +283,12 @@
     console.log('[ts-failsafe] sec-today-summary found, visible=' +
                 (window.getComputedStyle(sec).display !== 'none'));
     load();
+    loadTopbar();
     setInterval(function () {
-      if (!document.hidden) load();
+      if (!document.hidden) {
+        load();
+        loadTopbar();
+      }
     }, 30000);
   }
 
