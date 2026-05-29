@@ -1236,6 +1236,45 @@ function OfficeV4App() {
         const positions = Object.keys(prev).map((id) => ({
           id, x: prev[id].x, y: prev[id].y,
         }));
+        // ── Passo 1: agentes PARADOS (idle) — apenas separation drift.
+        // Quando duas STATIONS estão muito próximas (ex: 4 stations da
+        // L2 enfileiradas), os agentes nasciam empilhados e ficavam ali.
+        // Aplicamos um drift suave proporcional à força de separation
+        // pra que eles se espacem em 1-2 segundos sem sair muito da station.
+        const IDLE_DRIFT_STEP = 1.2; // px por tick — bem sutil
+        const IDLE_DRIFT_RADIUS = SEPARATION_RADIUS;
+        for (const agentId of Object.keys(next)) {
+          const a = next[agentId];
+          if (a.isMoving) continue;
+          let sx = 0, sy = 0, neighbors = 0;
+          for (const p of positions) {
+            if (p.id === agentId) continue;
+            const ddx = a.x - p.x;
+            const ddy = a.y - p.y;
+            const d2 = ddx*ddx + ddy*ddy;
+            if (d2 > IDLE_DRIFT_RADIUS * IDLE_DRIFT_RADIUS) continue;
+            const d = Math.max(SEPARATION_MIN_DIST, Math.sqrt(d2));
+            const inv = (IDLE_DRIFT_RADIUS - d) / IDLE_DRIFT_RADIUS;
+            sx += (ddx / d) * inv;
+            sy += (ddy / d) * inv;
+            neighbors += 1;
+          }
+          if (neighbors > 0) {
+            const slen = Math.sqrt(sx*sx + sy*sy);
+            if (slen > 0.1) {
+              sx /= slen;
+              sy /= slen;
+              next[agentId] = {
+                ...a,
+                x: a.x + sx * IDLE_DRIFT_STEP,
+                y: a.y + sy * IDLE_DRIFT_STEP,
+              };
+              changed = true;
+            }
+          }
+        }
+
+        // ── Passo 2: agentes em MOVIMENTO — separation + waypoint
         for (const agentId of Object.keys(next)) {
           const a = next[agentId];
           if (!a.isMoving) continue;
