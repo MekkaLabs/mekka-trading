@@ -134,6 +134,72 @@ def _append_history(result: ImplementerResult) -> None:
     _save_json(_HISTORY_FILE, history)
 
 
+def _audit_implementer_run(result: ImplementerResult) -> None:
+    """INV-16 (2026-05-29): emite IMPLEMENTER_RAN ao audit_log.
+
+    Antes: o worker rodava silenciosamente — único registro era o
+    implementer_history.json local. Sem audit trail no DB principal,
+    dashboard não conseguia mostrar "histórico de implementação".
+
+    Map de severity:
+      - SUCCESS                       → INFO
+      - PARTIAL / RECIPE_ONLY         → DEBUG (não é falha real, é fallback)
+      - SKIPPED                       → DEBUG
+      - BLOCKED / FAILED              → WARNING
+
+    Fail-silent — qualquer erro de I/O é só log debug.
+    """
+    try:
+        import asyncio as _asyncio  # noqa: WPS433
+        from src.persistence.repository import MekkaRepository  # noqa: WPS433
+
+        sev_map = {
+            ImplementerStatus.SUCCESS: "INFO",
+            ImplementerStatus.PARTIAL: "DEBUG",
+            ImplementerStatus.RECIPE_ONLY: "DEBUG",
+            ImplementerStatus.SKIPPED: "DEBUG",
+            ImplementerStatus.BLOCKED: "WARNING",
+            ImplementerStatus.FAILED: "WARNING",
+        }
+        severity = sev_map.get(result.status, "DEBUG")
+
+        payload = {
+            "rec_id": result.rec_id,
+            "agent": result.agent,
+            "status": result.status.value,
+            "layer_used": result.layer_used,
+            "files_changed": result.files_changed[:10],
+            "n_files": len(result.files_changed),
+            "lines_changed": result.lines_changed,
+            "commit_sha": result.commit_sha,
+            "cost_usd": result.cost_usd,
+            "duration_ms": result.duration_ms,
+        }
+        message = (
+            f"IMP-{result.rec_id} {result.status.value} "
+            f"({result.layer_used or 'no-layer'}, "
+            f"{len(result.files_changed)} files, {result.lines_changed} lines)"
+        )
+
+        async def _emit() -> None:
+            await MekkaRepository.log_event(
+                agent="ImplementerWorker",
+                event="IMPLEMENTER_RAN",
+                severity=severity,
+                message=message,
+                payload=payload,
+            )
+
+        # Roda no loop existente se já houver, senão cria um one-shot.
+        try:
+            loop = _asyncio.get_running_loop()
+            loop.create_task(_emit())
+        except RuntimeError:
+            _asyncio.run(_emit())
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[worker] IMPLEMENTER_RAN emit skipped: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -172,6 +238,7 @@ def run_once(max_imps: int = 3, dry_run: bool = False) -> dict[str, Any]:
         result = implementer.implement(brief)
         results.append(result.to_dict())
         _append_history(result)
+        _audit_implementer_run(result)
 
         # Atualiza dev_state do índice + brief.md
         if result.status == ImplementerStatus.SUCCESS:

@@ -44,7 +44,12 @@ async def resolve_trade_memories(
     Returns a dict with per-store status (for observability/tests).
     """
     sym = symbol.upper()
-    result = {"agent_memory": False, "role_working": False, "signal_outcome": False}
+    result = {
+        "agent_memory": False,
+        "role_working": False,
+        "signal_outcome": False,
+        "decision_memory": False,  # INV-15 (2026-05-29)
+    }
 
     # ── Recover missing context from last actionable signal ─────────────
     if action is None or confidence is None or regime is None:
@@ -127,5 +132,66 @@ async def resolve_trade_memories(
             result["signal_outcome"] = True
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[OutcomeResolver] SignalOutcomeMemory.record skipped: {exc}")
+
+    # ── 4. DecisionMemory (Story 249) — INV-15 (2026-05-29) ─────────────
+    # Antes: snapshot mostrava 198 decisions, todas PENDING (with_outcome=0).
+    # Vision gravava DECISION mas DECISION_OUTCOME nunca era emitido após
+    # close — então decision_memory ficava órfão.
+    # Agora: cada close resolve a decision do cycle_id correspondente
+    # (ou da última decision do símbolo, fallback).
+    try:
+        from src.services.decision_memory import (  # noqa: WPS433
+            DecisionMemoryStore as _DMS,
+            DecisionOutcome as _DO,
+        )
+
+        # Resolve cycle_id: explícito → última decision do símbolo
+        resolved_cycle = cycle_id
+        if not resolved_cycle:
+            try:
+                # Buscar última DECISION_MEMORY do símbolo via audit_log
+                from src.persistence.repository import MekkaRepository as _MR  # noqa: WPS433
+                recent = await _MR.list_audit_events(
+                    agent="Vision",
+                    event="DECISION_MEMORY",
+                    symbol=sym,
+                    limit=1,
+                )
+                if recent:
+                    payload = recent[0].get("payload") or {}
+                    if isinstance(payload, str):
+                        import json as _json  # noqa: WPS433
+                        payload = _json.loads(payload)
+                    resolved_cycle = payload.get("cycle_id")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    f"[OutcomeResolver] cycle_id lookup skipped: {exc}"
+                )
+
+        if resolved_cycle:
+            # Calcular pnl_pct estimado a partir de pnl_usd
+            # (precisão limitada — sem valor de entry, usamos placeholder)
+            pnl_pct_est = 0.0
+            # Tentativa best-effort: pnl_pct = pnl_usd / equity baseline.
+            # Mantemos 0.0 quando não temos baseline — o sinal mais importante
+            # é "fechou" + exit_reason, não a magnitude exata.
+            # DecisionOutcome só carrega o resultado; cycle_id/symbol vão na
+            # chamada record_outcome().
+            outcome = _DO(
+                realized_pnl_pct=pnl_pct_est,
+                hit_target=(pnl_usd > 0),
+                duration_hours=holding_hours or 0.0,
+                exit_reason="close",  # caller pode override via decisão futura
+            )
+            await _DMS().record_outcome(
+                cycle_id=resolved_cycle,
+                symbol=sym,
+                outcome=outcome,
+            )
+            result["decision_memory"] = True
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            f"[OutcomeResolver] DecisionMemory.record_outcome skipped: {exc}"
+        )
 
     return result

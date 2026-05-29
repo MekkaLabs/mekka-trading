@@ -45,10 +45,15 @@ async def test_resolver_calls_all_three_stores_when_action_provided():
             trade_id="trade-xyz",
         )
 
+    # INV-15 (2026-05-29) — adicionou decision_memory ao retorno.
+    # Quando cycle_id é passado, o resolver tenta record_outcome — True
+    # significa "tentamos chamar o writer" (alinhado com o contrato dos
+    # outros 3 stores que retornam True na tentativa).
     assert result == {
         "agent_memory": True,
         "role_working": True,
         "signal_outcome": True,
+        "decision_memory": True,
     }
     fake_ams.resolve_outcome.assert_awaited_once_with(
         symbol="BTC", pnl_usd=12.5, holding_hours=3.2, signal_id=None
@@ -181,8 +186,11 @@ async def test_resolver_never_raises_when_individual_stores_fail():
         )
 
     # All False but no exception leaked
+    # INV-15 (2026-05-29) — decision_memory adicionado também é False aqui
+    # (cycle_id ausente no fixture).
     assert result == {
         "agent_memory": False,
         "role_working": False,
         "signal_outcome": False,
+        "decision_memory": False,
     }

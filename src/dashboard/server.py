@@ -582,6 +582,7 @@ class MekkaDashboardServer:
         # REV-3 — Auto-learning scheduler
         r.add_get("/api/auto-learning/status", self._handle_auto_learning_status)
         r.add_post("/api/auto-learning/run-once", self._handle_auto_learning_run_once)
+        r.add_get("/api/vault/activity", self._handle_vault_activity)
         # P1-3 — pre-flight check pra troca de Binance market_type (linear↔inverse)
         r.add_get("/api/binance-market-type/check-swap", self._handle_check_swap_safe)
 
@@ -7198,6 +7199,78 @@ class MekkaDashboardServer:
         except Exception as exc:  # noqa: BLE001
             logger.error("auto_learning run failed: %s", exc, exc_info=True)
             return web.json_response({"error": str(exc)}, status=200)
+
+    async def _handle_vault_activity(self, _: web.Request) -> web.Response:
+        """GET /api/vault/activity — INV-17 (2026-05-29).
+
+        Vault activity widget: mostra que o segundo cérebro está vivo.
+        Reporta para Mentor / Cyclops / Vision / Cable / Strategy / Improvement:
+          - habilitado? (env flag)
+          - quantos writes nos últimos 7 dias
+          - timestamp do último write (filesystem mtime mais recente)
+
+        Fail-silent — nunca quebra o dashboard.
+        """
+        import os as _os
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        from pathlib import Path as _P
+
+        try:
+            from src.services.cable_vault_writer import get_vault_path as _vault_path
+            vault_root = _vault_path()
+        except Exception:
+            vault_root = _P.home() / "Documents" / "mekka-trading-obsidian"
+
+        # (writer_key, env_flag, subpath_glob)
+        writers = [
+            ("mentor",       "MENTOR_VAULT_WRITER_ENABLED",       "20 - Areas/Trading/Estratégias/*-mentor-*.md"),
+            ("cyclops",      "CYCLOPS_VAULT_WRITER_ENABLED",      "60 - Daily/*-trades.md"),
+            ("vision",       "VISION_VAULT_WRITER_ENABLED",       "20 - Areas/Trading/Decisões/*.md"),
+            ("cable",        "CABLE_VAULT_WRITER_ENABLED",        "20 - Areas/Mercado/Derivativos/*.md"),
+            ("strategy",     "STRATEGY_VAULT_WRITER_ENABLED",     "20 - Areas/Trading/Estratégias/*-regime*.md"),
+            ("improvement",  "IMPROVEMENT_VAULT_WRITER_ENABLED",  "20 - Areas/Melhorias/**/*.md"),
+        ]
+
+        cutoff = _dt.now(_tz.utc) - _td(days=7)
+        cutoff_ts = cutoff.timestamp()
+
+        report: dict[str, Any] = {
+            "vault_path": str(vault_root),
+            "vault_available": vault_root.exists(),
+            "writers": {},
+            "writers_enabled_count": 0,
+            "total_writes_7d": 0,
+        }
+
+        for key, flag, glob_pattern in writers:
+            enabled = _os.environ.get(flag, "false").lower() in (
+                "1", "true", "yes", "on",
+            )
+            if enabled:
+                report["writers_enabled_count"] += 1
+            files: list[_P] = []
+            try:
+                if vault_root.exists():
+                    files = list(vault_root.glob(glob_pattern))
+            except Exception:
+                files = []
+            recent_files = [f for f in files if f.stat().st_mtime >= cutoff_ts]
+            last_mtime = max(
+                (f.stat().st_mtime for f in files), default=None,
+            )
+            last_iso = (
+                _dt.fromtimestamp(last_mtime, _tz.utc).isoformat()
+                if last_mtime else None
+            )
+            report["writers"][key] = {
+                "enabled": enabled,
+                "writes_7d": len(recent_files),
+                "last_write_at": last_iso,
+                "total_files": len(files),
+            }
+            report["total_writes_7d"] += len(recent_files)
+
+        return web.json_response(report, status=200)
 
     async def _handle_improvements_approve_pr(self, request: web.Request) -> web.Response:
         from src.dashboard.routers import improvements as _impr
