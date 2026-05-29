@@ -1320,13 +1320,17 @@ class Batman(BaseAgent[RiskApproval]):
                     mode_params=mode_params,
                     open_positions=pos_dicts,
                 )
-                failed = [g for g in gate_results if not g.passed]
+                # P0-1 fix (2026-05-28 audit): GateResult tem `allowed` (bool)
+                # e `gate_id` (str), NÃO `passed`/`gate_name`. Hook anterior
+                # estourava AttributeError silenciado pelo except → scalp gates
+                # jamais bloquearam nada.
+                failed = [g for g in gate_results if not g.allowed]
                 if failed:
                     gate_reasons = [
-                        f"scalp_gate.{g.gate_name}: {g.reason}" for g in failed
+                        f"scalp_gate.{g.gate_id}: {g.reason}" for g in failed
                     ]
                     reasons.extend(gate_reasons)
-                    breached.extend([f"scalp.{g.gate_name}" for g in failed])
+                    breached.extend([f"scalp.{g.gate_id}" for g in failed])
                     return RiskApproval(
                         symbol=symbol,
                         verdict=RiskVerdict.REJECTED,
