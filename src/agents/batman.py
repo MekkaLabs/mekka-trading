@@ -1300,6 +1300,37 @@ class Batman(BaseAgent[RiskApproval]):
             )
 
         # ---------------------------------------------------------------
+        # 0.4 Flash proposer bridge — quando modo ativo tem flash_is_proposer
+        # (default só scalp), bloqueia trade se Flash discorda fortemente da
+        # direção do signal. Sem isso, preset declara "Flash é proposer" mas
+        # nada usa. P0-2 fix da auditoria 2026-05-28.
+        # ---------------------------------------------------------------
+        try:
+            from src.services.flash_proposer_bridge import (
+                should_block_for_disagreement,
+            )
+            momentum_signal = None
+            if analysis is not None:
+                momentum_signal = getattr(analysis, "momentum", None)
+            should_block, block_reason = should_block_for_disagreement(
+                momentum=momentum_signal,
+                signal_action=signal.action,
+            )
+            if should_block:
+                reasons.append(f"flash_proposer.disagreement: {block_reason}")
+                breached.append("flash.disagreement")
+                return RiskApproval(
+                    symbol=symbol,
+                    verdict=RiskVerdict.REJECTED,
+                    reasons=reasons,
+                    adjusted_size_pct=0.0,
+                    adjusted_leverage=1,
+                    breached_limits=breached,
+                )
+        except Exception as _flash_exc:  # noqa: BLE001
+            self._log.warning(f"[Batman] flash proposer bridge no-op: {_flash_exc}")
+
+        # ---------------------------------------------------------------
         # 0.5 Scalp gates — only active when current trading_mode is 'scalp'.
         # Reads runtime_mode.get_params() and runs batman_scalp_gates module.
         # Fail-silent: any exception keeps Batman flow intact (defensive
