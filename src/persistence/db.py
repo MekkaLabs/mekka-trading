@@ -20,6 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from src.config.settings import settings
 from src.persistence.models import Base
+# Side-effect import: register Be Water Framework tables with Base.metadata
+# so that init_engine()'s create_all picks them up automatically.
+from src.persistence import strategy_performance as _strategy_performance  # noqa: F401
 
 
 _engine: Optional[AsyncEngine] = None

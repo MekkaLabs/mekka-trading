@@ -573,6 +573,10 @@ class MekkaDashboardServer:
         # Implementer Squad — status do squad de implementação automática
         r.add_get("/api/implementer/status", self._handle_implementer_status)
         r.add_post("/api/implementer/run-once", self._handle_implementer_run_once)
+        # Be Water Framework — multi-estratégia adaptativo (registry + regime + performance)
+        r.add_get("/api/strategies", self._handle_strategies_list)
+        r.add_get("/api/strategies/regime", self._handle_strategies_regime)
+        r.add_get("/api/strategies/performance", self._handle_strategies_performance)
         # P1-3 — pre-flight check pra troca de Binance market_type (linear↔inverse)
         r.add_get("/api/binance-market-type/check-swap", self._handle_check_swap_safe)
 
@@ -6925,6 +6929,145 @@ class MekkaDashboardServer:
         except Exception as exc:  # noqa: BLE001
             logger.error("implementer run failed: %s", exc, exc_info=True)
             return web.json_response({"error": str(exc)}, status=200)
+
+    # -----------------------------------------------------------------------
+    # Be Water Framework — multi-estratégia adaptativo
+    # -----------------------------------------------------------------------
+
+    async def _handle_strategies_list(self, _: web.Request) -> web.Response:
+        """GET /api/strategies — lista todas estratégias + fitness por regime.
+
+        Fail-silent: erro retorna payload válido com strategies=[] e error.
+        """
+        try:
+            from src.strategies.registry import list_available_strategies
+            items = list_available_strategies()
+            return web.json_response(
+                {"strategies": items, "total": len(items)},
+                status=200,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("strategies list failed: %s", exc, exc_info=True)
+            return web.json_response(
+                {"error": str(exc), "strategies": [], "total": 0},
+                status=200,
+            )
+
+    async def _handle_strategies_regime(self, request: web.Request) -> web.Response:
+        """GET /api/strategies/regime?symbol=BTC — detecta regime atual.
+
+        Executa ProfessorX (consolida Layer 1 + debate) e roda
+        ``detect_regime`` sobre o MarketAnalysis resultante.
+        """
+        try:
+            symbol = (request.query.get("symbol") or "BTC").upper().strip()
+            from src.agents.professor_x import ProfessorX
+            from src.services.regime_detector import detect_regime
+            prof = ProfessorX()
+            analysis = await prof.run(symbol=symbol)
+            regime = detect_regime(analysis)
+            return web.json_response(
+                {"symbol": symbol, "regime": regime.to_dict()},
+                status=200,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("strategies regime failed: %s", exc, exc_info=True)
+            return web.json_response(
+                {
+                    "error": str(exc),
+                    "symbol": (request.query.get("symbol") or "BTC").upper(),
+                    "regime": None,
+                },
+                status=200,
+            )
+
+    async def _handle_strategies_performance(self, request: web.Request) -> web.Response:
+        """GET /api/strategies/performance?regime=X&window_days=N
+
+        Retorna top estratégias por regime. Quando ``regime`` é informado,
+        retorna ``top_strategies`` desse regime; senão, agrupa por todos
+        os regimes canônicos da enum.
+
+        Fail-silent: usa ``get_top_strategies_for_regime`` quando
+        disponível; caso o tracker não exponha essa API ainda, devolve
+        estrutura vazia com nota explicativa.
+        """
+        try:
+            regime = request.query.get("regime")
+            window = int(request.query.get("window_days", "30"))
+
+            # Import seguro — Be Water Framework usa strategy_performance_tracker
+            # (não confundir com performance_tracker antigo de Story 229)
+            get_top = None
+            try:
+                from src.services.strategy_performance_tracker import (
+                    get_top_strategies_for_regime as _gt,
+                )
+                get_top = _gt
+            except Exception:  # noqa: BLE001
+                get_top = None
+
+            def _to_dict(item: Any) -> Any:
+                if isinstance(item, dict):
+                    return item
+                if hasattr(item, "model_dump"):
+                    return item.model_dump()
+                if hasattr(item, "to_dict"):
+                    return item.to_dict()
+                if hasattr(item, "__dict__"):
+                    return dict(item.__dict__)
+                return {"value": str(item)}
+
+            if get_top is None:
+                return web.json_response(
+                    {
+                        "regime": regime,
+                        "window_days": window,
+                        "top_strategies": [],
+                        "by_regime": {},
+                        "note": "performance_tracker.get_top_strategies_for_regime not yet available",
+                    },
+                    status=200,
+                )
+
+            if regime:
+                tops = await get_top(regime, limit=8, window_days=window)
+                return web.json_response(
+                    {
+                        "regime": regime,
+                        "window_days": window,
+                        "top_strategies": [_to_dict(t) for t in tops],
+                    },
+                    status=200,
+                )
+
+            # Sem regime: agrega por todos os regimes da enum
+            from src.strategies.base import MarketRegime
+            result: dict[str, list[dict]] = {}
+            for r in MarketRegime:
+                try:
+                    tops = await get_top(r.value, limit=3, window_days=window)
+                    result[r.value] = [_to_dict(t) for t in tops]
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "strategies performance: regime %s failed (%s)",
+                        r.value, exc,
+                    )
+                    result[r.value] = []
+            return web.json_response(
+                {"window_days": window, "by_regime": result},
+                status=200,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("strategies performance failed: %s", exc, exc_info=True)
+            return web.json_response(
+                {
+                    "error": str(exc),
+                    "top_strategies": [],
+                    "by_regime": {},
+                },
+                status=200,
+            )
 
     async def _handle_improvements_approve_pr(self, request: web.Request) -> web.Response:
         from src.dashboard.routers import improvements as _impr
