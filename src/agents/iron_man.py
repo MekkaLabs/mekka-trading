@@ -112,6 +112,43 @@ class IronMan(BaseAgent[ExecutionResult]):
         self._connect_lock: asyncio.Lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
+    # COIN-M helpers (2026-05-28 audit fix P0-3/P0-4)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _binance_market_type_for(exchange_id: str) -> str:
+        """Resolve market_type pro to_ccxt — só relevante para Binance.
+
+        Outras exchanges sempre recebem 'linear' (default seguro).
+        Hyperliquid usa USDC-margined que market_registry trata especialmente.
+        """
+        if exchange_id == "binance":
+            return str(getattr(settings, "binance_market_type", "linear"))
+        return "linear"
+
+    @classmethod
+    def _is_inverse_for(cls, exchange_id: str) -> bool:
+        """True quando exchange está em COIN-M (inverse). Bybit pode ter
+        ambos no futuro mas hoje só Binance suporta inverse."""
+        return cls._binance_market_type_for(exchange_id) == "inverse"
+
+    @classmethod
+    def _balance_currency_for(cls, exchange_id: str, mekka_symbol: str) -> str:
+        """Chave do balance dict pra checar margem disponível.
+
+        - linear (USDT-M): sempre 'USDT' (todos pares cotados em USDT)
+        - inverse (COIN-M): coin do par (BTC, ETH) — Binance separa balance
+          por moeda settlement
+        - bybit: USDT (sem suporte inverse ainda)
+        - hyperliquid: USDC (USDC-margined)
+        """
+        if exchange_id == "hyperliquid":
+            return "USDC"
+        if cls._is_inverse_for(exchange_id):
+            return mekka_symbol.upper().strip()  # 'BTC', 'ETH'
+        return "USDT"
+
+    # ------------------------------------------------------------------
     # SDK lifecycle (lazy)
     # ------------------------------------------------------------------
 
@@ -697,7 +734,11 @@ class IronMan(BaseAgent[ExecutionResult]):
         # still routes correctly.
         symbol = to_mekka(signal.symbol)
         is_buy = signal.action.value.upper() == "LONG"
-        ccxt_symbol = to_ccxt(symbol, exchange_id)  # type: ignore[arg-type]
+        # P0-3 fix (2026-05-28 audit): em modo Binance COIN-M (inverse), o
+        # to_ccxt precisa retornar "BTC/USD:BTC" em vez de "BTC/USDT:USDT".
+        # Sem isso, CCXT rejeitava com "Unknown symbol" silenciosamente.
+        _market_type = self._binance_market_type_for(exchange_id)
+        ccxt_symbol = to_ccxt(symbol, exchange_id, market_type=_market_type)  # type: ignore[arg-type]
         ccxt_side = "buy" if is_buy else "sell"
 
         # ── Min-notional "lance livre" preflight ──────────────────────────
@@ -790,20 +831,33 @@ class IronMan(BaseAgent[ExecutionResult]):
         except Exception as _exc:
             self._log.warning(f"[IronMan/{exchange_id}] set_leverage failed (proceeding): {_exc}")
 
-        # Pre-flight margin check via CCXT balance
+        # Pre-flight margin check via CCXT balance.
+        # P0-4 fix (2026-05-28 audit): em COIN-M (inverse), saldo está em
+        # BTC/ETH (settlement coin), NÃO em USDT. Hardcoded "USDT" antes
+        # retornava 0 → todas ordens rejeitadas como "insufficient margin".
+        # Helper resolve a chave certa baseada em market_type + symbol.
         try:
             bal = await exchange.fetch_balance()
-            free_usdt = float(bal.get("USDT", {}).get("free", 0) or 0)
-            required_margin = (quantity * signal.entry_price) / max(leverage, 1)
-            if free_usdt < required_margin:
+            balance_currency = self._balance_currency_for(exchange_id, symbol)
+            free_balance = float(bal.get(balance_currency, {}).get("free", 0) or 0)
+            if self._is_inverse_for(exchange_id):
+                # Em inverse: margem requerida em coin (notional_usd / mark_price / leverage)
+                mark = signal.entry_price
+                if mark and mark > 0:
+                    required_margin = (quantity * 100 / mark) / max(leverage, 1)  # 100 = contract size
+                else:
+                    required_margin = 0  # fallback: skip se sem preço
+            else:
+                required_margin = (quantity * signal.entry_price) / max(leverage, 1)
+            if free_balance < required_margin:
                 return ExecutionResult(
                     symbol=symbol,
                     status=ExecutionStatus.REJECTED,
                     is_paper=False,
                     side="long" if is_buy else "short",
                     error=(
-                        f"Insufficient USDT margin: need ~${required_margin:,.2f}, "
-                        f"available ${free_usdt:,.2f}"
+                        f"Insufficient {balance_currency} margin: need ~{required_margin:.6f}, "
+                        f"available {free_balance:.6f}"
                     ),
                 )
         except Exception as _exc:
@@ -1619,7 +1673,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                 if _sym_u in open_syms:
                     continue  # has a position; do not touch its stops
                 try:
-                    _ccxt_s = to_ccxt(_sym_u, exchange_id)  # type: ignore[arg-type]
+                    _ccxt_s = to_ccxt(_sym_u, exchange_id, market_type=self._binance_market_type_for(exchange_id))  # type: ignore[arg-type]
                     _oo = await exchange.fetch_open_orders(_ccxt_s)
                 except Exception:  # noqa: BLE001
                     continue
@@ -1863,7 +1917,7 @@ class IronMan(BaseAgent[ExecutionResult]):
             )
 
         exchange = await self._get_ccxt_exchange(exchange_id)
-        ccxt_symbol = to_ccxt(to_mekka(symbol), exchange_id)  # type: ignore[arg-type]
+        ccxt_symbol = to_ccxt(to_mekka(symbol), exchange_id, market_type=self._binance_market_type_for(exchange_id))  # type: ignore[arg-type]
 
         # Confirm the live size on the venue (don't trust the caller).
         size = 0.0
@@ -2122,7 +2176,7 @@ class IronMan(BaseAgent[ExecutionResult]):
         exchange = await self._get_ccxt_exchange(exchange_id)
         # Same defensive normalisation as the entry path — keeps the two
         # places in sync if the caller eventually passes a non-bare symbol.
-        ccxt_symbol = to_ccxt(to_mekka(symbol), exchange_id)  # type: ignore[arg-type]
+        ccxt_symbol = to_ccxt(to_mekka(symbol), exchange_id, market_type=self._binance_market_type_for(exchange_id))  # type: ignore[arg-type]
         is_buy = side.lower() == "long"
         sl_side = "sell" if is_buy else "buy"
 

@@ -606,7 +606,12 @@ async def fetch_open_orders() -> dict[str, Any]:
                 await exchange.load_markets()
                 for _sym in list(settings.trading_assets):
                     try:
-                        ccxt_sym = to_ccxt(_sym, exchange_id)  # type: ignore[arg-type]
+                        # P0-3 fix: passar market_type para Binance COIN-M
+                        _mt = (
+                            getattr(settings, "binance_market_type", "linear")
+                            if exchange_id == "binance" else "linear"
+                        )
+                        ccxt_sym = to_ccxt(_sym, exchange_id, market_type=_mt)  # type: ignore[arg-type]
                         part = await asyncio.wait_for(
                             exchange.fetch_open_orders(ccxt_sym), timeout=8.0)
                         raw.extend(part or [])
