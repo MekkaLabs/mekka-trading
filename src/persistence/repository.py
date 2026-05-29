@@ -72,8 +72,37 @@ class MekkaRepository:
         execution: ExecutionResult,
         signal_id: Optional[int] = None,
         pnl_usd: Optional[float] = None,
+        pnl_quote: Optional[float] = None,
+        quote_currency: Optional[str] = None,
     ) -> int:
-        """Persist an ExecutionResult and return its DB id."""
+        """Persist an ExecutionResult and return its DB id.
+
+        P0-6 (2026-05-28 audit): quote_currency e pnl_quote agora populados.
+        Em COIN-M (inverse), pnl_quote vem em BTC/ETH e pnl_usd é a
+        conversão via mark price. Em USDT-M (linear), pnl_quote == pnl_usd
+        e quote_currency == 'USDT'. Default detector usa active_exchange
+        + binance_market_type quando o caller não passa explícito.
+        """
+        # Derive quote_currency from current settings se não passado pelo caller
+        if quote_currency is None:
+            try:
+                from src.config.settings import settings  # noqa: WPS433
+                if settings.active_exchange == "hyperliquid":
+                    quote_currency = "USDC"
+                elif (settings.active_exchange == "binance"
+                      and str(getattr(settings, "binance_market_type", "linear")) == "inverse"):
+                    # Em inverse, quote_currency é o coin do par (BTC, ETH)
+                    quote_currency = str(execution.symbol).upper().strip()
+                else:
+                    quote_currency = "USDT"
+            except Exception:  # noqa: BLE001
+                quote_currency = "USDT"  # safe default
+
+        # Em linear, pnl_quote == pnl_usd se não foi explicitamente passado
+        # (mantém histórico consistente sem caller precisar duplicar).
+        if pnl_quote is None and pnl_usd is not None and quote_currency in ("USDT", "USDC"):
+            pnl_quote = pnl_usd
+
         rec = TradeRecord(
             timestamp=execution.timestamp,
             signal_id=signal_id,
@@ -85,6 +114,8 @@ class MekkaRepository:
             avg_price=execution.avg_price,
             notional_usd=execution.notional_usd,
             pnl_usd=pnl_usd,
+            pnl_quote=pnl_quote,
+            quote_currency=quote_currency,
             order_id=execution.order_id,
             sl_order_id=execution.sl_order_id,
             tp_order_id=execution.tp_order_id,
