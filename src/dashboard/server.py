@@ -585,6 +585,10 @@ class MekkaDashboardServer:
         r.add_get("/api/vault/activity", self._handle_vault_activity)
         r.add_get("/api/vault/audit", self._handle_vault_audit)
         r.add_get("/api/prometheus/snapshot", self._handle_prometheus_snapshot)
+        r.add_get("/api/server/health", self._handle_server_health)
+        r.add_get("/api/implementer/status", self._handle_implementer_status)
+        r.add_post("/api/implementer/run-once", self._handle_implementer_run_once)
+        r.add_post("/api/decision-memory/janitor", self._handle_decision_janitor)
         # P1-3 — pre-flight check pra troca de Binance market_type (linear↔inverse)
         r.add_get("/api/binance-market-type/check-swap", self._handle_check_swap_safe)
 
@@ -720,6 +724,58 @@ class MekkaDashboardServer:
                 )
         except Exception as _exc_prom:
             logger.warning("Prometheus agent startup skipped: %s", _exc_prom)
+
+        # MEM-AUDIT-4 (2026-05-29) — ImplementerWorker background loop.
+        # 101 IMPs queued, 1 IMPLEMENTER_RAN em 7d → worker era CLI-only.
+        # Default OFF; opt-in IMPLEMENTER_WORKER_ENABLED=true.
+        # Dry-run por default; commit real exige _AUTO_APPLY=true (gate duplo).
+        try:
+            from src.services.implementer.worker import (
+                start_background as _impw_start,
+                worker_is_enabled as _impw_enabled,
+            )
+            if _impw_enabled():
+                self._implementer_task = asyncio.create_task(
+                    _impw_start(),  # type: ignore[arg-type]
+                )
+                logger.info("[server] ImplementerWorker background loop scheduled")
+            else:
+                logger.debug(
+                    "[server] ImplementerWorker disabled "
+                    "(set IMPLEMENTER_WORKER_ENABLED=true to drain IMP queue)"
+                )
+        except Exception as _exc_impw:
+            logger.warning("ImplementerWorker startup skipped: %s", _exc_impw)
+
+        # MEM-AUDIT-1 (2026-05-29) — DASHBOARD_BOOT audit event.
+        # Permite o próximo audit detectar "server stale" comparando o
+        # timestamp do último boot com o tempo dos endpoints novos.
+        self._boot_timestamp = datetime.now(timezone.utc).isoformat()
+        try:
+            from src.persistence.repository import MekkaRepository as _MR_boot
+            await _MR_boot.log_event(
+                agent="Dashboard",
+                event="DASHBOARD_BOOT",
+                severity="INFO",
+                message=f"dashboard server booted at {self._boot_timestamp}",
+                payload={
+                    "boot_ts": self._boot_timestamp,
+                    "prometheus_enabled": (
+                        getattr(self, '_prometheus_task', None) is not None
+                    ),
+                    "cable_enabled": (
+                        getattr(self, '_cable_task', None) is not None
+                    ),
+                    "auto_learning_enabled": (
+                        getattr(self, '_auto_learning_task', None) is not None
+                    ),
+                    "implementer_worker_enabled": (
+                        getattr(self, '_implementer_task', None) is not None
+                    ),
+                },
+            )
+        except Exception as _exc_boot:
+            logger.debug("DASHBOARD_BOOT audit skipped: %s", _exc_boot)
 
     async def _on_shutdown(self, _: web.Application) -> None:
         if self._broadcast_task is not None:
@@ -7359,6 +7415,116 @@ class MekkaDashboardServer:
             return web.json_response(result, status=200)
         except Exception as exc:  # noqa: BLE001
             logger.error("auto_learning run failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=200)
+
+    async def _handle_server_health(self, _: web.Request) -> web.Response:
+        """GET /api/server/health — MEM-AUDIT-1 (2026-05-29).
+
+        Reporta: boot_ts, uptime, endpoints registrados, tasks vivas.
+        Permite detectar 'server stale' (com código novo no disco mas
+        endpoints antigos no runtime).
+        """
+        import os as _os
+        boot_ts = getattr(self, "_boot_timestamp", None)
+        uptime_s: float | None = None
+        if boot_ts:
+            try:
+                _b = datetime.fromisoformat(boot_ts.replace("Z", "+00:00"))
+                uptime_s = (
+                    datetime.now(timezone.utc) - _b
+                ).total_seconds()
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Tasks status
+        def _t_running(name: str) -> bool:
+            t = getattr(self, name, None)
+            if t is None:
+                return False
+            try:
+                return not t.done()
+            except Exception:  # noqa: BLE001
+                return False
+
+        # Endpoints registrados
+        endpoints: list[str] = []
+        try:
+            for r in self._app.router._resources:
+                for route in getattr(r, "_routes", []):
+                    try:
+                        path = getattr(r, "_path", None) or getattr(r, "canonical", "?")
+                        method = getattr(route, "method", "?")
+                        endpoints.append(f"{method} {path}")
+                    except Exception:  # noqa: BLE001
+                        continue
+        except Exception:  # noqa: BLE001
+            pass
+
+        return web.json_response({
+            "pid": _os.getpid(),
+            "boot_timestamp": boot_ts,
+            "uptime_seconds": uptime_s,
+            "uptime_human": (
+                f"{int(uptime_s // 60)}min" if uptime_s and uptime_s < 3600
+                else f"{uptime_s / 3600:.1f}h" if uptime_s
+                else "unknown"
+            ),
+            "tasks": {
+                "auto_learning": _t_running("_auto_learning_task"),
+                "cable": _t_running("_cable_task"),
+                "prometheus": _t_running("_prometheus_task"),
+                "implementer_worker": _t_running("_implementer_task"),
+                "broadcast": _t_running("_broadcast_task"),
+                "daily_report": _t_running("_daily_report_task"),
+            },
+            "endpoints_count": len(endpoints),
+            "endpoints": sorted(set(endpoints))[:200],
+        }, status=200)
+
+    async def _handle_implementer_status(self, _: web.Request) -> web.Response:
+        """GET /api/implementer/status — MEM-AUDIT-4 (2026-05-29)."""
+        try:
+            from src.services.implementer.worker import (
+                get_background_status, history_summary,
+            )
+            return web.json_response({
+                "background": get_background_status(),
+                "history": history_summary(limit=10),
+            }, status=200)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)}, status=200)
+
+    async def _handle_implementer_run_once(self, request: web.Request) -> web.Response:
+        """POST /api/implementer/run-once — dispara cycle manual.
+        Body opcional: {max_imps: int, dry_run: bool}."""
+        try:
+            body = {}
+            if request.can_read_body:
+                body = await request.json() or {}
+            max_imps = int(body.get("max_imps", 3))
+            dry_run = bool(body.get("dry_run", True))
+            from src.services.implementer.worker import run_once
+            result = run_once(max_imps=max_imps, dry_run=dry_run)
+            return web.json_response(result, status=200)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)}, status=200)
+
+    async def _handle_decision_janitor(self, request: web.Request) -> web.Response:
+        """POST /api/decision-memory/janitor — MEM-AUDIT-3 (2026-05-29).
+        Body opcional: {min_age_hours, max_age_days, dry_run, limit}."""
+        try:
+            body = {}
+            if request.can_read_body:
+                body = await request.json() or {}
+            from src.services.decision_memory_janitor import resolve_decision_orphans
+            result = resolve_decision_orphans(
+                min_age_hours=int(body.get("min_age_hours", 2)),
+                max_age_days=int(body.get("max_age_days", 30)),
+                dry_run=bool(body.get("dry_run", True)),
+                limit=int(body.get("limit", 200)),
+            )
+            return web.json_response(result, status=200)
+        except Exception as exc:  # noqa: BLE001
             return web.json_response({"error": str(exc)}, status=200)
 
     async def _handle_prometheus_snapshot(self, _: web.Request) -> web.Response:

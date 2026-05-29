@@ -267,6 +267,117 @@ def run_once(max_imps: int = 3, dry_run: bool = False) -> dict[str, Any]:
     return summary
 
 
+# ---------------------------------------------------------------------------
+# MEM-AUDIT-4 (2026-05-29) — Background loop
+# ---------------------------------------------------------------------------
+#
+# Diagnóstico: 101 briefs queued, 1 IMPLEMENTER_RAN em 7 dias.
+# Causa raiz: worker era invocável só via CLI manual. Sem loop → IMPs
+# se acumulam pra sempre.
+#
+# Fix: loop opt-in que roda `run_once()` em intervalo regular.
+# DEFAULT: dry_run=True (não comita) — operador precisa setar explicit
+# IMPLEMENTER_WORKER_AUTO_APPLY=true pra desligar dry-run.
+# Cap conservador: max_imps=3 por ciclo, intervalo 15 min default.
+
+import asyncio as _asyncio
+
+_background_task: "Optional[_asyncio.Task]" = None
+
+
+def worker_is_enabled() -> bool:
+    """Opt-in. Default OFF — só roda se operador setar explicit."""
+    return os.environ.get("IMPLEMENTER_WORKER_ENABLED", "false").lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+def worker_should_apply() -> bool:
+    """Opt-in EXTRA pra aplicar de verdade (não dry-run). Default OFF."""
+    return os.environ.get("IMPLEMENTER_WORKER_AUTO_APPLY", "false").lower() in (
+        "1", "true", "yes", "on"
+    )
+
+
+def worker_interval_seconds() -> float:
+    try:
+        m = float(os.environ.get("IMPLEMENTER_WORKER_INTERVAL_MIN", "15"))
+    except (TypeError, ValueError):
+        m = 15.0
+    return max(60.0, m * 60.0)
+
+
+def worker_max_per_cycle() -> int:
+    try:
+        return max(1, int(os.environ.get("IMPLEMENTER_WORKER_MAX_PER_CYCLE", "3")))
+    except (TypeError, ValueError):
+        return 3
+
+
+async def _background_loop() -> None:
+    """Loop infinito. Cancela com task.cancel()."""
+    interval = worker_interval_seconds()
+    max_imps = worker_max_per_cycle()
+    dry = not worker_should_apply()
+    logger.info(
+        f"[implementer_worker] background loop started "
+        f"(interval={interval:.0f}s, max={max_imps}/cycle, dry_run={dry})"
+    )
+    while True:
+        try:
+            result = run_once(max_imps=max_imps, dry_run=dry)
+            if result.get("processed", 0) > 0:
+                logger.info(
+                    f"[implementer_worker] cycle: "
+                    f"{result.get('processed')} processed, "
+                    f"{result.get('success', 0)} success"
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[implementer_worker] cycle exception: {exc}")
+        try:
+            await _asyncio.sleep(interval)
+        except _asyncio.CancelledError:
+            logger.info("[implementer_worker] loop cancelled")
+            raise
+
+
+async def start_background() -> "Optional[_asyncio.Task]":
+    """Inicia o background loop. Retorna a task ou None se desabilitado."""
+    global _background_task
+    if not worker_is_enabled():
+        logger.debug("[implementer_worker] start skipped: disabled (set IMPLEMENTER_WORKER_ENABLED=true)")
+        return None
+    if _background_task is not None and not _background_task.done():
+        logger.debug("[implementer_worker] start skipped: already running")
+        return _background_task
+    _background_task = _asyncio.create_task(_background_loop(), name="implementer_worker_loop")
+    return _background_task
+
+
+async def stop_background() -> None:
+    """Cancela o loop."""
+    global _background_task
+    if _background_task is None or _background_task.done():
+        return
+    _background_task.cancel()
+    try:
+        await _background_task
+    except _asyncio.CancelledError:
+        pass
+    _background_task = None
+
+
+def get_background_status() -> dict[str, Any]:
+    """Snapshot pro dashboard / /api/implementer/status."""
+    return {
+        "enabled": worker_is_enabled(),
+        "auto_apply": worker_should_apply(),
+        "interval_seconds": worker_interval_seconds(),
+        "max_per_cycle": worker_max_per_cycle(),
+        "running": _background_task is not None and not _background_task.done(),
+    }
+
+
 def history_summary(limit: int = 20) -> dict[str, Any]:
     """Snapshot pro dashboard."""
     h = _load_json(_HISTORY_FILE, {"runs": []})
