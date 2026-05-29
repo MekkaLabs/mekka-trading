@@ -223,14 +223,37 @@ class Vision(BaseAgent[TradingSignal]):
         # operator enabled VAULT_ENRICHMENT_ENABLED. Fail-silent + bounded
         # latency (1.5s) + cached. Never changes Vision's decision path —
         # worst case the prompt stays unchanged.
+        #
+        # INV-13 (2026-05-29) — duas consultas paralelas:
+        #   1. trend-specific (BULLISH / BEARISH / etc) → snippets de
+        #      decisões anteriores e dailies relevantes ao trend atual.
+        #   2. regime-playbook ("regime playbook") → puxa playbooks
+        #      canônicos que o operador curou em
+        #      20 - Areas/Trading/Estratégias/. Antes Vision só via
+        #      trend snippets — perdia playbook estratégico.
+        # Ambas fail-silent e cacheadas via vault_context CACHE.
         try:
             from src.services.vault_context import vault_context_for  # noqa: WPS433
-            vault_block = await vault_context_for(
+            import asyncio as _asyncio  # noqa: WPS433
+            trend_topic = (analysis.chart.trend.value if analysis.chart else None)
+            vault_trend_task = vault_context_for(
                 symbol=analysis.symbol,
-                topic=(analysis.chart.trend.value if analysis.chart else None),
+                topic=trend_topic,
             )
-            if vault_block:
-                prompt = prompt + "\n\n" + vault_block
+            vault_playbook_task = vault_context_for(
+                symbol=analysis.symbol,
+                topic="regime playbook",
+                limit=2,  # mais focado — só playbook, não daily
+            )
+            vault_trend, vault_playbook = await _asyncio.gather(
+                vault_trend_task, vault_playbook_task,
+                return_exceptions=True,
+            )
+            for vblock in (vault_trend, vault_playbook):
+                if isinstance(vblock, Exception):
+                    continue
+                if vblock:
+                    prompt = prompt + "\n\n" + vblock
         except Exception as _vault_exc:  # noqa: BLE001
             self._log.debug(f"[Vision] Vault enrichment skipped: {_vault_exc}")
 

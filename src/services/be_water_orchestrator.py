@@ -39,6 +39,52 @@ from src.strategies.base import (
 )
 
 
+async def _audit_decision(decision: "BeWaterDecision") -> None:
+    """INV-12 (2026-05-29): emite BE_WATER_DECISION ao audit_log.
+
+    Antes: o pipeline rodava silenciosamente — não era possível auditar
+    historicamente quais regimes/estratégias o orchestrator escolheu,
+    nem por que ficou flat. Agora cada decide() vira um registro com:
+      - regime detectado + confidence
+      - estratégias selecionadas e seus combined_scores
+      - top signal (se houver)
+      - rationale do flat (se aplicável)
+
+    Fail-silent — qualquer erro de I/O é apenas logado.
+    """
+    try:
+        from src.persistence.repository import MekkaRepository  # noqa: WPS433
+        top = decision.top_signal()
+        payload = {
+            "symbol": decision.symbol,
+            "regime": decision.regime.regime.value,
+            "regime_confidence": round(decision.regime.confidence, 4),
+            "flat": decision.flat,
+            "n_signals": len(decision.signals),
+            "top_strategy": top.strategy_name if top else None,
+            "top_action": top.action.value if top else None,
+            "top_confidence": round(top.confidence, 4) if top else None,
+            "rationale": decision.rationale[:200],
+            "selected_count": decision.metadata.get("selected_count"),
+            "actionable_count": decision.metadata.get("actionable_count"),
+        }
+        severity = "INFO" if not decision.flat else "DEBUG"
+        message = (
+            f"BeWater: regime={decision.regime.regime.value} "
+            f"(conf={decision.regime.confidence:.2f}) — "
+            f"{'FLAT' if decision.flat else f'top={top.strategy_name}/{top.action.value}' if top else 'no top'}"
+        )
+        await MekkaRepository.log_event(
+            agent="BeWater",
+            event="BE_WATER_DECISION",
+            severity=severity,
+            message=message,
+            payload=payload,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[be_water] audit emit skipped: {exc}")
+
+
 @dataclass
 class BeWaterDecision:
     """Resultado final do orchestrator: regime + sinais ranqueados."""
@@ -113,13 +159,15 @@ async def decide(
         )
 
     if regime.regime == MarketRegime.UNCLEAR or regime.confidence < 0.3:
-        return BeWaterDecision(
+        decision = BeWaterDecision(
             symbol=symbol,
             regime=regime,
             signals=[],
             flat=True,
             rationale=f"regime unclear (conf={regime.confidence:.2f}) — staying flat",
         )
+        await _audit_decision(decision)
+        return decision
 
     # 2. Load strategies + select
     if available_strategies is None:
@@ -131,10 +179,12 @@ async def decide(
             available_strategies = []
 
     if not available_strategies:
-        return BeWaterDecision(
+        decision = BeWaterDecision(
             symbol=symbol, regime=regime, signals=[], flat=True,
             rationale="no strategies available",
         )
+        await _audit_decision(decision)
+        return decision
 
     try:
         from src.services.strategy_selector import select_strategies
@@ -154,10 +204,12 @@ async def decide(
         )
 
     if not allocations:
-        return BeWaterDecision(
+        decision = BeWaterDecision(
             symbol=symbol, regime=regime, signals=[], flat=True,
             rationale="no strategy met min_combined_score",
         )
+        await _audit_decision(decision)
+        return decision
 
     # 3. Generate signals per selected strategy
     strategy_by_name = {s.name: s for s in available_strategies}
@@ -195,15 +247,22 @@ async def decide(
     )
 
     if not actionable:
-        return BeWaterDecision(
+        decision = BeWaterDecision(
             symbol=symbol, regime=regime, signals=[], flat=True,
             rationale=(
                 f"all selected strategies returned HOLD/FLAT "
                 f"({len(allocations)} selected, 0 actionable)"
             ),
+            metadata={
+                "selected_count": len(allocations),
+                "actionable_count": 0,
+                "all_signals_count": len(signals),
+            },
         )
+        await _audit_decision(decision)
+        return decision
 
-    return BeWaterDecision(
+    decision = BeWaterDecision(
         symbol=symbol, regime=regime, signals=actionable,
         rationale=(
             f"{len(actionable)} actionable signals from "
@@ -215,6 +274,8 @@ async def decide(
             "all_signals_count": len(signals),
         },
     )
+    await _audit_decision(decision)
+    return decision
 
 
 def _fallback_selection(

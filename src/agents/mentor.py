@@ -370,9 +370,31 @@ class Mentor(BaseAgent[MentorReport]):
     # ── Audit ─────────────────────────────────────────────────────────
 
     async def _audit_suggestions(self, report: MentorReport) -> None:
-        if report.is_empty:
-            return
+        # INV-11 (2026-05-29): emite SEMPRE um evento ao rodar — antes só
+        # logávamos quando havia sugestão, então auditoria via audit_log
+        # mostrava 0 eventos em 7 dias mesmo com Mentor rodando. Agora:
+        #   - MENTOR_SUGGESTED (INFO) → quando há sugestões
+        #   - MENTOR_RAN (DEBUG)       → quando rodou e não tinha o que sugerir
+        # Ambos carregam o observation_summary pro dashboard refletir saúde.
         from src.persistence.repository import MekkaRepository  # noqa: WPS433
+
+        if report.is_empty:
+            try:
+                await MekkaRepository.log_event(
+                    agent="Mentor",
+                    event="MENTOR_RAN",
+                    severity="DEBUG",
+                    message=(
+                        f"Mentor rodou sem sugestões (obs: {report.observation_summary})"
+                    ),
+                    payload={
+                        "observation": report.observation_summary,
+                        "n_suggestions": 0,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._log.debug(f"[Mentor] MENTOR_RAN emit skipped: {exc}")
+            return
 
         await MekkaRepository.log_event(
             agent="Mentor",

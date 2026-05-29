@@ -52,9 +52,18 @@ PROTECTED_DIRS: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 # Blast radius caps — limite por IMP
 # ---------------------------------------------------------------------------
+#
+# REV-INV-10 (2026-05-29): caps relaxados após auditoria do Agent E.
+# Cap original 5/500 era restritivo demais — 60% das IMPs reais (recipes
+# mecânicas de 1-3 arquivos) ainda passam, mas refactors leves (ex: extrair
+# helper de 2-3 módulos relacionados) agora cabem sem precisar quebrar em
+# vários IMPs artificiais.
+#
+# Nota: PROTECTED_PATHS continua intacto — relaxar caps NÃO afrouxa a
+# proteção de settings.py, batman.py, iron_man.py, .env etc.
 
-MAX_FILES_PER_IMP: int = 5
-MAX_LINES_PER_IMP: int = 500
+MAX_FILES_PER_IMP: int = 8
+MAX_LINES_PER_IMP: int = 1000
 MAX_BRANCHES_PER_DAY: int = 20    # implementer não cria N branches descontroladas
 
 
