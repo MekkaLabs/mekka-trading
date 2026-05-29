@@ -174,6 +174,26 @@ class Beast(BaseAgent[BeastReport]):
             f"trades_analyzed={total_trades}"
         )
 
+        # INV-2 (2026-05-29) — emite audit event pra rastrear aprendizado.
+        # Antes: 0 BEAST_PROPOSAL em 7 dias, mesmo com Beast rodando.
+        try:
+            from src.persistence.repository import MekkaRepository  # noqa: WPS433
+            await MekkaRepository.log_event(
+                agent="Beast",
+                event="BEAST_PROPOSAL",
+                severity="INFO",
+                message=f"{len(proposals)} proposals ({len(report.high_priority)} HIGH)",
+                payload={
+                    "n_proposals": len(proposals),
+                    "n_high": len(report.high_priority),
+                    "health_score": float(health_score),
+                    "trades_analyzed": int(total_trades),
+                    "areas": list({p.area for p in proposals})[:10],
+                },
+            )
+        except Exception as _audit_exc:  # noqa: BLE001
+            self._log.debug(f"[Beast] audit emit no-op: {_audit_exc}")
+
         # ── Send to Telegram ──────────────────────────────────────────────
         await self._send_report(report)
 

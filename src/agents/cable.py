@@ -140,6 +140,24 @@ class Cable(BaseAgent[dict[str, Any]]):
                     _cvw.record_cable_report(report)
             except Exception as _cvw_exc:  # noqa: BLE001
                 logger.debug(f"[Cable] vault writer no-op: {_cvw_exc}")
+            # INV-2 (2026-05-29) — audit log: CABLE_REPORT event.
+            # Antes: 0 eventos em 7d apesar do Cable rodando.
+            try:
+                from src.persistence.repository import MekkaRepository  # noqa: WPS433
+                snap = report.get("snapshot", {}) or {}
+                symbols = list((snap.get("data") or {}).keys())
+                await MekkaRepository.log_event(
+                    agent="Cable",
+                    event="CABLE_REPORT",
+                    severity="INFO",
+                    message=f"funding/OI snapshot ({len(symbols)} symbols)",
+                    payload={
+                        "symbols": symbols,
+                        "n_insights": len(report.get("insights", []) or []),
+                    },
+                )
+            except Exception as _audit_exc:  # noqa: BLE001
+                logger.debug(f"[Cable] audit emit no-op: {_audit_exc}")
         except Exception as exc:  # noqa: BLE001
             self._stats["errors"] += 1
             logger.debug(f"[Cable] handler error: {exc}")

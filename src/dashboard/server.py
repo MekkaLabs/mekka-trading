@@ -670,6 +670,30 @@ class MekkaDashboardServer:
         except Exception as _exc_sched:
             logger.warning("BacktestScheduler startup skipped: %s", _exc_sched)
 
+        # INV-5 (2026-05-29) — Auto-learning scheduler integrado ao boot.
+        # Antes só rodava via /api/auto-learning/run-once manual; audit log mostrava
+        # apenas 1 AUTO_LEARNING_CYCLE em 7d. Agora liga background loop no boot
+        # quando AUTO_LEARNING_ENABLED=true.
+        try:
+            from src.services.auto_learning_scheduler import start as _al_start, is_enabled as _al_enabled
+            if _al_enabled():
+                self._auto_learning_task = asyncio.create_task(_al_start())  # type: ignore[arg-type]
+                logger.info("[server] auto-learning scheduler started in background")
+            else:
+                logger.info("[server] auto-learning scheduler disabled (set AUTO_LEARNING_ENABLED=true)")
+        except Exception as _exc_al:
+            logger.warning("auto-learning scheduler startup skipped: %s", _exc_al)
+
+        # INV-4 (2026-05-29) — Cable agent startup. Cable subscribe a cycle.end
+        # ficava na responsabilidade de run.py mas em modo dashboard-only não
+        # rodava. Adicionar aqui torna /api/cable/snapshot sempre populado.
+        try:
+            from src.agents.cable import start_cable_agent
+            self._cable_task = asyncio.create_task(start_cable_agent())  # type: ignore[arg-type]
+            logger.info("[server] Cable agent startup scheduled")
+        except Exception as _exc_cable:
+            logger.warning("Cable agent startup skipped: %s", _exc_cable)
+
     async def _on_shutdown(self, _: web.Application) -> None:
         if self._broadcast_task is not None:
             self._broadcast_task.cancel()

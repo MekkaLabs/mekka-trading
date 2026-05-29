@@ -87,19 +87,40 @@ def run_stale_learner_step() -> dict[str, Any]:
 
 
 def run_reconciler_step() -> dict[str, Any]:
-    """Resolve PENDING em agent_memories."""
+    """Resolve PENDING em agent_memories — combina 2 strategies:
+    1. signal_outcome_janitor: resolve signals nunca executados (rejeitados,
+       flipped, expirados) — INV-1 fix da auditoria 2026-05-29
+    2. memory_reconciler: matching com trades pra inferir outcome real
+    """
+    out: dict[str, Any] = {"step": "reconciler", "ok": True, "sub_steps": []}
+
+    # 1. Signal outcome janitor (INV-1)
+    try:
+        from src.services.signal_outcome_janitor import resolve_orphan_signals
+        r1 = resolve_orphan_signals(min_age_minutes=30, dry_run=False)
+        out["sub_steps"].append({
+            "janitor": {
+                "checked": r1.get("checked", 0),
+                "by_reason": r1.get("by_reason", {}),
+            },
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[auto_learning] janitor step skipped: {exc}")
+        out["sub_steps"].append({"janitor_error": str(exc)})
+
+    # 2. Memory reconciler (matching com trades)
     try:
         from src.services import memory_reconciler
-        # Dry-run primeiro pra saber se há algo
         if hasattr(memory_reconciler, "reconcile_pending"):
-            result = memory_reconciler.reconcile_pending(apply=True, limit=100)
+            r2 = memory_reconciler.reconcile_pending(apply=True, limit=100)
+            out["sub_steps"].append({"reconciler": r2})
         else:
-            # API alternativa: usa main com argv
-            result = {"note": "manual API not exposed; skip"}
-        return {"step": "reconciler", "ok": True, "result": result}
+            out["sub_steps"].append({"reconciler": "manual API not exposed; skip"})
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"[auto_learning] reconciler step skipped: {exc}")
-        return {"step": "reconciler", "ok": False, "error": str(exc)}
+        out["sub_steps"].append({"reconciler_error": str(exc)})
+
+    return out
 
 
 def run_cable_vault_step() -> dict[str, Any]:
