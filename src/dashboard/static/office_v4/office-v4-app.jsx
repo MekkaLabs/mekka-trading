@@ -1208,13 +1208,34 @@ function OfficeV4App() {
   }, [tempos]);
 
   /* Movement tick — fine-grained (80ms) so each agent steps on its own
-     stepInterval, NOT in lockstep with everyone else. */
+     stepInterval, NOT in lockstep with everyone else.
+
+     OFFICE-2 (2026-05-29) — Separation steering:
+     Antes os heróis sobrepunham porque cada agente seguia seu waypoint
+     sem olhar pra ninguém. Agora cada passo de cada agente em movimento
+     é blendado com uma força de repulsão dos vizinhos dentro do raio
+     SEPARATION_RADIUS. Resultado: dois agentes no mesmo corredor curvam
+     levemente um pelo outro em vez de empilhar.
+
+     - SEPARATION_RADIUS: distância de detecção (px no mundo)
+     - SEPARATION_WEIGHT: peso da força de repulsão vs força de waypoint
+     - Não muda destino — só inflexiona o caminho durante o trajeto.
+     - Custo O(N²) por tick mas N ≈ 20-30 sprites, totalmente OK. */
+  const SEPARATION_RADIUS = 38;     // px (sprite ~72px, então 38px ≈ ombro a ombro)
+  const SEPARATION_WEIGHT = 0.55;   // peso da força de desvio (0 = off, 1 = só desvio)
+  const SEPARATION_MIN_DIST = 4;    // px, evita divisão por zero
   useEffect(() => {
     const id = setInterval(() => {
       const now = Date.now();
       setAgents((prev) => {
         let changed = false;
         const next = { ...prev };
+        // Snapshot das posições antes de mover — todos os vizinhos
+        // são lidos no estado do tick anterior, evitando cascata
+        // (A move pra evitar B, mas B ainda está onde estava).
+        const positions = Object.keys(prev).map((id) => ({
+          id, x: prev[id].x, y: prev[id].y,
+        }));
         for (const agentId of Object.keys(next)) {
           const a = next[agentId];
           if (!a.isMoving) continue;
@@ -1243,10 +1264,57 @@ function OfficeV4App() {
                                 stepPhase: 1 - a.stepPhase, lastStepAt: now };
             }
           } else {
-            const nx = a.x + (dx / dist) * STEP;
-            const ny = a.y + (dy / dist) * STEP;
+            // ── Direção base: heading pro waypoint
+            let hx = dx / dist;
+            let hy = dy / dist;
+
+            // ── Separation steering: somatório de vetores de afastamento
+            //    contra vizinhos dentro do raio.
+            let sx = 0, sy = 0, neighbors = 0;
+            for (const p of positions) {
+              if (p.id === agentId) continue;
+              const ddx = a.x - p.x;
+              const ddy = a.y - p.y;
+              const d2 = ddx*ddx + ddy*ddy;
+              if (d2 > SEPARATION_RADIUS * SEPARATION_RADIUS) continue;
+              const d = Math.max(SEPARATION_MIN_DIST, Math.sqrt(d2));
+              // Força inversamente proporcional à distância (mais perto = empurra mais)
+              const inv = (SEPARATION_RADIUS - d) / SEPARATION_RADIUS;
+              sx += (ddx / d) * inv;
+              sy += (ddy / d) * inv;
+              neighbors += 1;
+            }
+
+            if (neighbors > 0) {
+              // Normaliza a força de separation pro mesmo módulo da heading
+              const slen = Math.sqrt(sx*sx + sy*sy);
+              if (slen > 0) {
+                sx /= slen;
+                sy /= slen;
+                // Easing de proximidade ao waypoint:
+                // Quando o agente está chegando perto do destino (ex: cadeira
+                // de conferência), reduz progressivamente o peso da
+                // separation pra não impedir que sente. Distância de easing
+                // ~ 2× SEPARATION_RADIUS.
+                const easeDist = SEPARATION_RADIUS * 2;
+                const easeFactor = Math.min(1, dist / easeDist);
+                const effWeight = SEPARATION_WEIGHT * easeFactor;
+                // Blend: heading × (1-w) + separation × w
+                hx = hx * (1 - effWeight) + sx * effWeight;
+                hy = hy * (1 - effWeight) + sy * effWeight;
+                const hlen = Math.sqrt(hx*hx + hy*hy);
+                if (hlen > 0) {
+                  hx /= hlen;
+                  hy /= hlen;
+                }
+              }
+            }
+
+            const nx = a.x + hx * STEP;
+            const ny = a.y + hy * STEP;
             let facing = a.facing;
-            if (Math.abs(dx) > 4) facing = dx > 0 ? 'right' : 'left';
+            // Facing usa o vetor blendado (com desvio) — sprite olha pra onde anda
+            if (Math.abs(hx) > 0.2) facing = hx > 0 ? 'right' : 'left';
             next[agentId] = { ...a, x: nx, y: ny, facing,
                               stepPhase: 1 - a.stepPhase, lastStepAt: now };
           }
