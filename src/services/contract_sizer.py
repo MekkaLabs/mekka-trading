@@ -74,13 +74,37 @@ def get_contract_size(coin: str, override: float | None = None) -> float:
     return 10.0
 
 
+# P1-6 (2026-05-28 audit): step_size por coin — defaults mais precisos
+# que 0.001 (que perdia até 5% do notional em BTC). Valores baseados nos
+# tick sizes reais da Binance Futures (USDT-M) para os principais ativos.
+DEFAULT_STEP_SIZE_BY_COIN: dict[str, float] = {
+    "BTC": 0.001,    # Binance BTCUSDT: stepSize 0.001
+    "ETH": 0.001,    # Binance ETHUSDT: stepSize 0.001
+    "SOL": 0.01,     # Binance SOLUSDT: stepSize 0.01
+    "BNB": 0.01,     # Binance BNBUSDT: stepSize 0.01
+    "LINK": 0.01,    # Binance LINKUSDT: stepSize 0.01
+    "AVAX": 0.01,
+    "MATIC": 1.0,
+    "ADA": 1.0,
+    "DOGE": 1.0,
+    "XRP": 1.0,
+}
+
+
+def get_step_size(coin: str, override: float | None = None) -> float:
+    """Resolve step size pro coin. None ou desconhecido → 0.001 (BTC-like)."""
+    if override is not None:
+        return override
+    return DEFAULT_STEP_SIZE_BY_COIN.get((coin or "").upper(), 0.001)
+
+
 def compute_size(
     notional_usd: float,
     mark_price: float,
     market_type: MarketType,
     coin: str = "",
     contract_size_override: float | None = None,
-    step_size: float = 0.001,
+    step_size: float | None = None,
 ) -> SizeComputation:
     """
     Converte notional USD em quantity nativa do mercado.
@@ -110,8 +134,14 @@ def compute_size(
     if market_type == "linear":
         # quantity em coin = notional_usd / mark_price
         raw_qty = notional_usd / mark_price
+        # P1-6 fix: step_size resolvido por coin. Default antigo 0.001
+        # perdia ~5% em BTC quando notional pequeno. Per-coin defaults
+        # baseados em tick sizes reais da Binance Futures.
+        effective_step = (
+            step_size if step_size is not None else get_step_size(coin)
+        )
         # Round down ao step_size pra não exceder notional
-        rounded_qty = _round_down(raw_qty, step_size)
+        rounded_qty = _round_down(raw_qty, effective_step)
         rounded = rounded_qty < raw_qty
         return SizeComputation(
             quantity=rounded_qty,

@@ -552,8 +552,17 @@ class IronMan(BaseAgent[ExecutionResult]):
         # invalidar quando operador troca de USDT-M (linear) ↔ COIN-M (inverse).
         # Sem isso, swap não pegaria o novo CCXT client.
         _mt = ""
+        # P1-2 fix (2026-05-28 audit): snapshot atômico de binance_market_type
+        # numa variável local — settings poderia mudar entre a leitura do
+        # cache_key (linha abaixo) e a leitura no cfg["options"] (linha 605).
+        # Sem isto, sob hot-swap simultâneo, cliente retornado tinha cache_key
+        # de um market_type mas cfg do outro.
+        _binance_mt_snapshot = (
+            str(getattr(settings, "binance_market_type", "linear"))
+            if exchange_id == "binance" else "linear"
+        )
         if exchange_id == "binance":
-            _mt = f":mt={getattr(settings, 'binance_market_type', 'linear')}"
+            _mt = f":mt={_binance_mt_snapshot}"
         cache_key = f"{exchange_id}:{'testnet' if _testnet else 'mainnet'}{_mt}"
         loop = asyncio.get_event_loop()
 
@@ -595,11 +604,16 @@ class IronMan(BaseAgent[ExecutionResult]):
                     )
                 cfg["apiKey"] = settings.binance_api_key
                 cfg["secret"] = settings.binance_api_secret
-                # COIN-M Futures support (2026-05-28) — defaultSubType lido
-                # dinamicamente de settings.binance_market_type. Cache key
-                # acima já distingue testnet/mainnet; precisamos ALSO
-                # distinguir market_type pra invalidar quando muda.
-                _binance_mt = getattr(settings, "binance_market_type", "linear")
+                # COIN-M Futures support (2026-05-28) — usa snapshot atômico
+                # tomado no início do método (P1-2 fix). NUNCA re-ler settings
+                # aqui: o cache_key foi gerado com _binance_mt_snapshot e o
+                # cfg precisa usar O MESMO valor pra evitar client com config
+                # inconsistente com sua chave de cache.
+                _binance_mt = _binance_mt_snapshot
+                self._log.info(
+                    f"[IronMan/{exchange_id}] CCXT init: defaultSubType={_binance_mt} "
+                    f"(testnet={_testnet}, cache_key={cache_key})"
+                )
                 cfg["options"].update(
                     {
                         "defaultSubType": _binance_mt,  # "linear" (USDT-M) ou "inverse" (COIN-M)

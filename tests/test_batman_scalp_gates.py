@@ -153,16 +153,44 @@ class TestGateMaxPositionAge:
         assert result.allowed is True
 
     def test_stale_position_sentinel_warning(self):
-        # Sentinel: NÃO bloqueia (sempre allowed), mas reporta no metadata
+        # P1-5 (2026-05-28): comportamento de duas camadas
+        # - soft cap (30min): sentinel, allowed=True, reporta no metadata
+        # - hard cap (cap × 1.5 = 45min): BLOQUEIA
+        # 35min está entre soft e hard → sentinel
         now = datetime.now(timezone.utc)
         positions = [
-            {"symbol": "BTC", "opened_at": (now - timedelta(minutes=45)).isoformat()},
+            {"symbol": "BTC", "opened_at": (now - timedelta(minutes=35)).isoformat()},
         ]
         result = gate_max_position_age({"max_position_age_minutes": 30}, positions)
-        assert result.allowed is True  # sentinel — não bloqueia
+        assert result.allowed is True  # entre soft e hard — sentinel
         assert len(result.metadata["stale_positions"]) == 1
         assert result.metadata["stale_positions"][0]["symbol"] == "BTC"
-        assert result.metadata["stale_positions"][0]["age_minutes"] >= 45
+        assert result.metadata["stale_positions"][0]["age_minutes"] >= 35
+
+    def test_hard_cap_breach_blocks(self):
+        # P1-5: posição com age >= cap × 1.5 BLOQUEIA novos trades
+        now = datetime.now(timezone.utc)
+        positions = [
+            {"symbol": "BTC", "opened_at": (now - timedelta(minutes=50)).isoformat()},
+        ]
+        result = gate_max_position_age({"max_position_age_minutes": 30}, positions)
+        assert result.allowed is False  # 50min > hard cap 45min
+        assert "hard cap" in result.reason
+        assert len(result.metadata["hard_breach_positions"]) == 1
+        assert result.metadata["hard_breach_positions"][0]["age_minutes"] >= 50
+
+    def test_hard_cap_multiplier_override(self):
+        # Override do multiplicador via mode_params
+        now = datetime.now(timezone.utc)
+        positions = [
+            {"symbol": "BTC", "opened_at": (now - timedelta(minutes=40)).isoformat()},
+        ]
+        # cap=30, multiplier=2.0 → hard cap = 60min. 40min ainda OK (sentinel)
+        result = gate_max_position_age(
+            {"max_position_age_minutes": 30, "max_position_age_hard_multiplier": 2.0},
+            positions,
+        )
+        assert result.allowed is True  # 40min < hard cap 60min
 
     def test_invalid_timestamp_skipped(self):
         positions = [

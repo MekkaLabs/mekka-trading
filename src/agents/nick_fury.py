@@ -412,6 +412,47 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 severity="WARNING",
                 message="Kill switch active",
             )
+
+        # P1-1 fix (2026-05-28 audit): scalp em mainnet live só com flag
+        # explícita. Defensa contra acidente: ativar scalp em config + mainnet
+        # ao mesmo tempo abriria 120s loop com risco real.
+        # Combo perigoso: paper=False + testnet=False + modo=scalp + flag=False
+        try:
+            from src.config.runtime_mode import is_scalp_mode
+            if (is_scalp_mode()
+                    and not settings.paper_trading
+                    and not getattr(settings, "binance_testnet", True)
+                    and not getattr(settings, "scalp_mainnet_enabled", False)):
+                self._log.error(
+                    "[NickFury] BLOCK — scalp mode in live mainnet without "
+                    "SCALP_MAINNET_ENABLED=true. Set the flag explicitly to opt in."
+                )
+                await MekkaRepository.log_event(
+                    agent="NickFury",
+                    event="CYCLE_SKIPPED",
+                    severity="ERROR",
+                    message="scalp + mainnet + live without explicit enable flag",
+                    payload={
+                        "mode": "scalp",
+                        "paper_trading": False,
+                        "binance_testnet": False,
+                        "scalp_mainnet_enabled": False,
+                    },
+                )
+                try:
+                    await self._telegram.alert(
+                        event="RISK_KILL_SWITCH",
+                        severity="ERROR",
+                        agent="NickFury",
+                        message="BLOCK: scalp mode on live mainnet — set SCALP_MAINNET_ENABLED=true to opt in",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return []
+        except Exception as _scalp_gate_exc:  # noqa: BLE001
+            self._log.warning(
+                f"[NickFury] scalp_mainnet gate check no-op: {_scalp_gate_exc}"
+            )
             # Story 035 — push the kill-switch event so the operator
             # actually hears about it.
             await self._telegram.alert(
