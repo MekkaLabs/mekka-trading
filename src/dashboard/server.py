@@ -579,6 +579,9 @@ class MekkaDashboardServer:
         r.add_get("/api/strategies/performance", self._handle_strategies_performance)
         # BW-7: decisão completa do Be Water — regime + signals ranqueados
         r.add_get("/api/be-water/decide", self._handle_be_water_decide)
+        # REV-3 — Auto-learning scheduler
+        r.add_get("/api/auto-learning/status", self._handle_auto_learning_status)
+        r.add_post("/api/auto-learning/run-once", self._handle_auto_learning_run_once)
         # P1-3 — pre-flight check pra troca de Binance market_type (linear↔inverse)
         r.add_get("/api/binance-market-type/check-swap", self._handle_check_swap_safe)
 
@@ -7093,6 +7096,30 @@ class MekkaDashboardServer:
         except Exception as exc:  # noqa: BLE001
             logger.error("be_water decide failed: %s", exc, exc_info=True)
             return web.json_response({"error": str(exc), "flat": True}, status=200)
+
+    async def _handle_auto_learning_status(self, _: web.Request) -> web.Response:
+        """GET /api/auto-learning/status — REV-3 (2026-05-29)."""
+        try:
+            from src.services.auto_learning_scheduler import (
+                get_status, get_last_cycle,
+            )
+            return web.json_response({
+                "status": get_status(),
+                "last_cycle": get_last_cycle(),
+            }, status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("auto_learning status failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=200)
+
+    async def _handle_auto_learning_run_once(self, _: web.Request) -> web.Response:
+        """POST /api/auto-learning/run-once — dispara cycle manual."""
+        try:
+            from src.services.auto_learning_scheduler import run_one_cycle
+            result = await run_one_cycle()
+            return web.json_response(result, status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("auto_learning run failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=200)
 
     async def _handle_improvements_approve_pr(self, request: web.Request) -> web.Response:
         from src.dashboard.routers import improvements as _impr
