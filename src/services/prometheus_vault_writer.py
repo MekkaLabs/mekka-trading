@@ -192,7 +192,6 @@ def record_learning(learning: dict[str, Any]) -> Optional[Path]:
         existing = target.read_text(encoding="utf-8")
         tmp.write_text(existing + block, encoding="utf-8")
         os.replace(tmp, target)
-        return target
     except OSError as exc:
         logger.debug(f"[Prometheus.vault_writer] write falhou: {exc}")
         try:
@@ -201,6 +200,26 @@ def record_learning(learning: dict[str, Any]) -> Optional[Path]:
         except OSError:
             pass
         return None
+
+    # VAULT-INTEG-2 (2026-05-29): atualiza MOC - Aprendizados.
+    # Mantém o MOC vivo com link pro arquivo recém-escrito. Idempotente.
+    try:
+        from src.services.vault_moc_updater import record_to_moc  # noqa: WPS433
+        kpis = learning.get("kpis", {}) or {}
+        summary = (
+            f"{learning.get('observation_count', 0)} obs, "
+            f"{kpis.get('cycles_observed', 0)} cycles, "
+            f"{kpis.get('errors_observed', 0)} errors"
+        )
+        record_to_moc(
+            moc_name="MOC - Aprendizados",
+            entry_link=f"[[{target.stem}]]",
+            summary=f"Prometheus — {summary}",
+        )
+    except Exception as exc_moc:  # noqa: BLE001
+        logger.debug(f"[Prometheus.vault_writer] MOC update skipped: {exc_moc}")
+
+    return target
 
 
 def stats() -> dict[str, Any]:

@@ -583,6 +583,7 @@ class MekkaDashboardServer:
         r.add_get("/api/auto-learning/status", self._handle_auto_learning_status)
         r.add_post("/api/auto-learning/run-once", self._handle_auto_learning_run_once)
         r.add_get("/api/vault/activity", self._handle_vault_activity)
+        r.add_get("/api/vault/audit", self._handle_vault_audit)
         r.add_get("/api/prometheus/snapshot", self._handle_prometheus_snapshot)
         # P1-3 — pre-flight check pra troca de Binance market_type (linear↔inverse)
         r.add_get("/api/binance-market-type/check-swap", self._handle_check_swap_safe)
@@ -7412,6 +7413,24 @@ class MekkaDashboardServer:
             return web.json_response(payload, status=200)
         except Exception as exc:  # noqa: BLE001
             logger.error("prometheus snapshot failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=200)
+
+    async def _handle_vault_audit(self, _: web.Request) -> web.Response:
+        """GET /api/vault/audit — VAULT-INTEG-1 (2026-05-29).
+
+        Roda o vault_auditor e retorna o estado completo (health, órfãos,
+        broken links, gaps daily, cobertura agentes, densidade). Dashboard
+        widget consulta + Beast/Mentor podem usar pra detectar degradação.
+
+        Read-only — não escreve em nada. Pode ser caro em vaults grandes
+        (>5K notas): considere rate-limit no consumer.
+        """
+        try:
+            from src.services.vault_auditor import audit_vault  # noqa: WPS433
+            report = audit_vault()
+            return web.json_response(report.to_dict(), status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("vault audit failed: %s", exc, exc_info=True)
             return web.json_response({"error": str(exc)}, status=200)
 
     async def _handle_vault_activity(self, _: web.Request) -> web.Response:

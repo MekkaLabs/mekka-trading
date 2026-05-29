@@ -166,7 +166,22 @@ auto_generated: true
 ```
 
 """
-    return _atomic_append(target, block)
+    written = _atomic_append(target, block)
+    # VAULT-INTEG-2 (2026-05-29): mantém MOC - Trading & Estratégia vivo.
+    if written is not None:
+        try:
+            from src.services.vault_moc_updater import record_to_moc  # noqa: WPS433
+            record_to_moc(
+                moc_name="MOC - Trading & Estratégia",
+                entry_link=f"[[{written.stem}]]",
+                summary=(
+                    f"Regime {symbol}: {previous_regime or 'INIT'} → {new_regime} "
+                    f"(conf {confidence:.2f})"
+                ),
+            )
+        except Exception as exc_moc:  # noqa: BLE001
+            logger.debug(f"[strategy_vault_writer] MOC update skipped: {exc_moc}")
+    return written
 
 
 # ---------------------------------------------------------------------------
