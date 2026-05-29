@@ -577,6 +577,8 @@ class MekkaDashboardServer:
         r.add_get("/api/strategies", self._handle_strategies_list)
         r.add_get("/api/strategies/regime", self._handle_strategies_regime)
         r.add_get("/api/strategies/performance", self._handle_strategies_performance)
+        # BW-7: decisão completa do Be Water — regime + signals ranqueados
+        r.add_get("/api/be-water/decide", self._handle_be_water_decide)
         # P1-3 — pre-flight check pra troca de Binance market_type (linear↔inverse)
         r.add_get("/api/binance-market-type/check-swap", self._handle_check_swap_safe)
 
@@ -7068,6 +7070,29 @@ class MekkaDashboardServer:
                 },
                 status=200,
             )
+
+    async def _handle_be_water_decide(self, request: web.Request) -> web.Response:
+        """GET /api/be-water/decide?symbol=BTC&equity=5000
+
+        Pipeline E2E do Be Water: ProfessorX → RegimeDetector → Selector →
+        Strategies → BeWaterDecision com signals ranqueados. Read-only:
+        NÃO executa nenhum trade — apenas mostra o que o sistema FARIA.
+        """
+        try:
+            symbol = request.query.get("symbol", "BTC").upper()
+            equity = float(request.query.get("equity", "5000"))
+
+            from src.agents.professor_x import ProfessorX
+            analysis = await ProfessorX().run(symbol=symbol)
+
+            from src.services.be_water_orchestrator import decide
+            decision = await decide(
+                symbol=symbol, analysis=analysis, equity_usd=equity,
+            )
+            return web.json_response(decision.to_dict(), status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("be_water decide failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc), "flat": True}, status=200)
 
     async def _handle_improvements_approve_pr(self, request: web.Request) -> web.Response:
         from src.dashboard.routers import improvements as _impr

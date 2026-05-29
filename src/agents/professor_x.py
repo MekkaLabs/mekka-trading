@@ -184,6 +184,21 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
         if debate_verdict is not None:
             analysis = analysis.model_copy(update={"debate_verdict": debate_verdict})
 
+        # ── Be Water Framework — regime detection (2026-05-28) ──────────────
+        # Optional: enrich analysis.metadata with detected regime + selected
+        # strategies. Gated por BE_WATER_FRAMEWORK_ENABLED. Read-only —
+        # Vision pode usar como contexto, mas o flow Vision/Batman/IronMan
+        # original NÃO é alterado.
+        try:
+            from src.services.be_water_mekka_bridge import (
+                is_enabled as _bw_enabled,
+                detect_and_log_regime_change as _bw_log,
+            )
+            if _bw_enabled():
+                await _bw_log(symbol, analysis)
+        except Exception as _bw_exc:  # noqa: BLE001
+            self._log.debug(f"[ProfessorX] be_water bridge no-op: {_bw_exc}")
+
         self._log.info(
             f"[ProfessorX] {symbol} analysis assembled — "
             f"safe_to_trade={analysis.is_safe_to_trade} "
