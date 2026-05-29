@@ -152,6 +152,18 @@ class Beast(BaseAgent[BeastReport]):
         except Exception as exc:  # noqa: BLE001
             self._log.warning(f"[Beast] Signal quality audit skipped: {exc}")
 
+        # ── 5. PROM-E (2026-05-29): Audit Prometheus learnings ────────────
+        # Antes: Beast olhava só trades / gates / latency / signal_quality.
+        # Não cruzava com agent.error patterns que o Prometheus já agrega.
+        # Agora: lê PROMETHEUS_LEARNING events e detecta agentes com erro
+        # crônico (>3 falhas em 24h) → propõe story de investigação.
+        try:
+            prom_stats = await self._analyze_prometheus_learnings(since)
+            stats["prometheus"] = prom_stats
+            proposals.extend(await self._propose_from_prometheus(prom_stats))
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"[Beast] Prometheus audit skipped: {exc}")
+
         # ── Sort by priority ──────────────────────────────────────────────
         priority_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
         proposals.sort(key=lambda p: priority_order.get(p.impact, 3))
@@ -478,6 +490,158 @@ class Beast(BaseAgent[BeastReport]):
                 area="signal_quality",
                 evidence=f"Low-conf win rate={lc_wr:.0%} ({lc_count} trades) vs "
                          f"high-conf win rate={hc_wr:.0%} ({hc_count} trades)",
+            ))
+
+        return proposals
+
+    # -----------------------------------------------------------------------
+    # PROM-E: Prometheus learnings audit
+    # -----------------------------------------------------------------------
+
+    async def _analyze_prometheus_learnings(self, since: datetime) -> dict[str, Any]:
+        """Lê PROMETHEUS_LEARNING events do audit_log e agrega.
+
+        Retorna {n_learnings, total_errors, agent_error_counts,
+        avg_error_rate, total_cycles, executions}.
+        """
+        out: dict[str, Any] = {
+            "n_learnings": 0,
+            "total_errors": 0,
+            "total_cycles": 0,
+            "executions": 0,
+            "agent_error_counts": {},
+            "avg_error_rate": None,
+        }
+        try:
+            from src.persistence.repository import MekkaRepository  # noqa: WPS433
+            events = await MekkaRepository.list_audit_events(
+                agent="Prometheus",
+                event="PROMETHEUS_LEARNING",
+                limit=100,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[Beast] prometheus learnings query failed: {exc}")
+            return out
+
+        if not events:
+            return out
+
+        # Filtra por janela `since`
+        recent = []
+        for e in events:
+            ts = e.get("timestamp")
+            if ts is None:
+                continue
+            try:
+                if isinstance(ts, str):
+                    from datetime import datetime as _dt  # noqa: WPS433
+                    ts_dt = _dt.fromisoformat(ts.replace("Z", "+00:00"))
+                else:
+                    ts_dt = ts
+                if ts_dt.tzinfo is None:
+                    ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+                if ts_dt >= since:
+                    recent.append(e)
+            except Exception:  # noqa: BLE001
+                continue
+
+        out["n_learnings"] = len(recent)
+        rate_samples: list[float] = []
+        for e in recent:
+            payload = e.get("payload") or {}
+            if isinstance(payload, str):
+                import json as _json  # noqa: WPS433
+                try:
+                    payload = _json.loads(payload)
+                except Exception:  # noqa: BLE001
+                    payload = {}
+            kpis = payload.get("kpis") or {}
+            out["total_errors"] += int(kpis.get("errors_observed", 0) or 0)
+            out["total_cycles"] += int(kpis.get("cycles_observed", 0) or 0)
+            out["executions"] += int(kpis.get("executions_observed", 0) or 0)
+            for ea in kpis.get("top_error_agents", []) or []:
+                name = ea.get("agent")
+                n = int(ea.get("n", 0) or 0)
+                if name:
+                    out["agent_error_counts"][name] = (
+                        out["agent_error_counts"].get(name, 0) + n
+                    )
+            rate = kpis.get("error_rate")
+            if rate is not None:
+                rate_samples.append(float(rate))
+
+        if rate_samples:
+            out["avg_error_rate"] = round(
+                sum(rate_samples) / len(rate_samples), 3
+            )
+        return out
+
+    async def _propose_from_prometheus(self, stats: dict) -> list[ImprovementProposal]:
+        """Threshold heuristics — only propose when signal is clearly above noise."""
+        proposals: list[ImprovementProposal] = []
+        if stats.get("n_learnings", 0) < 3:
+            # Não temos amostragem suficiente pra propor nada com confiança
+            return proposals
+
+        # Detectar agente "doente" — top error agent com >3 falhas
+        error_counts = stats.get("agent_error_counts", {}) or {}
+        for agent_name, n_errors in error_counts.items():
+            if n_errors >= 3:
+                proposals.append(ImprovementProposal(
+                    title=f"Agente {agent_name} com erros recorrentes — investigar root cause",
+                    description=(
+                        f"Prometheus observou {n_errors} falhas/timeouts do "
+                        f"agente {agent_name} no período. "
+                        "Pode ser dependência externa quebrada (API), bug local, "
+                        "ou input inválido recorrente."
+                    ),
+                    impact="HIGH" if n_errors >= 6 else "MEDIUM",
+                    area="reliability",
+                    evidence=(
+                        f"{n_errors} eventos agent.error/agent.timeout em "
+                        f"{stats.get('n_learnings', 0)} learnings"
+                    ),
+                    suggested_story=(
+                        f"Story — Diagnosticar {agent_name} (ver logs + "
+                        f"agent_degradation_detector)"
+                    ),
+                ))
+
+        # Detectar error rate global alto
+        avg_rate = stats.get("avg_error_rate")
+        if avg_rate is not None and avg_rate >= 0.5 and stats.get("total_cycles", 0) >= 5:
+            proposals.append(ImprovementProposal(
+                title=(
+                    f"Error rate sistêmico {avg_rate:.0%} — "
+                    "pipeline está fragilizado"
+                ),
+                description=(
+                    f"Prometheus mediu media de {avg_rate:.0%} de erros por ciclo. "
+                    "Acima de 50% significa que metade dos ciclos tem algum agente "
+                    "falhando. Cabe rodar agent_degradation_detector + ver gate breakers."
+                ),
+                impact="HIGH",
+                area="reliability",
+                evidence=(
+                    f"avg_error_rate={avg_rate:.2f} em "
+                    f"{stats.get('n_learnings', 0)} learnings"
+                ),
+            ))
+
+        # Detectar pipeline sem execuções (todo signal vira HOLD/skip)
+        cycles = stats.get("total_cycles", 0)
+        executions = stats.get("executions", 0)
+        if cycles >= 10 and executions == 0:
+            proposals.append(ImprovementProposal(
+                title=f"{cycles} ciclos sem nenhuma execução — gates muito apertados?",
+                description=(
+                    "Prometheus observou ciclos completos sem ironman.exec. "
+                    "Pode ser Batman rejeitando tudo (gates apertados) ou Vision "
+                    "sempre devolvendo HOLD."
+                ),
+                impact="MEDIUM",
+                area="opportunity",
+                evidence=f"cycles={cycles}, executions=0",
             ))
 
         return proposals

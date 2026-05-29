@@ -244,7 +244,15 @@ class Prometheus(BaseAgent[dict[str, Any]]):
             logger.debug(f"[Prometheus] handler error: {exc}")
 
     async def _maybe_emit_learning(self, cycle_event: dict[str, Any]) -> None:
-        """Throttled consolidator. Sumariza últimas observações como aprendizado."""
+        """Throttled consolidator. Sumariza últimas observações como aprendizado.
+
+        PROM-B/C (2026-05-29): aprendizado enriquecido + auditado.
+          - PROM-B: emite PROMETHEUS_LEARNING no audit_log (antes era write-only
+            no vault e no bus, sem trilha consultável).
+          - PROM-C: enriquece com KPIs reais (win_rate_24h, top error agents,
+            distribuição de actions Vision) — antes era só topic_counts,
+            insuficiente para qualquer decisão.
+        """
         if not self._learning_throttle.allow():
             return
         recent = list(self._observations)[-50:]
@@ -253,16 +261,45 @@ class Prometheus(BaseAgent[dict[str, Any]]):
         topics_count: dict[str, int] = {}
         for obs in recent:
             topics_count[obs["topic"]] = topics_count.get(obs["topic"], 0) + 1
+
+        # PROM-C — KPIs derivados das observações em memória
+        kpis = self._derive_kpis(recent)
+
         learning = {
             "ts": time.time(),
             "cycle_id": cycle_event.get("cycle_id"),
             "symbol": cycle_event.get("symbol"),
             "observation_count": len(recent),
             "topic_counts": topics_count,
+            "kpis": kpis,                  # PROM-C
             "stats_snapshot": dict(self._stats),
         }
         self._learnings.append(learning)
         self._stats["learnings_emitted"] += 1
+
+        # PROM-B (2026-05-29) — emite PROMETHEUS_LEARNING no audit_log
+        try:
+            from src.persistence.repository import MekkaRepository  # noqa: WPS433
+            await MekkaRepository.log_event(
+                agent="Prometheus",
+                event="PROMETHEUS_LEARNING",
+                severity="INFO",
+                message=(
+                    f"learning: {len(recent)} obs, "
+                    f"{kpis.get('cycles_observed', 0)} cycles, "
+                    f"{kpis.get('errors_observed', 0)} errors, "
+                    f"action_mix={kpis.get('action_mix', {})}"
+                ),
+                payload={
+                    "topic_counts": topics_count,
+                    "kpis": kpis,
+                    "observation_count": len(recent),
+                    "stats_snapshot": dict(self._stats),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[Prometheus] audit emit skipped: {exc}")
+
         if self._bus is not None:
             try:
                 await self._bus.publish(TOPIC_LEARNING, learning)
@@ -277,6 +314,68 @@ class Prometheus(BaseAgent[dict[str, Any]]):
                 self._stats["vault_writes"] = self._stats.get("vault_writes", 0) + 1
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[Prometheus] vault writer no-op: {exc}")
+
+    @staticmethod
+    def _derive_kpis(recent: list[dict[str, Any]]) -> dict[str, Any]:
+        """PROM-C (2026-05-29) — extrai KPIs reais das observações.
+
+        Antes: learning só carregava topic_counts.
+        Agora:
+          - cycles_observed:    # de cycle.end
+          - errors_observed:    # de agent.error + agent.timeout
+          - top_error_agents:   top 3 agentes que mais erraram
+          - action_mix:         {LONG: N, SHORT: N, HOLD: N} de vision.signal
+          - executions_observed:# de ironman.exec
+        """
+        cycles = errors = executions = 0
+        error_agents: dict[str, int] = {}
+        action_mix: dict[str, int] = {"LONG": 0, "SHORT": 0, "HOLD": 0, "OTHER": 0}
+
+        for obs in recent:
+            topic = obs.get("topic", "")
+            summary = obs.get("summary", "") or ""
+            if topic == "cycle.end":
+                cycles += 1
+            elif topic in ("agent.error", "agent.timeout"):
+                errors += 1
+                # summary do tipo "agent.error(IronMan) reason"
+                # extraímos nome do agente entre parênteses
+                import re as _re  # noqa: WPS433
+                m = _re.search(r"\(([^)]+)\)", summary)
+                if m:
+                    name = m.group(1)
+                    error_agents[name] = error_agents.get(name, 0) + 1
+            elif topic == "ironman.exec":
+                executions += 1
+            elif topic == "vision.signal":
+                # summary do tipo "Vision(BTC) → LONG"
+                for k in ("LONG", "SHORT", "HOLD"):
+                    if k in summary:
+                        action_mix[k] += 1
+                        break
+                else:
+                    action_mix["OTHER"] += 1
+
+        # Top 3 agents com mais erros
+        top_errors = sorted(
+            error_agents.items(), key=lambda kv: kv[1], reverse=True,
+        )[:3]
+
+        # Action mix em %
+        total_actions = sum(action_mix.values()) or 1
+        action_pct = {
+            k: round(v / total_actions * 100, 1)
+            for k, v in action_mix.items() if v > 0
+        }
+
+        return {
+            "cycles_observed": cycles,
+            "errors_observed": errors,
+            "executions_observed": executions,
+            "top_error_agents": [{"agent": a, "n": n} for a, n in top_errors],
+            "action_mix": action_pct,
+            "error_rate": round(errors / max(cycles, 1), 3),
+        }
 
     # ── BaseAgent.run() — snapshot de estado ────────────────────────────
 

@@ -583,6 +583,7 @@ class MekkaDashboardServer:
         r.add_get("/api/auto-learning/status", self._handle_auto_learning_status)
         r.add_post("/api/auto-learning/run-once", self._handle_auto_learning_run_once)
         r.add_get("/api/vault/activity", self._handle_vault_activity)
+        r.add_get("/api/prometheus/snapshot", self._handle_prometheus_snapshot)
         # P1-3 — pre-flight check pra troca de Binance market_type (linear↔inverse)
         r.add_get("/api/binance-market-type/check-swap", self._handle_check_swap_safe)
 
@@ -694,6 +695,30 @@ class MekkaDashboardServer:
             logger.info("[server] Cable agent startup scheduled")
         except Exception as _exc_cable:
             logger.warning("Cable agent startup skipped: %s", _exc_cable)
+
+        # PROM-A (2026-05-29) — Prometheus agent startup. Diagnóstico anterior:
+        #   - PROMETHEUS_AGENT_ENABLED unset → agent off
+        #   - 0 audit events com agente Prometheus em 7d
+        #   - 0 notas vault prometheus-learnings
+        # NickFury já publica cycle.end/cycle.start/ironman.exec e BaseAgent
+        # publica agent.error em todo falho — os publishers EXISTEM. Faltava
+        # só o subscriber ligado. Idêntico ao padrão Cable.
+        try:
+            from src.agents.prometheus import (
+                start_prometheus_agent, is_agent_enabled as _prom_enabled,
+            )
+            if _prom_enabled():
+                self._prometheus_task = asyncio.create_task(
+                    start_prometheus_agent(),  # type: ignore[arg-type]
+                )
+                logger.info("[server] Prometheus agent startup scheduled")
+            else:
+                logger.debug(
+                    "[server] Prometheus disabled "
+                    "(set PROMETHEUS_AGENT_ENABLED=true to learn from events)"
+                )
+        except Exception as _exc_prom:
+            logger.warning("Prometheus agent startup skipped: %s", _exc_prom)
 
     async def _on_shutdown(self, _: web.Application) -> None:
         if self._broadcast_task is not None:
@@ -7198,6 +7223,60 @@ class MekkaDashboardServer:
             return web.json_response(result, status=200)
         except Exception as exc:  # noqa: BLE001
             logger.error("auto_learning run failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=200)
+
+    async def _handle_prometheus_snapshot(self, _: web.Request) -> web.Response:
+        """GET /api/prometheus/snapshot — PROM-D (2026-05-29).
+
+        Expõe estado do Prometheus runtime: agent ligado? quantas observações,
+        quantos learnings, vault writes, últimos 5 learnings com KPIs.
+
+        Quando Prometheus está desligado (flag off), retorna 200 com
+        ``enabled=false`` + dica de como ligar.
+        """
+        import os as _os
+        try:
+            from src.agents.prometheus import (
+                get_prometheus_agent, is_agent_enabled as _prom_enabled,
+            )
+            payload: dict[str, Any] = {
+                "enabled": _prom_enabled(),
+                "env_flag": "PROMETHEUS_AGENT_ENABLED",
+                "env_value": _os.environ.get("PROMETHEUS_AGENT_ENABLED", "<unset>"),
+            }
+            agent = get_prometheus_agent()
+            if agent is None:
+                payload["snapshot"] = None
+                payload["hint"] = (
+                    "Set PROMETHEUS_AGENT_ENABLED=true in .env + reboot. "
+                    "Prometheus subscribe a cycle.end, vision.signal, agent.error "
+                    "(já publicados pelo NickFury/BaseAgent)."
+                )
+            else:
+                payload["snapshot"] = agent.snapshot()
+
+            # Tenta também contar PROMETHEUS_LEARNING events no DB
+            try:
+                import sqlite3 as _sq3  # noqa: WPS433
+                from pathlib import Path as _P  # noqa: WPS433
+                db = _P(__file__).resolve().parents[2] / "data" / "mekka_trading.db"
+                if db.exists():
+                    conn = _sq3.connect(str(db))
+                    row = conn.execute(
+                        "SELECT COUNT(*), MAX(timestamp) FROM audit_log "
+                        "WHERE event='PROMETHEUS_LEARNING'"
+                    ).fetchone()
+                    conn.close()
+                    payload["audit_log"] = {
+                        "total_events": int(row[0] or 0),
+                        "last_event_ts": row[1],
+                    }
+            except Exception:  # noqa: BLE001
+                pass
+
+            return web.json_response(payload, status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("prometheus snapshot failed: %s", exc, exc_info=True)
             return web.json_response({"error": str(exc)}, status=200)
 
     async def _handle_vault_activity(self, _: web.Request) -> web.Response:
