@@ -5989,18 +5989,85 @@ async function _sysPowerToggle() {
 
 async function _sysPowerReboot() {
   if (_sysPowerBusy) return;
-  const ok = confirm('⚠️ Reiniciar todo o sistema?\n\nO loop de trading será parado e iniciado novamente.');
-  if (!ok) return;
+  // 2 modos: soft (só runtime) ou hard (todo o processo Python)
+  const choice = prompt(
+    '⚠️ Como reiniciar?\n\n' +
+    '  • Digite SOFT — só o loop de trading (rápido, ~2s)\n' +
+    '  • Digite HARD — todo o processo Python (substitui via os.execv,\n' +
+    '    dashboard cai por ~15s e volta com tudo zerado em memória)\n\n' +
+    'Cancele para abortar.',
+    'SOFT',
+  );
+  if (choice === null) return;
+  const mode = String(choice).trim().toUpperCase();
+  if (mode !== 'SOFT' && mode !== 'HARD') {
+    alert('❌ Modo inválido. Digite SOFT ou HARD.');
+    return;
+  }
   _sysPowerBusy = true;
   _sysPowerRender({ state: 'stopping' });
   try {
-    await _sysPowerPost('/api/system/reboot', { confirm: 'REBOOT' });
+    const result = await _sysPowerPost('/api/system/reboot', {
+      confirm: 'REBOOT',
+      mode: mode.toLowerCase(),
+    });
+    if (mode === 'HARD') {
+      // Dashboard vai cair. Mostra banner + auto-reconnect.
+      _showHardRebootBanner();
+      return;  // não chama _sysPowerFetchStatus (vai dar 503)
+    }
+    console.log('[reboot] soft result:', result);
   } catch (e) {
+    if (mode === 'HARD') {
+      // Esperado: fetch falha porque processo morreu mid-flight
+      _showHardRebootBanner();
+      return;
+    }
     alert('❌ Falha ao reiniciar o sistema: ' + e.message);
   } finally {
     _sysPowerBusy = false;
-    _sysPowerFetchStatus();
+    if (mode === 'SOFT') _sysPowerFetchStatus();
   }
+}
+
+function _showHardRebootBanner() {
+  // Banner full-screen + auto-reload quando server voltar
+  let banner = document.getElementById('hard-reboot-banner');
+  if (banner) banner.remove();
+  banner = document.createElement('div');
+  banner.id = 'hard-reboot-banner';
+  banner.style.cssText = (
+    'position:fixed;inset:0;z-index:999999;background:rgba(0,0,0,0.92);' +
+    'color:#5be8f5;font-family:monospace;display:flex;align-items:center;' +
+    'justify-content:center;flex-direction:column;gap:20px;font-size:1.2rem;' +
+    'text-align:center;padding:40px'
+  );
+  banner.innerHTML = (
+    '<div style="font-size:3rem">🔄</div>' +
+    '<div><b>Hard reboot em progresso</b></div>' +
+    '<div style="color:#aaa;font-size:0.95rem">Processo Python sendo substituído via os.execv.<br>Dashboard volta em ~15s automaticamente.</div>' +
+    '<div id="hard-reboot-spinner" style="margin-top:18px">⏳ Aguardando server voltar…</div>'
+  );
+  document.body.appendChild(banner);
+
+  // Polling do server
+  let attempts = 0;
+  const tick = async () => {
+    attempts++;
+    try {
+      const r = await fetch('/api/system/status', { cache: 'no-store' });
+      if (r.ok) {
+        document.getElementById('hard-reboot-spinner').textContent = '✅ Server voltou! Recarregando…';
+        setTimeout(() => window.location.reload(), 800);
+        return;
+      }
+    } catch (_) { /* ignora — server ainda subindo */ }
+    const sp = document.getElementById('hard-reboot-spinner');
+    if (sp) sp.textContent = `⏳ Aguardando server voltar… (tentativa ${attempts})`;
+    if (attempts < 60) setTimeout(tick, 1000);  // tenta 60s
+    else if (sp) sp.textContent = '❌ Server não voltou em 60s. Refresh manualmente.';
+  };
+  setTimeout(tick, 3000);  // dá 3s antes de começar a checar
 }
 
 function _bootSystemPower() {

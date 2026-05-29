@@ -43,6 +43,13 @@
                 transform="rotate(18 88 32)"/>
         </svg>
         <span class="brand-wordmark">MEKKA</span>
+        <!-- 2026-05-29: botão minimizar sidebar. Persiste em localStorage. -->
+        <button id="sidebar-toggle" class="sidebar-toggle-btn"
+                type="button" aria-label="Minimizar menu lateral"
+                title="Minimizar / expandir menu">
+          <span class="sidebar-toggle-icon-expanded">◀</span>
+          <span class="sidebar-toggle-icon-collapsed">▶</span>
+        </button>
       </div>
       <nav class="sidebar-nav">
         <button class="page-nav-btn page-nav-live" data-page="live">📡 Live</button>
@@ -1944,6 +1951,10 @@
     <script src="/static/strategy_matrix.js?v=20260528a" defer></script>
     <!-- Today Summary + Topbar failsafe — externo (CSP bloqueia inline). -->
     <script src="/static/today_summary_failsafe.js?v=20260528c" defer></script>
+    <!-- Sidebar minimize (2026-05-29) — toggle com persistência localStorage. -->
+    <script src="/static/sidebar_minimize.js?v=20260529a" defer></script>
+    <!-- Dashboard personalization FAB + shortcut Cmd+, (2026-05-29). -->
+    <script src="/static/dashboard_personalization.js?v=20260529a" defer></script>
     <!-- agents-sprites.js exposes window.AGENTS / drawAgent / drawSprite
          so the main dashboard Agents Roster renders the same pixel art
          the Pixel Office uses (P0.6, HANDOFF 2026-05-20). MUST load

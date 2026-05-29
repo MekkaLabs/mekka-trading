@@ -4824,3 +4824,130 @@ body[data-theme="light"] .page-nav-sub a { color: var(--muted); }
     outline-offset: 2px;
   }
 }
+
+/* ============================================================
+   Sidebar Minimize (2026-05-29)
+   ============================================================
+   Adds a collapse toggle to the sidebar. When collapsed:
+   - sidebar shrinks from 200px to 60px
+   - text labels hidden, only emojis visible
+   - submenu lists hidden
+   - smooth transition (200ms)
+   - persisted via localStorage "mekka_sidebar_collapsed"
+   ============================================================ */
+
+.sidebar {
+  transition: width 200ms ease-out;
+}
+
+.sidebar-toggle-btn {
+  position: absolute;
+  top: 16px;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--glass-border);
+  border-radius: 50%;
+  background: rgba(91,232,245,0.08);
+  color: #5be8f5;
+  font-size: 0.7rem;
+  line-height: 22px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 110;
+  transition: all 150ms ease;
+}
+.sidebar-toggle-btn:hover {
+  background: rgba(91,232,245,0.18);
+  transform: scale(1.1);
+}
+.sidebar-toggle-icon-collapsed { display: none; }
+.sidebar-toggle-icon-expanded { display: inline; }
+
+/* Estado colapsado */
+.sidebar.sidebar--collapsed {
+  width: 60px !important;
+}
+.sidebar.sidebar--collapsed .brand-wordmark,
+.sidebar.sidebar--collapsed .page-nav-sub,
+.sidebar.sidebar--collapsed .page-nav-btn {
+  /* Esconde textos longos mas preserva emojis */
+}
+.sidebar.sidebar--collapsed .brand-wordmark {
+  display: none;
+}
+.sidebar.sidebar--collapsed .sidebar-toggle-icon-expanded { display: none; }
+.sidebar.sidebar--collapsed .sidebar-toggle-icon-collapsed { display: inline; }
+.sidebar.sidebar--collapsed .page-nav-sub {
+  display: none !important;
+}
+.sidebar.sidebar--collapsed .page-nav-btn {
+  font-size: 1.5rem;
+  text-align: center;
+  padding: 10px 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-indent: 0;
+  /* hack: usa text-overflow + width pra mostrar só primeiro char (emoji) */
+}
+.sidebar.sidebar--collapsed .page-nav-btn {
+  position: relative;
+  color: transparent;  /* esconde texto */
+}
+.sidebar.sidebar--collapsed .page-nav-btn::first-letter {
+  color: inherit;  /* mas mantém o emoji visível */
+}
+/* Fallback: usa pseudo-element pra emoji explícito quando disponível */
+.sidebar.sidebar--collapsed .page-nav-btn[data-emoji]::before {
+  content: attr(data-emoji);
+  color: var(--text-1, #c8d4e8);
+  font-size: 1.4rem;
+  display: block;
+}
+.sidebar.sidebar--collapsed .page-nav-btn[data-emoji] {
+  color: transparent;
+  height: 38px;
+  line-height: 38px;
+}
+.sidebar.sidebar--collapsed .sidebar-brand {
+  justify-content: center;
+  padding: 12px 6px;
+}
+.sidebar.sidebar--collapsed .sidebar-toggle-btn {
+  right: 50%;
+  transform: translateX(50%);
+}
+
+/* Quando sidebar minimiza, main-content precisa ajustar */
+body.sidebar-collapsed .main-content,
+body.sidebar-collapsed main {
+  margin-left: 60px !important;
+  transition: margin-left 200ms ease-out;
+}
+.main-content,
+main {
+  transition: margin-left 200ms ease-out;
+}
+
+/* Widget Customizer: melhorar visibilidade do trigger se existir */
+#widget-customizer-trigger {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 9000;
+  background: rgba(91,232,245,0.12);
+  border: 1px solid var(--glass-border);
+  color: #5be8f5;
+  padding: 10px 14px;
+  border-radius: 24px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+#widget-customizer-trigger:hover {
+  background: rgba(91,232,245,0.22);
+  transform: scale(1.05);
+}

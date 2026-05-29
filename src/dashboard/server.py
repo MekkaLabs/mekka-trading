@@ -1702,14 +1702,68 @@ class MekkaDashboardServer:
         return web.json_response(result)
 
     async def _handle_system_reboot(self, request: web.Request) -> web.Response:
-        """Reinicia o runtime (stop seguido de start). Exige
-        body {"confirm":"REBOOT"}."""
+        """Reinicia o sistema inteiro. Exige body {"confirm":"REBOOT"}.
+
+        Modo:
+        - body.mode = "soft" (default) — reinicia só o runtime (NickFury);
+          dashboard fica vivo, conexões CCXT preservadas. Rápido (~2s).
+        - body.mode = "hard" — substitui o processo Python via os.execv
+          após responder. Todo estado em memória é perdido, dashboard cai
+          por ~10-15s e volta. Usa sys.executable + sys.argv.
+        """
+        body = await self._safe_json_body(request) or {}
+        if str(body.get("confirm") or "").upper() != "REBOOT":
+            return web.json_response({"error": "confirm required"}, status=400)
+        mode = str(body.get("mode") or "soft").lower()
+
+        if mode == "hard":
+            # Hard reboot: agenda os.execv após responder o HTTP.
+            # Fechamento gracioso de conexões CCXT acontece no atexit handler.
+            import asyncio as _asyncio
+            import os as _os
+            import sys as _sys
+
+            async def _do_hard_reboot() -> None:
+                # Pequeno delay pra resposta HTTP fechar
+                await _asyncio.sleep(1.5)
+                logger.warning(
+                    "[system.reboot.HARD] Substituindo processo Python via os.execv. "
+                    "Dashboard ficará offline 10-15s."
+                )
+                # Tenta fechar CCXT clients (libera connections aiohttp)
+                try:
+                    from src.agents.iron_man import _CCXT_SHARED  # type: ignore
+                    for client in list(_CCXT_SHARED.values()):
+                        try:
+                            await client.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                except Exception:  # noqa: BLE001
+                    pass
+                # Para o runtime se rodando
+                if self._runtime is not None:
+                    try:
+                        await self._runtime.stop()
+                    except Exception:  # noqa: BLE001
+                        pass
+                # Substitui processo. argv[0] é "python3"; resto é o comando.
+                try:
+                    _os.execv(_sys.executable, [_sys.executable] + _sys.argv)
+                except Exception as _exc:  # noqa: BLE001
+                    logger.error(f"[system.reboot.HARD] os.execv failed: {_exc}")
+
+            _asyncio.create_task(_do_hard_reboot(), name="hard_reboot_task")
+            return web.json_response({
+                "ok": True,
+                "mode": "hard",
+                "message": "Hard reboot scheduled in 1.5s — dashboard will be offline ~15s.",
+            })
+
+        # Soft reboot (comportamento original): só runtime
         if self._runtime is None:
             return web.json_response({"error": "no runtime controller"}, status=503)
-        body = await self._safe_json_body(request)
-        if not isinstance(body, dict) or str(body.get("confirm") or "").upper() != "REBOOT":
-            return web.json_response({"error": "confirm required"}, status=400)
         result = await self._runtime.reboot()
+        result["mode"] = "soft"
         return web.json_response(result)
 
     async def _handle_office_v2_index(self, _: web.Request) -> web.FileResponse:
