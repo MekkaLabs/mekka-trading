@@ -83,20 +83,26 @@ class MekkaRepository:
         e quote_currency == 'USDT'. Default detector usa active_exchange
         + binance_market_type quando o caller não passa explícito.
         """
-        # Derive quote_currency from current settings se não passado pelo caller
+        # Derive quote_currency: prefer ExecutionResult.quote_currency (P2 fix),
+        # depois caller-passed, depois auto-detect via settings.
         if quote_currency is None:
-            try:
-                from src.config.settings import settings  # noqa: WPS433
-                if settings.active_exchange == "hyperliquid":
-                    quote_currency = "USDC"
-                elif (settings.active_exchange == "binance"
-                      and str(getattr(settings, "binance_market_type", "linear")) == "inverse"):
-                    # Em inverse, quote_currency é o coin do par (BTC, ETH)
-                    quote_currency = str(execution.symbol).upper().strip()
-                else:
-                    quote_currency = "USDT"
-            except Exception:  # noqa: BLE001
-                quote_currency = "USDT"  # safe default
+            # ExecutionResult agora tem quote_currency (P2) — usa se presente
+            exec_qc = getattr(execution, "quote_currency", None)
+            if exec_qc:
+                quote_currency = str(exec_qc).upper().strip()
+            else:
+                try:
+                    from src.config.settings import settings  # noqa: WPS433
+                    if settings.active_exchange == "hyperliquid":
+                        quote_currency = "USDC"
+                    elif (settings.active_exchange == "binance"
+                          and str(getattr(settings, "binance_market_type", "linear")) == "inverse"):
+                        # Em inverse, quote_currency é o coin do par (BTC, ETH)
+                        quote_currency = str(execution.symbol).upper().strip()
+                    else:
+                        quote_currency = "USDT"
+                except Exception:  # noqa: BLE001
+                    quote_currency = "USDT"  # safe default
 
         # Em linear, pnl_quote == pnl_usd se não foi explicitamente passado
         # (mantém histórico consistente sem caller precisar duplicar).

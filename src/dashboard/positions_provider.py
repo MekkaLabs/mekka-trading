@@ -397,13 +397,29 @@ def map_ccxt_positions(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
         coin = to_mekka(row.get("symbol") or "")
         side_raw = (row.get("side") or "").lower()
         side = "LONG" if side_raw == "long" else "SHORT"
+        # P2 (2026-05-28 audit): em Binance COIN-M (inverse), unrealizedPnl
+        # vem em COIN (BTC, ETH) — settlement currency. Converter pra USD
+        # via markPrice se inverse mode.
+        pnl_raw = _to_float(row.get("unrealizedPnl"))
+        pnl_usd = pnl_raw
+        try:
+            from src.config.settings import settings
+            if (settings.active_exchange == "binance"
+                    and str(getattr(settings, "binance_market_type", "linear")) == "inverse"):
+                mark = _to_float(row.get("markPrice"))
+                if mark and mark > 0 and pnl_raw is not None:
+                    pnl_usd = pnl_raw * mark
+        except Exception:  # noqa: BLE001
+            pass  # mantém pnl_raw como pnl_usd no fallback
+
         out.append({
             "symbol": coin,
             "side": side,
             "size": abs(size),
             "entry_price": _to_float(row.get("entryPrice")),
             "mark_price": _to_float(row.get("markPrice")),
-            "pnl_usd": _to_float(row.get("unrealizedPnl")),
+            "pnl_usd": pnl_usd,
+            "pnl_quote": pnl_raw,  # raw da exchange (USDT em linear, coin em inverse)
             "leverage": _to_int(row.get("leverage")),
             "liq_price": _to_float(row.get("liquidationPrice")) or None,
             "is_paper": False,

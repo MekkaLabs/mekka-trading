@@ -640,6 +640,18 @@ class Cyclops:
                         _oldest = _ts
                 if _oldest is not None and _oldest < _cutoff:
                     _age_min = (_now - _oldest).total_seconds() / 60.0
+                    # P2 (2026-05-28 audit): detecta clock skew anômalo.
+                    # Se age > 24h, provavelmente é timestamp em outro fuso
+                    # ou relógio do servidor desincronizado — log WARNING
+                    # mas mantém o close (defensivo: posição velha precisa
+                    # fechar mesmo se medição estiver errada).
+                    if _age_min > 1440:  # 24h
+                        logger.warning(
+                            f"[Cyclops] CLOCK_SKEW suspeito: position age "
+                            f"{_age_min:.1f}min > 1440min (24h). "
+                            f"Verifique TZ do servidor e timestamp do trade. "
+                            f"Closing anyway as defensive measure."
+                        )
                     trigger_reason = (
                         f"SCALP time-stop: position age {_age_min:.1f}min "
                         f"> max {_max_age_min}min"
