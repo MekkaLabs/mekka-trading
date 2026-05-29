@@ -109,6 +109,26 @@ class MekkaRepository:
         if pnl_quote is None and pnl_usd is not None and quote_currency in ("USDT", "USDC"):
             pnl_quote = pnl_usd
 
+        # COIN-1 (2026-05-29) — fallback inverse pnl_quote.
+        # ANTES: em COIN-M close, quando ExecutionResult não trazia pnl_quote
+        # nativo (caso comum em paper trading ou em status RESTORED), o campo
+        # ficava NULL eternamente — break do dashboard COIN-M e do Strategy
+        # Performance Tracker que filtra por pnl_quote.
+        # DEPOIS: estima pnl_quote = pnl_usd / avg_price (mark proxy) quando
+        # quote_currency é coin (não USDT/USDC) e temos pnl_usd + avg_price.
+        # Conservador: se faltar avg_price, mantém NULL — não inventa.
+        if (
+            pnl_quote is None
+            and pnl_usd is not None
+            and quote_currency not in ("USDT", "USDC")
+        ):
+            try:
+                avg_px = float(execution.avg_price or 0)
+                if avg_px > 0:
+                    pnl_quote = pnl_usd / avg_px
+            except (TypeError, ValueError):
+                pass
+
         rec = TradeRecord(
             timestamp=execution.timestamp,
             signal_id=signal_id,

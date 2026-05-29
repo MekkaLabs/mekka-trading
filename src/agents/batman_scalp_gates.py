@@ -58,27 +58,65 @@ class GateResult:
             self.metadata = {}
 
 
+def _atr_dynamic_cap_bonus(atr_pct: Optional[float]) -> int:
+    """SCALP-2 (2026-05-29) — bônus dinâmico de cap baseado em ATR.
+
+    Intuição: quando volatilidade é alta (ATR pct elevado), o sinal por candle
+    fica mais forte e há mais oportunidade legítima — manter cap fixo de 6/h
+    desperdiça setups. Quando volatilidade está baixa, manter o cap apertado.
+
+    Fórmula: bonus = floor(atr_pct / 0.001) clamped em [0, 6]
+      - ATR 0.1% → 0 bonus (cap base 6)
+      - ATR 0.3% → 3 bonus (cap 9)
+      - ATR 0.6%+ → 6 bonus (cap 12 — saturado)
+
+    Args:
+        atr_pct: ATR como fraction (0.001 = 0.1%). None → 0 bonus.
+
+    Returns:
+        int >= 0, máximo 6.
+    """
+    if atr_pct is None:
+        return 0
+    try:
+        bonus = int(float(atr_pct) // 0.001)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(6, bonus))
+
+
 def gate_max_trades_per_hour(
     mode_params: dict[str, Any],
     db_path: Optional[Path] = None,
+    atr_pct: Optional[float] = None,
 ) -> GateResult:
     """
     Gate 3s — bloqueia trade se já atingimos `max_trades_per_hour` na
     última hora.
 
+    SCALP-2 (2026-05-29): cap dinâmico baseado em ATR. Quando ATR está alto,
+    o cap aumenta proporcionalmente — não desperdiça setups em mercado
+    volátil. `atr_pct` é opcional (None → cap estático).
+
     Args:
         mode_params: dict de runtime_mode.get_params(). Lê `max_trades_per_hour`.
         db_path: opcional override pra testes (default: data/mekka_trading.db).
+        atr_pct: ATR como fraction (ex: 0.003 = 0.3%). None mantém comportamento
+            estático original.
 
     Returns:
         GateResult com gate_id="3s". Allowed=True quando:
           - max_trades_per_hour é None ou 0 (não-scalp)
           - DB inacessível (fail-silent → permite, evita falsos bloqueios)
-          - Contagem < max
+          - Contagem < cap (cap = base + atr_bonus)
     """
-    cap = mode_params.get("max_trades_per_hour")
-    if not cap or cap <= 0:
+    cap_base = mode_params.get("max_trades_per_hour")
+    if not cap_base or cap_base <= 0:
         return GateResult(gate_id="3s", allowed=True, reason="no scalp cap configured")
+
+    # SCALP-2: aplica bônus ATR no cap efetivo
+    atr_bonus = _atr_dynamic_cap_bonus(atr_pct)
+    cap = cap_base + atr_bonus
 
     path = db_path or _DB_PATH
     if not path.exists():
@@ -101,18 +139,28 @@ def gate_max_trades_per_hour(
         logger.warning(f"[batman_scalp_gates.3s] sqlite error: {exc} — ALLOW")
         return GateResult(gate_id="3s", allowed=True, reason=f"sqlite err: {exc}")
 
+    meta = {
+        "count_last_hour": count,
+        "cap": cap,
+        "cap_base": cap_base,
+        "atr_bonus": atr_bonus,
+        "atr_pct": atr_pct,
+    }
     if count >= cap:
         return GateResult(
             gate_id="3s",
             allowed=False,
-            reason=f"max_trades_per_hour reached ({count}/{cap} em 1h)",
-            metadata={"count_last_hour": count, "cap": cap},
+            reason=(
+                f"max_trades_per_hour reached ({count}/{cap} em 1h "
+                f"— base={cap_base} +atr_bonus={atr_bonus})"
+            ),
+            metadata=meta,
         )
     return GateResult(
         gate_id="3s",
         allowed=True,
         reason=f"under cap ({count}/{cap} em 1h)",
-        metadata={"count_last_hour": count, "cap": cap},
+        metadata=meta,
     )
 
 

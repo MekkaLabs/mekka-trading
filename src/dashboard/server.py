@@ -5609,6 +5609,23 @@ class MekkaDashboardServer:
         # ── Guardrail evaluation ────────────────────────────────────────
         checks: list[dict] = []
 
+        # G0 (TRADE-2, 2026-05-29): valida símbolo contra trading_assets
+        # ANTES de tudo. Símbolo errado significa que Batman/IronMan vão
+        # descartar silenciosamente e operador fica achando que vai executar.
+        if _body_symbol:
+            try:
+                from src.services.symbol_validation import validate_trade_symbol  # noqa: WPS433
+                _sv_ok, _sv_norm, _sv_reason = validate_trade_symbol(_body_symbol)
+                checks.append({
+                    "name": "symbol_supported",
+                    "ok": _sv_ok,
+                    "detail": _sv_reason,
+                })
+                if _sv_ok:
+                    _body_symbol = _sv_norm  # usa versão normalizada
+            except Exception as _sv_exc:  # noqa: BLE001
+                logger.debug(f"symbol validation skipped: {_sv_exc}")
+
         # G1: kill switch
         ks_active = is_kill_switch_active()
         checks.append({
@@ -6331,8 +6348,71 @@ class MekkaDashboardServer:
         Returns the final response. Mapping FILLED/PARTIAL/PAPER → 'submitted',
         ERROR/REJECTED/SKIPPED → 'blocked' (operator MUST see venue rejections;
         never claim 'submitted' when notional was below min etc).
+
+        TRADE-1 (2026-05-29): Telegram approval gate. ANTES — dashboard
+        execute pulava `telegram_trade_approval_enabled`. Operador podia
+        executar trade do dashboard sem ver pedido no Telegram. AGORA — se
+        flag ligada e telegram conectado, pede aprovação via Telegram
+        ANTES de IronMan.run() (mesma proteção que NickFury).
         """
         from src.agents.iron_man import IronMan
+
+        # TRADE-1 — Telegram gate (NickFury-equivalent)
+        if (
+            getattr(_s, "telegram_trade_approval_enabled", False)
+            and getattr(_s, "telegram_enabled", False)
+        ):
+            try:
+                from src.services.trade_approval import request_approval as _req_approval  # noqa: WPS433
+                import uuid as _uuid_te  # noqa: WPS433
+                _tid = f"dashboard-{rec_id}-{_uuid_te.uuid4().hex[:8]}"
+                _approved = await _req_approval(
+                    trade_id=_tid,
+                    signal_symbol=str(getattr(signal, "symbol", "?")),
+                    signal_action=str(getattr(signal, "action", "?")),
+                    signal_confidence=float(getattr(signal, "confidence", 0.0)),
+                    entry_price=float(getattr(signal, "entry_price", 0.0) or 0.0),
+                    stop_loss=getattr(signal, "stop_loss", None),
+                    take_profit=getattr(signal, "take_profit", None),
+                    size_pct=float(getattr(signal, "size_pct", 0.0) or 0.0),
+                    leverage=int(getattr(signal, "leverage", 1) or 1),
+                    reasons=[
+                        f"Dashboard execute (rec_id={rec_id})",
+                        f"Batman {approval.verdict.value}",
+                    ],
+                    timeout_s=int(
+                        getattr(_s, "telegram_trade_approval_timeout_s", 120)
+                    ),
+                )
+                if not _approved:
+                    await MekkaRepository.log_event(
+                        agent="Dashboard",
+                        event="TRADE_TELEGRAM_REJECTED",
+                        severity="WARNING",
+                        symbol=str(getattr(signal, "symbol", "?")),
+                        message=(
+                            f"Operador rejeitou ou timeout no Telegram "
+                            f"(trade_id={_tid})"
+                        ),
+                        payload={"trade_id": _tid, "rec_id": rec_id},
+                    )
+                    return web.json_response({
+                        "status": "blocked",
+                        "reason": (
+                            "Operador rejeitou no Telegram (ou timeout). "
+                            "Trade não foi enviado."
+                        ),
+                        "order_id": None,
+                        "is_paper": _s.paper_trading,
+                        "executed_at": executed_at,
+                        "telegram_trade_id": _tid,
+                    }, status=200)
+            except Exception as _tg_exc:  # noqa: BLE001
+                logger.warning(
+                    f"[trade_execute] Telegram approval skipped (exception): {_tg_exc}"
+                )
+                # Fail-open conservative: continua com IronMan (Batman já
+                # aprovou) — não bloquear trade por bug do canal Telegram.
 
         result = await IronMan().run(
             signal=signal,
@@ -6432,6 +6512,20 @@ class MekkaDashboardServer:
         from src.models.signal import TradingSignal, TradeAction
 
         symbol = str(body.get("symbol") or "BTC").strip().upper()
+        # TRADE-2 (2026-05-29): valida symbol contra trading_assets.
+        try:
+            from src.services.symbol_validation import validate_trade_symbol  # noqa: WPS433
+            _sv_ok, _sv_norm, _sv_reason = validate_trade_symbol(symbol)
+            if not _sv_ok:
+                raise ValueError(
+                    f"symbol {symbol!r} não suportado: {_sv_reason}"
+                )
+            symbol = _sv_norm
+        except ValueError:
+            raise
+        except Exception:  # noqa: BLE001
+            pass  # validator unavailable → fail-open (legado)
+
         side   = str(body.get("side") or "LONG").strip().upper()
         if side not in ("LONG", "SHORT"):
             raise ValueError("side inválido (use LONG ou SHORT)")
@@ -6452,6 +6546,21 @@ class MekkaDashboardServer:
 
         if not (1 <= leverage <= 50):
             raise ValueError("leverage fora do range (1–50).")
+
+        # COIN-2 (2026-05-29): se rodando em COIN-M, clamp leverage ao cap
+        # do símbolo. Binance COIN-M tem caps per-symbol (BTC 125x, ETH 100x,
+        # altcoins 25-50x). Sem este clamp, IronMan vê a request CCXT
+        # rejeitada pelo exchange e operador fica confuso.
+        try:
+            from src.config.settings import settings as _s_lev  # noqa: WPS433
+            from src.services.coin_m_leverage_caps import clamp_leverage  # noqa: WPS433
+            _mt = getattr(_s_lev, "binance_market_type", "linear")
+            _eff_lev, _warn = clamp_leverage(leverage, symbol, market_type=_mt)
+            if _warn:
+                logger.warning(f"[trade_manual] {_warn}")
+                leverage = _eff_lev
+        except Exception as _lev_exc:  # noqa: BLE001
+            logger.debug(f"[trade_manual] coin-m leverage clamp skipped: {_lev_exc}")
         if not (0.1 <= sl_pct <= 50):
             raise ValueError("SL% fora do range (0.1–50).")
         if not (0.1 <= tp_pct <= 100):
@@ -6623,6 +6732,32 @@ class MekkaDashboardServer:
 
         executed_at = datetime.now(timezone.utc).isoformat()
         body = await self._safe_json_body(request) or {}
+
+        # TRADE-3 (2026-05-29): rate limit operator manual trades.
+        # ANTES: bombardeio possível — N trades/min só Batman barrava (e Batman
+        # já gasta CPU). Agora throttle in-memory sliding window (5/h default).
+        # Override via env MANUAL_TRADE_MAX_PER_HOUR.
+        try:
+            from src.services.manual_trade_throttle import get_throttle  # noqa: WPS433
+            _tt_ok, _tt_meta = get_throttle().try_consume(bucket="manual_trade")
+            if not _tt_ok:
+                logger.warning(
+                    f"[trade_manual] rate-limited: {_tt_meta}"
+                )
+                return web.json_response({
+                    "status": "rate_limited",
+                    "reason": (
+                        f"Limite de {_tt_meta['max']} trades manuais por "
+                        f"{int(_tt_meta['window_s'] / 60)}min atingido. "
+                        f"Tente novamente em {_tt_meta['retry_after_s']}s."
+                    ),
+                    "throttle": _tt_meta,
+                    "order_id": None,
+                    "is_paper": _s.paper_trading,
+                    "executed_at": executed_at,
+                }, status=429)
+        except Exception as _tt_exc:  # noqa: BLE001
+            logger.debug(f"[trade_manual] throttle check skipped: {_tt_exc}")
 
         # Hard gate: confirmed must be exactly True (boolean).
         if body.get("confirmed") is not True:

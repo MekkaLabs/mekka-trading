@@ -583,6 +583,8 @@ class Vision(BaseAgent[TradingSignal]):
                 payload250 = _structured250.model_dump()
                 signal = self._build_signal(payload250, symbol=symbol, fallback_price=price)
                 signal = self._apply_degraded_quality_clamp(signal, analysis)
+                # SCALP-1 (2026-05-29): hard-block por Flash disagreement em modo scalp
+                signal = self._apply_flash_scalp_hard_block(signal, analysis, price)
                 self._log.info(f"[Vision:250] structured ✓ {signal.summary()}")
                 return signal
             except Exception as _b250_exc:  # noqa: BLE001
@@ -629,6 +631,8 @@ class Vision(BaseAgent[TradingSignal]):
             )
 
         signal = self._apply_degraded_quality_clamp(signal, analysis)
+        # SCALP-1 (2026-05-29): hard-block por Flash disagreement em modo scalp
+        signal = self._apply_flash_scalp_hard_block(signal, analysis, price)
         self._log.info(f"[Vision] {signal.summary()}")
 
         # Write-back loop: registra decisões de alta convicção no vault.
@@ -648,6 +652,86 @@ class Vision(BaseAgent[TradingSignal]):
             self._log.debug(f"[Vision] vault writer no-op: {exc_vault}")
 
         return signal
+
+    def _apply_flash_scalp_hard_block(
+        self,
+        signal: TradingSignal,
+        analysis: MarketAnalysis,
+        price: float,
+    ) -> TradingSignal:
+        """
+        SCALP-1 (2026-05-29) — hard-block trade quando Flash discorda em scalp.
+
+        ANTES: o prompt instruía o LLM a "reduzir size_pct em 20%" quando Flash
+        discordava (Story 244 lines 78-82). Isso permitia múltiplos trades
+        reduzidos seguidos quando Flash dizia o oposto — Gate 3s só conta o
+        número de trades, não a magnitude. Resultado: capital sangrava em
+        contra-tendência intra-candle.
+
+        DEPOIS: em modo scalp E severity=HIGH, força HOLD com rationale
+        claro. Trades swing continuam intactos (severity check só roda no
+        ramo scalp do bridge).
+
+        Idempotente / fail-silent / read-only no analysis.
+        """
+        try:
+            # HOLD não precisa de check
+            action = getattr(signal, "action", None)
+            if action is None or str(action) in ("TradeAction.HOLD", "HOLD"):
+                return signal
+
+            momentum = getattr(analysis, "momentum", None)
+            if momentum is None:
+                return signal
+
+            from src.services.flash_proposer_bridge import (  # noqa: WPS433
+                should_block_for_disagreement,
+                DisagreementSeverity,
+            )
+
+            should_block, reason = should_block_for_disagreement(
+                momentum, action,
+                severity_to_block=DisagreementSeverity.HIGH,
+            )
+            if not should_block:
+                return signal
+
+            # Bloqueia: força HOLD + audit event
+            self._log.warning(
+                f"[Vision:SCALP-1] {analysis.symbol} HARD-BLOCK por Flash "
+                f"disagreement HIGH em scalp: {reason}"
+            )
+            try:
+                import asyncio as _asyncio  # noqa: WPS433
+                from src.persistence.repository import MekkaRepository  # noqa: WPS433
+                loop = _asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(MekkaRepository.log_event(
+                        agent="Vision",
+                        event="FLASH_SCALP_HARD_BLOCK",
+                        severity="WARNING",
+                        symbol=analysis.symbol,
+                        message=reason,
+                        payload={
+                            "original_action": str(action),
+                            "original_confidence": float(
+                                getattr(signal, "confidence", 0.0) or 0.0,
+                            ),
+                            "reason": reason,
+                        },
+                    ))
+            except Exception:  # noqa: BLE001
+                pass
+
+            return self._fallback_hold(
+                symbol=analysis.symbol,
+                price=price,
+                reason=f"SCALP Flash hard-block: {reason}",
+                category="safety_skip",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:SCALP-1] hard-block check skipped: {exc}")
+            return signal
 
     def _apply_degraded_quality_clamp(
         self,
