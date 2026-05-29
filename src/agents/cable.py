@@ -132,6 +132,14 @@ class Cable(BaseAgent[dict[str, Any]]):
                     await self._bus.publish(TOPIC_REPORT, report)
                 except Exception:  # noqa: BLE001
                     pass
+            # REV-4 (2026-05-29): persiste no vault canônico via cable_vault_writer
+            # Opt-in via CABLE_VAULT_WRITER_ENABLED. Fail-silent.
+            try:
+                from src.services import cable_vault_writer as _cvw
+                if _cvw.is_enabled():
+                    _cvw.record_cable_report(report)
+            except Exception as _cvw_exc:  # noqa: BLE001
+                logger.debug(f"[Cable] vault writer no-op: {_cvw_exc}")
         except Exception as exc:  # noqa: BLE001
             self._stats["errors"] += 1
             logger.debug(f"[Cable] handler error: {exc}")

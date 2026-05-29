@@ -228,6 +228,37 @@ class Mekka(BaseAgent[MekkaCouncilReport]):
                 report.errors.append(f"suppressed_rejected: {suppressed}")
             proposals = kept
 
+        # 1.7) REV-2 (2026-05-29) — Memória de stale patterns.
+        # 71 IMPs foram marcadas como stale; stale_imp_learner agrupou
+        # em padrões. Suprime auto IMPs que casam com padrão stale
+        # com >=5 ocorrências (alto sinal: operador desistiu várias vezes).
+        try:
+            from src.services.stale_imp_learner import (
+                is_proposal_blocked_by_stale_pattern,
+            )
+            kept_after_stale: list[dict] = []
+            stale_suppressed = 0
+            for p in proposals:
+                title = str(p.get("title", ""))
+                blocked, reason = is_proposal_blocked_by_stale_pattern(
+                    title, threshold=5,
+                )
+                if blocked:
+                    stale_suppressed += 1
+                    self._log.debug(
+                        f"[Mekka] stale-pattern block: {title[:60]} — {reason}"
+                    )
+                    continue
+                kept_after_stale.append(p)
+            if stale_suppressed > 0:
+                self._log.info(
+                    f"[Mekka] suppressed {stale_suppressed} stale-pattern proposals"
+                )
+                report.errors.append(f"suppressed_stale: {stale_suppressed}")
+            proposals = kept_after_stale
+        except Exception as _stale_exc:  # noqa: BLE001
+            self._log.debug(f"[Mekka] stale learner no-op: {_stale_exc}")
+
         # 2) Galactus premortem on the whole batch.
         premortem_by_title: dict[str, PremortemVerdict] = {}
         try:

@@ -184,6 +184,25 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
         if debate_verdict is not None:
             analysis = analysis.model_copy(update={"debate_verdict": debate_verdict})
 
+        # ── Cable Regime Adapter (2026-05-29 REV-4) ─────────────────────────
+        # Cable agent já fetcha funding rate 8h rolling. Adapter injeta no
+        # analysis.onchain.funding_rate quando Black Panther não preencheu.
+        # Fail-silent + preserve Black Panther values.
+        try:
+            from src.services.cable_regime_adapter import (
+                is_enabled as _cable_enabled,
+                enrich_analysis_with_cable,
+            )
+            if _cable_enabled():
+                cable_result = await enrich_analysis_with_cable(analysis, symbol)
+                if cable_result.get("applied"):
+                    self._log.info(
+                        f"[ProfessorX] Cable adapter injected funding "
+                        f"{cable_result['funding_rate']:.6f} for {symbol}"
+                    )
+        except Exception as _cable_exc:  # noqa: BLE001
+            self._log.debug(f"[ProfessorX] cable adapter no-op: {_cable_exc}")
+
         # ── Be Water Framework — regime detection (2026-05-28) ──────────────
         # Optional: enrich analysis.metadata with detected regime + selected
         # strategies. Gated por BE_WATER_FRAMEWORK_ENABLED. Read-only —
