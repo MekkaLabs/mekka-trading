@@ -712,11 +712,21 @@ body[data-theme="light"] .brand-mark { filter: drop-shadow(0 0 6px rgba(15,23,42
 }
 
 /* --- 3.3 Content shell --- */
+/* 2026-05-29: usa var --sidebar-width pra suportar minimize responsivo.
+   Default 200px (sidebar full); 60px quando body.sidebar-collapsed.
+   @media mobile (abaixo) overrideia pra 0 (sidebar fica em overlay). */
+:root {
+  --sidebar-width: 200px;
+}
+body.sidebar-collapsed {
+  --sidebar-width: 60px;
+}
 .content-shell {
-  margin-left: 200px;
+  margin-left: var(--sidebar-width);
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+  transition: margin-left 200ms ease-out;
 }
 
 /* --- 3.4 Alert Banner --- */
@@ -4921,15 +4931,29 @@ body[data-theme="light"] .page-nav-sub a { color: var(--muted); }
   transform: translateX(50%);
 }
 
-/* Quando sidebar minimiza, main-content precisa ajustar */
+/* Quando sidebar minimiza, .content-shell já ajusta via var(--sidebar-width)
+   definida em :root + override em body.sidebar-collapsed (linhas 714-).
+   Não precisa repetir aqui. Esta seção fica como fallback pra qualquer
+   wrapper que use .main-content ou <main> direto (legado). */
 body.sidebar-collapsed .main-content,
-body.sidebar-collapsed main {
-  margin-left: 60px !important;
-  transition: margin-left 200ms ease-out;
+body.sidebar-collapsed main:not(.layout) {
+  margin-left: 60px;
 }
 .main-content,
-main {
+main:not(.layout) {
   transition: margin-left 200ms ease-out;
+}
+
+/* Responsivo: em telas pequenas, sidebar vira overlay (CSS já existente
+   em ~/.media (max-width: 900px) zera o margin-left). Garantimos que
+   o var(--sidebar-width) NÃO interfere em mobile. */
+@media (max-width: 900px) {
+  :root, body.sidebar-collapsed {
+    --sidebar-width: 0px;
+  }
+  .content-shell {
+    margin-left: 0 !important;
+  }
 }
 
 /* Widget Customizer: melhorar visibilidade do trigger se existir */
