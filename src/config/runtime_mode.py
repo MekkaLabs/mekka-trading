@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -231,6 +232,33 @@ def get_preset(mode: str) -> dict[str, Any]:
     if mode not in PRESETS:
         raise ValueError(f"Unknown mode '{mode}'. Valid: {VALID_MODES}")
     return dict(PRESETS[mode])
+
+
+# P1-4 (2026-05-28 audit): snapshot atômico para uso por orquestradores
+# que precisam de consistência mid-cycle. Agentes individuais que chamam
+# get_mode() + get_params() separadamente podem ler valores divergentes
+# se operador troca mode entre as 2 chamadas. snapshot_mode() retorna
+# ambos sob o mesmo lock.
+
+
+def snapshot_mode() -> dict[str, Any]:
+    """Snapshot atômico de mode + params + is_scalp. Use isto em loops
+    de orquestração (NickFury cycle) e passe o resultado pra agentes
+    via parâmetro em vez de cada um chamar get_*().
+
+    Returns:
+        {"mode": str, "params": dict, "is_scalp": bool, "snapshot_at": str}
+    """
+    _ensure_loaded()
+    with _lock:
+        mode = _current_mode
+        params = dict(PRESETS[mode])
+    return {
+        "mode": mode,
+        "params": params,
+        "is_scalp": mode in SCALP_MODES,
+        "snapshot_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def set_mode(mode: str) -> dict[str, Any]:

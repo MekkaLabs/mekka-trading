@@ -573,6 +573,8 @@ class MekkaDashboardServer:
         # Implementer Squad — status do squad de implementação automática
         r.add_get("/api/implementer/status", self._handle_implementer_status)
         r.add_post("/api/implementer/run-once", self._handle_implementer_run_once)
+        # P1-3 — pre-flight check pra troca de Binance market_type (linear↔inverse)
+        r.add_get("/api/binance-market-type/check-swap", self._handle_check_swap_safe)
 
     def _register_backtest_debate_routes(self, r) -> None:
         r.add_post("/api/backtest/run", self._handle_backtest_run)
@@ -6888,6 +6890,27 @@ class MekkaDashboardServer:
         except Exception as exc:  # noqa: BLE001
             logger.error("implementer status failed: %s", exc, exc_info=True)
             return web.json_response({"error": str(exc)}, status=200)
+
+    async def _handle_check_swap_safe(self, request: web.Request) -> web.Response:
+        """GET /api/binance-market-type/check-swap?target=linear|inverse
+
+        P1-3 (2026-05-28 audit): pre-flight check pra operador antes de
+        trocar BINANCE_MARKET_TYPE no .env. Retorna se é seguro + evidência
+        (count posições abertas heurísticas) + recomendação.
+        """
+        try:
+            target = request.query.get("target", "").lower().strip()
+            from src.services.market_type_swap_guard import check_swap_safe
+            ok, reason, evidence = check_swap_safe(target)
+            return web.json_response({
+                "ok": ok,
+                "reason": reason,
+                "evidence": evidence,
+                "target": target,
+            }, status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("check_swap_safe failed: %s", exc, exc_info=True)
+            return web.json_response({"ok": False, "error": str(exc)}, status=200)
 
     async def _handle_implementer_run_once(self, request: web.Request) -> web.Response:
         """POST /api/implementer/run-once — dispara worker manual (1 batch)."""

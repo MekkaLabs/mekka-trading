@@ -110,6 +110,14 @@ class IronMan(BaseAgent[ExecutionResult]):
         self._ccxt_exchange: Optional[Any] = None  # CCXT exchange (Bybit/Binance)
         # [B3] Lock prevents double-init when two coroutines race into _connect_async
         self._connect_lock: asyncio.Lock = asyncio.Lock()
+        # P1-3 (2026-05-28): swap guard — detecta troca de binance_market_type
+        # entre boots; loga WARNING se há posições abertas detectadas.
+        # Fail-silent: nunca bloqueia boot do agente.
+        try:
+            from src.services.market_type_swap_guard import log_boot_swap_warning
+            log_boot_swap_warning()
+        except Exception as _swap_exc:  # noqa: BLE001
+            logger.debug(f"[IronMan] swap guard boot check no-op: {_swap_exc}")
 
     # ------------------------------------------------------------------
     # COIN-M helpers (2026-05-28 audit fix P0-3/P0-4)
