@@ -138,7 +138,11 @@ def resolve_decision_orphans(
                 ).fetchone()
                 age_days = float(age_days_row["days"] or 0)
 
-                # Cross-match dentro de janela ±10 min do timestamp
+                # Cross-match dentro de janela ±10 min do timestamp.
+                # MEM-FIX-6: ajustado para os eventos REAIS do audit_log
+                # (IRONMAN_FILLED/IRONMAN_PAPER_FILLED não existem —
+                # sistema usa TRADE_NOW_EXECUTED / MANUAL_TRADE_EXECUTED
+                # para ambos paper e live, diferencia via payload.is_paper).
                 related = conn.execute(
                     """
                     SELECT event, payload
@@ -148,11 +152,13 @@ def resolve_decision_orphans(
                       AND symbol = ?
                       AND event IN (
                         'TRADE_NOW_EXECUTED',
-                        'IRONMAN_FILLED',
-                        'IRONMAN_PAPER_FILLED',
+                        'TRADE_NOW_FORCE_EXECUTE',
+                        'MANUAL_TRADE_EXECUTED',
+                        'MANUAL_TRADE_FORCE_EXECUTE',
+                        'TRADE_NOW_BLOCKED',
+                        'MANUAL_TRADE_BLOCKED',
                         'RISK_REJECTED',
-                        'SIGNAL_FLIP',
-                        'MANUAL_TRADE_EXECUTED'
+                        'SIGNAL_FLIP'
                       )
                     ORDER BY id ASC
                     """,
@@ -167,19 +173,49 @@ def resolve_decision_orphans(
                     if r_cycle and r_cycle != cycle_id:
                         continue
                     event = r["event"]
-                    if event in ("TRADE_NOW_EXECUTED", "MANUAL_TRADE_EXECUTED",
-                                 "IRONMAN_PAPER_FILLED"):
-                        reason = "EXECUTED_PAPER"
+                    # Execução real (paper ou live) — payload.is_paper
+                    # distingue dentro do dashboard de quem executou.
+                    if event in (
+                        "TRADE_NOW_EXECUTED",
+                        "TRADE_NOW_FORCE_EXECUTE",
+                        "MANUAL_TRADE_EXECUTED",
+                        "MANUAL_TRADE_FORCE_EXECUTE",
+                    ):
+                        if r_payload.get("is_paper", True):
+                            reason = "EXECUTED_PAPER"
+                        else:
+                            reason = "EXECUTED_LIVE"
                         break
-                    if event == "IRONMAN_FILLED":
-                        reason = "EXECUTED_LIVE"
-                        break
-                    if event == "RISK_REJECTED":
+                    if event in ("TRADE_NOW_BLOCKED", "MANUAL_TRADE_BLOCKED",
+                                 "RISK_REJECTED"):
                         reason = "REJECTED_BY_RISK"
                         break
                     if event == "SIGNAL_FLIP":
                         reason = "FLIPPED"
                         break
+
+                # Fallback 2: IronMan automático NÃO emite audit event
+                # próprio (apenas dashboard manual emite). Consulta direto
+                # a tabela `trades` por (symbol + janela ±10min) para
+                # capturar execuções do loop automático.
+                if reason is None:
+                    trade_row = conn.execute(
+                        """
+                        SELECT status, is_paper
+                        FROM trades
+                        WHERE symbol = ?
+                          AND timestamp >= datetime(?, '-2 minutes')
+                          AND timestamp <= datetime(?, '+10 minutes')
+                          AND status IN ('PAPER', 'FILLED')
+                        ORDER BY id ASC LIMIT 1
+                        """,
+                        (row["symbol"] or "", row["timestamp"], row["timestamp"]),
+                    ).fetchone()
+                    if trade_row is not None:
+                        if trade_row["is_paper"]:
+                            reason = "EXECUTED_PAPER"
+                        else:
+                            reason = "EXECUTED_LIVE"
 
                 if reason is None:
                     if age_days > max_age_days:

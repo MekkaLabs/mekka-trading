@@ -777,6 +777,50 @@ class MekkaDashboardServer:
         except Exception as _exc_boot:
             logger.debug("DASHBOARD_BOOT audit skipped: %s", _exc_boot)
 
+        # MEM-FIX-8 (2026-05-30) — Vault writer state audit no boot.
+        # Antes: writers fail-silent quando flag=off — operator não sabia
+        # que tinha 6 writers desligados. Agora emite VAULT_WRITERS_STATE
+        # com a flag de cada writer + warning quando todos off.
+        try:
+            import os as _os
+            from src.persistence.repository import MekkaRepository as _MR_v
+            _writers = {
+                "prometheus":  _os.environ.get("PROMETHEUS_VAULT_WRITER_ENABLED", "false"),
+                "cable":       _os.environ.get("CABLE_VAULT_WRITER_ENABLED", "false"),
+                "mentor":      _os.environ.get("MENTOR_VAULT_WRITER_ENABLED", "false"),
+                "cyclops":     _os.environ.get("CYCLOPS_VAULT_WRITER_ENABLED", "false"),
+                "vision":      _os.environ.get("VISION_VAULT_WRITER_ENABLED", "false"),
+                "strategy":    _os.environ.get("STRATEGY_VAULT_WRITER_ENABLED", "false"),
+                "improvement": _os.environ.get("IMPROVEMENT_VAULT_WRITER_ENABLED", "false"),
+            }
+            _enabled = {
+                k: v.lower() in ("1", "true", "yes", "on")
+                for k, v in _writers.items()
+            }
+            _enabled_count = sum(1 for v in _enabled.values() if v)
+            _total = len(_enabled)
+            severity = "WARNING" if _enabled_count == 0 else "INFO"
+            await _MR_v.log_event(
+                agent="Dashboard",
+                event="VAULT_WRITERS_STATE",
+                severity=severity,
+                message=(
+                    f"vault writers ativos: {_enabled_count}/{_total}"
+                    + (" — segundo cérebro DESLIGADO" if _enabled_count == 0 else "")
+                ),
+                payload={
+                    "enabled_count": _enabled_count,
+                    "total": _total,
+                    "by_writer": _enabled,
+                    "hint": (
+                        "set *_VAULT_WRITER_ENABLED=true em .env e reboot"
+                        if _enabled_count < _total else None
+                    ),
+                },
+            )
+        except Exception as _exc_v:
+            logger.debug("VAULT_WRITERS_STATE audit skipped: %s", _exc_v)
+
     async def _on_shutdown(self, _: web.Application) -> None:
         if self._broadcast_task is not None:
             self._broadcast_task.cancel()

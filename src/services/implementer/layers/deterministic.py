@@ -60,13 +60,27 @@ def _pat_add_test_stub(title: str, description: str, area: str) -> _Pattern:
     """Detecta IMPs do tipo 'X agentes/services sem teste'.
 
     Aceita variações: "sem teste", "sem `tests/test_*.py`", "sem cobertura
-    de teste", "não têm arquivo de teste".
+    de teste", "não têm arquivo de teste". Plural opcional "(s)" e
+    keyword 'cobertura' isolada.
+
+    MEM-FIX-7 (2026-05-30): briefs do scanner usam "29 agente(s)" e
+    "cobertura de testes ausente em 29 agente(s)" — regex original era
+    muito restrito (exigia "sem teste" depois do substantivo).
     """
     blob = title + " " + description
-    if not re.search(
-        r"(\d+)\s+(?:agentes|services|files|arquivos)\s+(?:sem|n[ãa]o\s+t[êe]m)\s+(?:test|cobertura|arquivo\s+de\s+test)",
+    # Padrão 1 (original): "X agentes/services sem teste"
+    matches_orig = re.search(
+        r"(\d+)\s+(?:agentes?|services?|files?|arquivos?|m[óo]dulos?)\(?s?\)?"
+        r"\s+(?:sem|n[ãa]o\s+t[êe]m)\s+(?:test|cobertura|arquivo\s+de\s+test)",
         blob, re.IGNORECASE,
-    ):
+    )
+    # Padrão 2 (MEM-FIX-7): "cobertura de testes ausente em X agente(s)"
+    matches_inverted = re.search(
+        r"cobertura\s+de\s+testes?\s+(?:ausente|faltando|n[ãa]o\s+encontrada)"
+        r"\s+(?:em\s+)?(\d+)\s+(?:agentes?|services?|m[óo]dulos?)\(?s?\)?",
+        blob, re.IGNORECASE,
+    )
+    if not (matches_orig or matches_inverted):
         return _Pattern("add_test_stub", False, {})
     # Extrair candidatos: filename em backticks (.py opcional, hifens OK)
     files = re.findall(r"`([a-z_][\w-]*?)(?:\.py)?`", description)

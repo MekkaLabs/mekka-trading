@@ -29,6 +29,15 @@ def _make_event(gate_id: str):
 
 class TestBeastProposals:
 
+    @pytest.fixture(autouse=True)
+    def _reset_beast_cache(self):
+        """MEM-FIX-5 (2026-05-30): Beast tem throttle classe-level que
+        cacheia o último report. Reset entre testes pra evitar vazamento
+        de mocks de um teste pro próximo."""
+        Beast.reset_cache()
+        yield
+        Beast.reset_cache()
+
     @pytest.mark.asyncio
     async def test_low_win_rate_generates_high_priority_proposal(self):
         """Win rate < 45% → HIGH priority proposal."""

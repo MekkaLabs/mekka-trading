@@ -101,7 +101,20 @@ class Beast(BaseAgent[BeastReport]):
 
     The report contains prioritized ImprovementProposals. Beast also
     sends the report to Telegram automatically if telegram_enabled=True.
+
+    MEM-FIX-5 (2026-05-30): throttle interno classe-level. Diagnóstico
+    ao vivo mostrou 60 BEAST_PROPOSAL/hora exatos (chamado 1×/min pelo
+    Mekka cycle). Ruído alto + custo de I/O desnecessário. Cap default
+    de 15 min entre runs reais — repeated calls dentro desse janela
+    retornam o último report em cache.
+
+    Override via env BEAST_THROTTLE_MIN (default 15). Set 0 para
+    desabilitar throttle (modo legacy).
     """
+
+    # Cache classe-level (singleton-like)
+    _last_run_ts: float = 0.0
+    _last_report: "Optional[BeastReport]" = None
 
     def __init__(self) -> None:
         super().__init__(
@@ -109,11 +122,47 @@ class Beast(BaseAgent[BeastReport]):
             role="Continuous System Improvement Analyst — read-only auditor",
         )
 
+    @staticmethod
+    def _throttle_seconds() -> float:
+        import os as _os
+        try:
+            m = float(_os.environ.get("BEAST_THROTTLE_MIN", "15"))
+        except (TypeError, ValueError):
+            m = 15.0
+        return max(0.0, m * 60.0)
+
+    @classmethod
+    def reset_cache(cls) -> None:
+        """Limpa o cache de throttle. Útil em tests + manual via API.
+
+        Tests devem chamar este método no setUp pra evitar que o cached
+        report de um teste anterior vaze pro próximo.
+        """
+        cls._last_run_ts = 0.0
+        cls._last_report = None
+
     async def _run(self, period_days: int = 7) -> BeastReport:  # type: ignore[override]
         """
         Analyze the system over the last `period_days` days and return a BeastReport.
         All analysis is read-only. Fails gracefully — returns empty report on error.
+
+        MEM-FIX-5: usa cache classe-level pra throttle de re-runs.
         """
+        import time as _time
+        throttle_s = self._throttle_seconds()
+        now_s = _time.monotonic()
+        if (
+            throttle_s > 0
+            and Beast._last_report is not None
+            and (now_s - Beast._last_run_ts) < throttle_s
+        ):
+            cached_age_s = now_s - Beast._last_run_ts
+            self._log.debug(
+                f"[Beast] returning cached report "
+                f"(age={cached_age_s:.0f}s, throttle={throttle_s:.0f}s)"
+            )
+            return Beast._last_report
+
         since = datetime.now(timezone.utc) - timedelta(days=period_days)
         proposals: list[ImprovementProposal] = []
         stats: dict[str, Any] = {}
@@ -208,6 +257,11 @@ class Beast(BaseAgent[BeastReport]):
 
         # ── Send to Telegram ──────────────────────────────────────────────
         await self._send_report(report)
+
+        # MEM-FIX-5: salva no cache classe-level pra throttle
+        import time as _time
+        Beast._last_report = report
+        Beast._last_run_ts = _time.monotonic()
 
         return report
 
