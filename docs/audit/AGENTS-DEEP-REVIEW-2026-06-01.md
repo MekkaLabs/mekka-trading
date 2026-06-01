@@ -18,6 +18,21 @@
 
 ---
 
+## ✅ RESOLVIDOS — rodadas 2 e 3 (2026-06-01)
+
+| Achado | Fix |
+|--------|-----|
+| Aquaman lança em vez de degradar; book vazio→0.1; slippage só ask | degrada (_no_liquidity); score 0.0; slippage 2 lados (pior) |
+| Spider-Man "flash crash" = desvio EMA-20 | queda close-a-close (recent_closes) |
+| Cyclops avg_entry poluído por closes | filtra trades CYCLOPS-*/cyclops_* |
+| Sem floor/teto de distância de stop-loss | gate Batman 4d (0.1%–20%) |
+| MoA _vote_fallback pode lançar (quebra never-raises) | envolto → HOLD |
+| MoA pula clamps do Vision (degraded + flash scalp) | aplicados no caminho MoA |
+| Funding unit mismatch (BP horário vs Cable 8h) | Cable converte 8h→horário (÷8) |
+| base.py CancelledError | except explícito (propaga limpo) |
+| Mentor loop dead-end (s.rationale/evidence_n) | atributos certos + contrato applier |
+| vault_auditor falsos órfãos (Cypher/Domino/Forge) | aliases codename↔arquivo |
+
 ## 🔴 ALTA PRIORIDADE — pendentes (próxima rodada)
 
 ### Layer 1 (dados → Vision)
