@@ -10,7 +10,7 @@
 
 1. Rodou auditoria de **13 agentes** (8 dimensões + 4 pré-mortems) → relatório em
    `docs/audit/MAINNET-READINESS-AUDIT-2026-06-01.md`. Veredito inicial: **NO-GO**.
-2. **21 findings corrigidos** (todos CRITICAL/HIGH/MEDIUM) em 8 commits na branch
+2. **28 findings corrigidos** (todos CRITICAL/HIGH/MEDIUM) em 8 commits na branch
    `fix/mainnet-p0-audit`. Só restam LOW (L1–L7) + 2 follow-ups.
 3. Também: corrigido o **edge "negativo" do backtest** (era bug de `export_signals`,
    não estratégia — Sharpe -4.58 → +6.64, mas métricas são simuladas, n pequeno).
@@ -51,10 +51,14 @@ Depois: `python scripts/preflight_mainnet.py --strict` → tudo verde.
 | `35850d2` | MEDIUM — M3 set_sandbox fail-closed / M4 market→limit_ioc mainnet / M5 preflight FAIL / M7 guardian escala / H6 anti-órfão |
 | `4e99d6c` | H7 reconciliador PnL live / H8 monitor liquidação / H9 TP guardian |
 | `7b4ce30` | M6 saldo mínimo / M8 staleness feed / M9 clamp COIN-M |
+| `61c83d3` | docs: handoff |
+| `5007f90` | L1 TTL cache snapshot / L7 reuso CCXT compartilhado |
+| `b2f9120` | L2-L6 (set_leverage fail-closed, banner paper, dedup order_id, synthetic price, SL ancorado no mark) |
+| `7b4ce30` | M6 saldo mínimo / M8 staleness feed / M9 clamp COIN-M |
 
 ---
 
-## 🗂️ FINDINGS RESOLVIDOS (21) — mapa rápido
+## 🗂️ FINDINGS RESOLVIDOS (28) — mapa rápido
 
 | # | Problema | Arquivo |
 |---|----------|---------|
@@ -80,13 +84,24 @@ Depois: `python scripts/preflight_mainnet.py --strict` → tudo verde.
 
 ---
 
-## ⚠️ PENDÊNCIAS (não bloqueiam mainnet)
+## ✅ LOW L1–L7 — TODOS RESOLVIDOS (commits 5007f90 + b2f9120)
 
-- **LOW L1–L7**: cache snapshot sem TTL, set_leverage fail-open silencioso,
-  synthetic close avg_price=0, SL emergencial 2% pós-downtime, PortfolioManager
-  não reusa `_CCXT_SHARED`, `order_id` sem UNIQUE, preflight "ALL PASSED" em paper.
-- **Follow-up H6**: outbox completo (gravar TradeRecord PENDING *antes* da ordem).
-- **Follow-up H7**: atribuição por-trade do realizedPnl (hoje só audit agregado).
+| # | Fix |
+|---|-----|
+| L1 | TTL no cache de snapshot (15min) + flag de staleness — `portfolio_manager.py` |
+| L2 | set_leverage fail-closed em live (-4046 = sucesso; senão retry → REJECTED) — `iron_man.py` |
+| L3 | banner "MODO PAPER" no preflight quando paper_trading=true — `preflight_mainnet.py` |
+| L4 | save_trade dedup por order_id (idempotência no write) — `repository.py` |
+| L5 | synthetic close usa avg entry ponderado (não 0) — `iron_man.py` |
+| L6 | SL emergencial ancorado no MARK atual (não entry) — `iron_man.py` |
+| L7 | PortfolioManager reusa `_CCXT_SHARED` do IronMan (não fecha) — `portfolio_manager.py` |
+
+## ⚠️ PENDÊNCIAS (apenas 2 follow-ups maiores — não bloqueiam mainnet)
+
+- **Follow-up H6**: outbox completo (gravar TradeRecord PENDING *antes* da ordem +
+  update depois + fila de retry). Hoje há retry + alerta anti-órfão.
+- **Follow-up H7**: atribuição por-trade do realizedPnl (hoje só audit agregado
+  `LIVE_PNL_RECONCILED`).
 
 ---
 
