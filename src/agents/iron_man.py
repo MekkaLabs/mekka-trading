@@ -1684,6 +1684,28 @@ class IronMan(BaseAgent[ExecutionResult]):
         return False
 
     @staticmethod
+    def _has_take_profit(open_orders: list, is_long: bool) -> bool:
+        """True if a reduce-only TAKE-PROFIT order on the protective side exists.
+
+        H9 (2026-06-01 audit): espelha _has_protective_stop para o lado do TP.
+        Um long é encerrado no lucro por um SELL take_profit; um short por um BUY.
+        """
+        want_side = "sell" if is_long else "buy"
+        for o in open_orders or []:
+            typ = str(o.get("type") or "").lower()
+            info = o.get("info") or {}
+            info_type = str(info.get("type") or "").lower()
+            is_tp = "take_profit" in typ or "take_profit" in info_type
+            ro = o.get("reduceOnly")
+            if ro is None:
+                ro = info.get("reduceOnly") or info.get("reduce_only") or info.get("closePosition")
+            reduce_only = ro in (True, "true", "True", "TRUE", 1, "1")
+            oside = str(o.get("side") or "").lower()
+            if is_tp and reduce_only and oside == want_side:
+                return True
+        return False
+
+    @staticmethod
     async def _recent_sl_map() -> dict[tuple[str, str], float]:
         """``{(SYMBOL, SIDE): sl_price}`` from recent trades' execution
         metadata (newest wins). Fail-silent — returns ``{}`` on any error."""
@@ -1784,6 +1806,14 @@ class IronMan(BaseAgent[ExecutionResult]):
                 except Exception as exc:  # noqa: BLE001
                     summary["errors"].append(f"{mekka} fetch_open_orders: {exc}")
                     continue
+
+                # H9 (2026-06-01 audit): o guardian só cuidava do SL — o TP era
+                # best-effort e, se falhasse/fosse cancelado, ninguém percebia.
+                # Detecta TP ausente e REGISTRA (não recoloca: TP errado seria
+                # pior; é perda de oportunidade, não de capital). Visibilidade via
+                # summary['tp_missing'] (auditado abaixo, sem alerta Telegram).
+                if not self._has_take_profit(open_orders, is_long):
+                    summary.setdefault("tp_missing", []).append(mekka)
 
                 if self._has_protective_stop(open_orders, is_long):
                     summary["protected"] += 1

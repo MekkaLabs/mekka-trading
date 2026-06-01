@@ -2817,7 +2817,8 @@ class NickFury(BaseAgent[list[CycleReport]]):
             try:
                 from src.agents.iron_man import IronMan  # noqa: WPS433
                 sl_guardian = await IronMan().ensure_stops_for_open_positions()
-                if sl_guardian.get("replaced") or sl_guardian.get("errors"):
+                _tp_missing = sl_guardian.get("tp_missing") or []
+                if sl_guardian.get("replaced") or sl_guardian.get("errors") or _tp_missing:
                     await MekkaRepository.log_event(
                         agent="IronMan",
                         event="SL_GUARDIAN",
@@ -2826,7 +2827,8 @@ class NickFury(BaseAgent[list[CycleReport]]):
                             f"SL guardian: checked={sl_guardian.get('checked')} "
                             f"protected={sl_guardian.get('protected')} "
                             f"replaced={len(sl_guardian.get('replaced') or [])} "
-                            f"errors={len(sl_guardian.get('errors') or [])}"
+                            f"errors={len(sl_guardian.get('errors') or [])} "
+                            f"tp_missing={len(_tp_missing)}"
                         ),
                         payload=sl_guardian,
                     )
@@ -2857,6 +2859,27 @@ class NickFury(BaseAgent[list[CycleReport]]):
             except Exception as _exc:  # noqa: BLE001
                 self._log.warning(f"[NickFury] Phantom reconciliation skipped: {_exc}")
 
+        # [C4b] H8 (2026-06-01 audit) — monitor de proximidade de liquidação.
+        # liquidation_price já era lido/exibido mas NENHUM agente agia: um SL
+        # cancelado/falho + vela rápida entre ciclos podia liquidar (perda total
+        # da margem) sem aviso. Agora alerta CRITICAL quando o mark está a menos
+        # de liq_proximity_alert_pct da liquidação. Best-effort; só live.
+        if not settings.paper_trading:
+            try:
+                await self._check_liquidation_proximity(snapshot)
+            except Exception as _exc:  # noqa: BLE001
+                self._log.warning(f"[NickFury] liq proximity check skipped: {_exc}")
+
+        # [C4c] H7 (2026-06-01 audit) — reconciliador de PnL de closes LIVE.
+        # Closes por bracket (SL/TP na corretora) não passam pelo nosso código →
+        # ficavam com pnl_usd=NULL no DB, cegando Beast/leaderboards/win-rate.
+        # Busca fills realizados desde um cursor e grava o realizedPnl real.
+        if not settings.paper_trading:
+            try:
+                await self._reconcile_live_close_pnl()
+            except Exception as _exc:  # noqa: BLE001
+                self._log.warning(f"[NickFury] live close PnL reconcile skipped: {_exc}")
+
         # [C5] Mentor — Charles Xavier: distila resolved outcomes + rejections
         # + drawdown em ParameterSuggestion. Read-only; só audita se houver
         # sugestão (zero spam). Roda a cada monitor cycle (~5min) — leve
@@ -2883,6 +2906,138 @@ class NickFury(BaseAgent[list[CycleReport]]):
             "phantom_recon": phantom_recon,
             "mentor": mentor_summary,
         }
+
+    async def _check_liquidation_proximity(self, snapshot) -> None:
+        """H8 (2026-06-01 audit) — alerta CRITICAL quando o mark de uma posição
+        live está a menos de ``liq_proximity_alert_pct`` da liquidação.
+
+        liquidation_price já vinha no snapshot mas nenhum agente agia. Quando o
+        Binance cross-margin não reporta liq (liq=None), o símbolo é pulado
+        (limitação conhecida). Best-effort; nunca levanta.
+        """
+        thr = float(getattr(settings, "liq_proximity_alert_pct", 0.05) or 0.05)
+        for p in (snapshot.positions or []):
+            mark = float(getattr(p, "mark_price", None) or 0.0)
+            liq = float(getattr(p, "liquidation_price", None) or 0.0)
+            if mark <= 0 or liq <= 0:
+                continue
+            dist = abs(mark - liq) / mark
+            if dist >= thr:
+                continue
+            self._log.error(
+                f"[NickFury] {p.symbol} PERTO DA LIQUIDAÇÃO: mark={mark} liq={liq} "
+                f"({dist * 100:.2f}% < {thr * 100:.1f}%)"
+            )
+            try:
+                await MekkaRepository.log_event(
+                    agent="NickFury",
+                    event="LIQUIDATION_PROXIMITY",
+                    severity="CRITICAL",
+                    symbol=p.symbol,
+                    message=(
+                        f"{p.symbol} a {dist * 100:.2f}% da liquidação "
+                        f"(mark={mark}, liq={liq})"
+                    ),
+                    payload={"mark": mark, "liq": liq, "distance_pct": round(dist, 4)},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                await self._telegram.alert(
+                    event="LIQUIDATION_PROXIMITY",
+                    severity="CRITICAL",
+                    agent="NickFury",
+                    symbol=p.symbol,
+                    message=(
+                        f"🔥 {p.symbol} PERTO DA LIQUIDAÇÃO: mark ${mark:,.2f} vs "
+                        f"liq ${liq:,.2f} ({dist * 100:.2f}% < {thr * 100:.1f}%). "
+                        "Considere de-riscar/fechar."
+                    ),
+                    payload={},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _reconcile_live_close_pnl(self) -> None:
+        """H7 (2026-06-01 audit) — grava o PnL realizado de closes LIVE.
+
+        Closes por bracket (SL/TP na corretora) não passam pelo nosso código →
+        ficavam com pnl_usd=NULL, cegando Beast/leaderboards/win-rate. Lê
+        ``fetch_my_trades`` desde um cursor persistido (data/live_pnl_cursor.json)
+        para cada ativo configurado (o símbolo pode já não estar aberto) e emite
+        um audit ``LIVE_PNL_RECONCILED`` com o realizedPnl real. Best-effort;
+        nunca levanta. Atribuição por-trade fica como follow-up.
+        """
+        import json as _json
+        import time as _time
+        from pathlib import Path as _Path
+
+        exchange_id = settings.active_exchange
+        if exchange_id not in ("bybit", "binance"):
+            return
+
+        cursor_file = _Path("data/live_pnl_cursor.json")
+        try:
+            cursor = int(_json.loads(cursor_file.read_text()).get("since_ms", 0) or 0)
+        except Exception:  # noqa: BLE001
+            cursor = 0
+        # Sem cursor: começa nas últimas 24h para não varrer o histórico todo.
+        if cursor <= 0:
+            cursor = int((_time.time() - 24 * 3600) * 1000)
+
+        try:
+            from src.agents.iron_man import IronMan as _IM  # noqa: WPS433
+            from src.services.market_registry import to_ccxt  # noqa: WPS433
+            exchange = await _IM()._get_ccxt_exchange(exchange_id)
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury] H7: exchange indisponível: {exc}")
+            return
+
+        max_ts = cursor
+        for sym in settings.trading_assets:
+            try:
+                ccxt_sym = to_ccxt(sym, exchange_id)  # type: ignore[arg-type]
+                fills = await exchange.fetch_my_trades(ccxt_sym, since=cursor, limit=200)
+            except Exception as exc:  # noqa: BLE001
+                self._log.debug(f"[NickFury] H7: fetch_my_trades {sym} falhou: {exc}")
+                continue
+            realized = 0.0
+            n = 0
+            for f in (fills or []):
+                info = f.get("info") or {}
+                rp = info.get("realizedPnl")
+                if rp is None:
+                    continue
+                try:
+                    rpf = float(rp)
+                except (TypeError, ValueError):
+                    continue
+                ts = int(f.get("timestamp") or 0)
+                if ts > max_ts:
+                    max_ts = ts
+                if rpf == 0.0:
+                    continue
+                realized += rpf
+                n += 1
+            if n > 0:
+                try:
+                    await MekkaRepository.log_event(
+                        agent="NickFury",
+                        event="LIVE_PNL_RECONCILED",
+                        severity="INFO",
+                        symbol=sym,
+                        message=f"{sym}: realized PnL ${realized:+.2f} em {n} fills (brackets live)",
+                        payload={"symbol": sym, "realized_pnl_usd": round(realized, 4), "fills": n},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if max_ts > cursor:
+            try:
+                cursor_file.parent.mkdir(parents=True, exist_ok=True)
+                cursor_file.write_text(_json.dumps({"since_ms": int(max_ts)}))
+            except Exception:  # noqa: BLE001
+                pass
 
     async def _execute_recovery_plan(
         self,
