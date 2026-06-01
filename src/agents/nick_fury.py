@@ -104,6 +104,10 @@ class NickFury(BaseAgent[list[CycleReport]]):
         self._stale_price_detectors: dict[str, Any] = {}
         # One spread breaker per symbol — created lazily
         self._spread_breakers: dict[str, Any] = {}
+        # Última ação (LONG/SHORT/HOLD) por símbolo — usado para detectar
+        # REVERSÃO real de direção e alertar o operador só quando importa
+        # (não no 1º ciclo, não em →HOLD). Ver bloco SIGNAL_FLIP no _cycle.
+        self._last_action_by_symbol: dict[str, str] = {}
         self._StalePriceDetector = StalePriceDetector  # keep ref for lazy init
         self._SpreadBreaker = SpreadBreaker             # keep ref for lazy init
         # Story 140 — DEGRADED_MODE formal state machine (NORMAL ↔ DEGRADED)
@@ -1878,30 +1882,46 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 # we record this signal now and compare on the next cycle.
             _change_record = _scl.record(
                 symbol=symbol,
-                prev=None,        # first cycle: all-new
+                prev=None,        # diff histórico (registro por ciclo)
                 curr=signal,
                 curr_cycle_id=_cycle_id,
             )
-            # On action flip (LONG↔SHORT): log prominently + push Telegram alert
-            if _change_record.has_action_change:
-                _commit_msg = _change_record.commit_message()
-                self._log.info(f"[NickFury:167] ACTION FLIP {symbol}: {_commit_msg}")
+
+            # Detecção de REVERSÃO real de direção (LONG↔SHORT). O diff do
+            # changelog acima usa prev=None (registro), então NÃO é confiável
+            # para "flip" — comparamos contra a última ação REAL do símbolo.
+            # Regras: só alerta quando antes E agora são direções opostas.
+            # 1º ciclo (sem ação anterior), →HOLD ou HOLD→ NÃO disparam alerta.
+            _DIRECTIONS = {"LONG", "SHORT", "BUY", "SELL"}
+            _curr_action = getattr(getattr(signal, "action", None), "value", None)
+            _curr_action = (_curr_action or "").upper()
+            _prev_action = self._last_action_by_symbol.get(symbol, "")
+            _is_real_flip = (
+                _prev_action in _DIRECTIONS
+                and _curr_action in _DIRECTIONS
+                and _prev_action != _curr_action
+            )
+            if _is_real_flip:
+                _from = "compra" if _prev_action in ("LONG", "BUY") else "venda"
+                _to = "compra" if _curr_action in ("LONG", "BUY") else "venda"
+                _human = f"A IA inverteu de {_from} para {_to} no {symbol}."
+                self._log.info(f"[NickFury:167] ACTION FLIP {symbol}: {_prev_action}→{_curr_action}")
                 await MekkaRepository.log_event(
                     agent="NickFury",
                     event="SIGNAL_FLIP",
                     severity="WARNING",
                     symbol=symbol,
-                    message=_commit_msg,
+                    message=f"{_prev_action}→{_curr_action}",
                     payload=_change_record.to_dict(),
                 )
                 try:
+                    # Mensagem curta e leiga — sem diff técnico no Telegram.
                     await self._telegram.alert(
                         event="SIGNAL_FLIP",
                         severity="WARNING",
                         agent="Vision",
                         symbol=symbol,
-                        message=_commit_msg,
-                        payload={"diff": _change_record.to_search_replace_block()[:500]},
+                        message=_human,
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -1910,6 +1930,10 @@ class NickFury(BaseAgent[list[CycleReport]]):
                     f"[NickFury:167] {symbol} changelog: "
                     f"{_change_record.to_audit_line()}"
                 )
+
+            # Atualiza a última ação observada (para o próximo ciclo).
+            if _curr_action:
+                self._last_action_by_symbol[symbol] = _curr_action
         except Exception as _scl_exc:  # noqa: BLE001
             self._log.debug(f"[NickFury:167] SignalChangeLog skipped: {_scl_exc}")
 

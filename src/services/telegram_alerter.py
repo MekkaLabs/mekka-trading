@@ -139,6 +139,28 @@ class TelegramAlerter:
     # Formatting
     # ------------------------------------------------------------------
 
+    # Títulos amigáveis (PT, para leigo) por código de evento. Eventos sem
+    # entrada caem no fallback: código com "_"→espaço em Title Case.
+    _FRIENDLY_TITLES = {
+        "SIGNAL_FLIP": "Mudança de direção",
+        "RISK_KILL_SWITCH": "Trading pausado (trava de segurança)",
+        "KILL_SWITCH_EVENT": "Trava de segurança",
+        "KILL_SWITCH_ENGAGED": "Trading pausado",
+        "KILL_SWITCH_RELEASED": "Trading liberado",
+        "DRAWDOWN_ALERT": "Alerta de perda no dia",
+        "DAILY_LOSS_LIMIT": "Limite de perda diária atingido",
+        "EXEC_ERROR": "Erro ao executar ordem",
+        "CYCLE_ERROR": "Erro no ciclo de análise",
+        "STALE_FEED": "Dados de mercado atrasados",
+        "STALE_PRICE": "Preço desatualizado",
+        "ANOMALY": "Anomalia de mercado",
+        "ANOMALY_DETECTED": "Anomalia de mercado",
+        "LIQUIDATION_RISK": "Risco de liquidação",
+        "SYSTEM_STATE": "Estado do sistema",
+        "TRADE_APPROVAL_REJECTED": "Trade recusado",
+        "IMPROVEMENT_PROPOSED": "Nova sugestão de melhoria",
+    }
+
     @staticmethod
     def _format(
         *,
@@ -149,33 +171,43 @@ class TelegramAlerter:
         symbol: Optional[str],
         payload: Optional[dict],
     ) -> str:
-        sym = f" [{symbol}]" if symbol else ""
-        env = f"rede={settings.hyperliquid_network} modo={settings.mode_label}"
-        _severity_labels = {
-            "DEBUG": "DEBUG",
-            "INFO": "INFO",
-            "WARNING": "⚠️ AVISO",
-            "ERROR": "🔴 ERRO",
-            "CRITICAL": "🚨 CRÍTICO",
+        """Formata um alerta genérico de forma CURTA e para LEIGO:
+
+            ⚠️ Mudança de direção — ETH
+            A IA inverteu de compra para venda no ETH.
+            🧪 testnet · PAPER
+
+        Sem jargão de código (evento bruto/agente), sem diffs. Mantém um
+        rodapé compacto de ambiente para o operador saber rede/modo.
+        """
+        sym = f" — {symbol}" if symbol else ""
+        _sev_emoji = {
+            "DEBUG": "🔍",
+            "INFO": "ℹ️",
+            "WARNING": "⚠️",
+            "ERROR": "🔴",
+            "CRITICAL": "🚨",
         }
-        sev_label = _severity_labels.get(severity.upper(), severity)
-        lines = [
-            f"{sev_label} · {event}{sym}",
-            f"agente: {agent}",
-        ]
+        icon = _sev_emoji.get(severity.upper(), "•")
+        title = TelegramAlerter._FRIENDLY_TITLES.get(
+            event.upper(), event.replace("_", " ").title()
+        )
+        lines = [f"{icon} {title}{sym}"]
         if message:
-            # Truncar para caber no limite de 4096 chars do Telegram
-            trimmed = message if len(message) < 600 else message[:600] + "…"
-            lines.append(f"mensagem: {trimmed}")
+            # Curto: o limite do Telegram é 4096, mas para leigo cortamos cedo.
+            trimmed = message if len(message) < 280 else message[:280] + "…"
+            lines.append(trimmed)
         if payload:
-            # Renderiza chave=valor compacto, ignora objetos aninhados
+            # Só pares simples (chave=valor); ignora objetos aninhados/listas.
             flat = {k: v for k, v in payload.items() if not isinstance(v, (dict, list))}
             if flat:
-                kv = " ".join(f"{k}={v}" for k, v in flat.items())
-                if len(kv) > 400:
-                    kv = kv[:400] + "…"
-                lines.append(f"dados: {kv}")
-        lines.append(f"env: {env}")
+                kv = " · ".join(f"{k}={v}" for k, v in flat.items())
+                if len(kv) > 180:
+                    kv = kv[:180] + "…"
+                lines.append(kv)
+        net = str(settings.hyperliquid_network)
+        net_icon = "🟢" if net.lower().startswith("main") else "🧪"
+        lines.append(f"{net_icon} {net} · {settings.mode_label}")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -289,52 +321,32 @@ class TelegramAlerter:
         except Exception:  # noqa: BLE001
             _duration_str = ""
 
+        # Formato compacto e leigo (2026-06-01): o essencial em ~6 linhas.
+        _conf_line = f"Confiança {signal.confidence * 100:.0f}%"
+        if rr_str != "n/d":
+            _conf_line += f"  ·  R/R {rr_str}"
+        if _duration_str:
+            _conf_line += f"  ·  ⏱ {_duration_str}"
+
         lines = [
-            f"🚀 *Trade Aberto — {execution.symbol}*  {tag}",
-            "",
-            f"Direção   : {side_emoji}",
-            f"Entrada   : ${execution.avg_price:,.4f}",
-            f"Qtd       : {execution.quantity:.6f}  (${execution.notional_usd:,.2f})",
-            f"Alavancagem: {signal.leverage}x",
-            f"Tamanho   : {signal.size_pct * 100:.1f}% da equity",
-            "",
-            f"Stop Loss : ${signal.stop_loss:,.4f}  (-{sl_dist_str})",
-            f"Alvo (TP) : ${signal.take_profit:,.4f}  (+{tp_dist_str})",
-            f"Risco/Ret : {rr_str}",
-            "",
-            f"Confiança : {signal.confidence * 100:.0f}%",
-            f"Modo      : {settings.mode_label}",
-            f"Rede      : {settings.hyperliquid_network}",
+            f"🚀 *Trade aberto — {execution.symbol}*  {tag}",
+            f"{side_emoji}  ·  {signal.size_pct * 100:.1f}% da banca  ·  {signal.leverage}x",
+            f"Entrada ${execution.avg_price:,.4f}  (${execution.notional_usd:,.0f})",
+            f"🎯 Alvo ${signal.take_profit:,.4f} (+{tp_dist_str})  ·  🛑 Stop ${signal.stop_loss:,.4f} (-{sl_dist_str})",
+            _conf_line,
         ]
 
-        if execution.order_id:
-            lines.append(f"Ordem ID  : {execution.order_id}")
-
-        # [Story 097] Qualidade do sinal + limites violados
+        # Ajustes aplicados pelo risk manager — só aparece se houve.
         try:
-            _meta = execution.metadata or {}
-            _sqs = _meta.get("signal_quality_score")
-            _breached = _meta.get("breached_limits") or []
-            if _sqs is not None:
-                _sqs_bar = "█" * int(_sqs / 10) + "░" * (10 - int(_sqs / 10))
-                lines.append("")
-                lines.append(f"📊 *Qualidade*: {_sqs:.1f}/100  [{_sqs_bar}]")
+            _breached = (execution.metadata or {}).get("breached_limits") or []
             if _breached:
-                _breached_str = ", ".join(str(b) for b in _breached[:5])
-                lines.append(f"⚠️ *Ajustes*  : {_breached_str}")
+                lines.append(f"⚠️ Ajustes: {', '.join(str(b) for b in _breached[:3])}")
         except Exception:  # noqa: BLE001
             pass  # fail-open — nunca interrompe o alerta
 
-        # Duração estimada
-        if _duration_str:
-            lines.append("")
-            lines.append(f"⏱ *Duração estimada*: {_duration_str}")
-
-        # Explicação leiga
+        # Explicação leiga (o "porquê" em uma frase).
         if _layman:
-            lines.append("")
-            lines.append(f"💡 *Por que entrar agora?*")
-            lines.append(f"_{_layman}_")
+            lines.append(f"💡 _{_layman}_")
 
         text = "\n".join(lines)
 
@@ -493,24 +505,12 @@ class TelegramAlerter:
             d = abs(tp_trigger - avg_entry) / avg_entry * 100
             tp_dist_str = f"  (+{d:.2f}%)"
 
+        _result_word = "no lucro 🟢" if pnl_usd >= 0 else "no prejuízo 🔴"
+        _dir_pt = "compra" if side_upper == "LONG" else "venda"
         lines = [
-            f"{trigger_emoji} *Posição Fechada — {symbol}*",
-            "",
-            f"Motivo    : {trigger_reason}",
-            f"Direção   : {'🟢 LONG' if side_upper == 'LONG' else '🔴 SHORT'}",
-            f"Entrada   : ${avg_entry:,.4f}",
-            f"Fechamento: ${close_price:,.4f}",
-            f"Qtd       : {qty:.6f}",
-            "",
-            f"PnL Real. : {pnl_emoji} ${pnl_usd:+,.2f}  ({pnl_pct:+.2f}%)",
-        ]
-        if sl_trigger:
-            lines.append(f"SL nível  : ${sl_trigger:,.4f}{sl_dist_str}")
-        if tp_trigger:
-            lines.append(f"TP nível  : ${tp_trigger:,.4f}{tp_dist_str}")
-        lines += [
-            "",
-            f"Modo      : {settings.mode_label}  (paper)",
+            f"{trigger_emoji} *Posição fechada — {symbol}*",
+            f"Resultado: {pnl_emoji} ${pnl_usd:+,.2f}  ({pnl_pct:+.2f}%) — {_result_word}",
+            f"{_dir_pt.capitalize()}: entrada ${avg_entry:,.4f} → saída ${close_price:,.4f}",
         ]
 
         text = "\n".join(lines)
@@ -548,21 +548,10 @@ class TelegramAlerter:
         pnl_pct = (pnl_usd / (avg_entry * closed_qty) * 100) if avg_entry * closed_qty else 0.0
 
         lines = [
-            f"⚡ *Partial TP — Scale-out {symbol}*",
-            "",
-            f"Direção         : {'🟢 LONG' if side_upper == 'LONG' else '🔴 SHORT'}",
-            f"Entrada (avg)   : ${avg_entry:,.4f}",
-            f"Fechado em (TP1): ${close_price:,.4f}",
-            f"Qtd fechada     : {closed_qty:.6f}  (50%)",
-            f"Qtd restante    : {remaining_qty:.6f}  (50%)",
-            "",
-            f"PnL parcial     : {pnl_emoji} ${pnl_usd:+,.2f}  ({pnl_pct:+.2f}%)",
-            "",
-            f"Stop → breakeven: ${new_sl:,.4f}",
-            f"TP2 alvo        : ${tp2_trigger:,.4f}",
-            "",
-            "🏹 Posição restante corre sem risco de perda.",
-            f"Modo            : {settings.mode_label}  (paper)",
+            f"✂️ *Lucro parcial — {symbol}*",
+            f"Fechou metade no 1º alvo: {pnl_emoji} ${pnl_usd:+,.2f} ({pnl_pct:+.2f}%)",
+            f"🏹 O resto corre sem risco (stop movido para o ponto de entrada).",
+            f"Próximo alvo: ${tp2_trigger:,.4f}",
         ]
         text = "\n".join(lines)
         try:
@@ -598,17 +587,15 @@ class TelegramAlerter:
 
         action_upper = action.upper()
 
-        # Emoji + label per action
-        _emojis = {
-            "TIGHTEN_STOP":    "🔒",
-            "TRAIL_STOP":      "📈",
-            "SCALE_OUT":       "✂️",
-            "CLOSE":           "🔴",
-            "EMERGENCY_CLOSE": "🚨",
+        # Emoji + frase leiga por ação (em vez do código técnico).
+        _actions = {
+            "TIGHTEN_STOP":    ("🔒", "Apertou o stop para proteger"),
+            "TRAIL_STOP":      ("📈", "Subiu o stop seguindo o lucro"),
+            "SCALE_OUT":       ("✂️", "Realizou lucro parcial"),
+            "CLOSE":           ("🔴", "Fechou a posição"),
+            "EMERGENCY_CLOSE": ("🚨", "Fechou em emergência"),
         }
-        action_emoji = _emojis.get(action_upper, "⚡")
-        tag = "📄 PAPER" if is_paper else "🔴 LIVE"
-        side_emoji = "🟢 LONG" if side.upper() == "LONG" else "🔴 SHORT"
+        action_emoji, action_phrase = _actions.get(action_upper, ("⚡", action_upper))
         pnl_emoji = "🟢" if unrealized_pnl_usd >= 0 else "🔴"
 
         # PnL % from entry
@@ -616,39 +603,14 @@ class TelegramAlerter:
         pnl_pct = unrealized_pnl_usd / cost_basis * 100 if cost_basis else 0.0
 
         lines = [
-            f"{action_emoji} *Wolverine — {action_upper}  [{symbol}]*  {tag}",
-            "",
-            f"Direção   : {side_emoji}",
-            f"Entrada   : ${entry_price:,.4f}",
-            f"Mark      : ${mark_price:,.4f}",
-            f"PnL atual : {pnl_emoji} ${unrealized_pnl_usd:+,.2f}  ({pnl_pct:+.2f}%)",
+            f"{action_emoji} *{symbol} — {action_phrase}*",
+            f"PnL atual: {pnl_emoji} ${unrealized_pnl_usd:+,.2f} ({pnl_pct:+.2f}%)",
         ]
-
-        # SL/TP block (for stop-modification actions)
         if new_sl is not None:
-            sl_dist = abs(new_sl - entry_price) / entry_price * 100
-            sl_dir = "acima" if new_sl > entry_price else "abaixo"
-            lines += [
-                "",
-                f"Novo SL   : ${new_sl:,.4f}  ({sl_dist:.2f}% {sl_dir} entrada)",
-            ]
-        if new_tp is not None:
-            tp_dist = abs(new_tp - entry_price) / entry_price * 100
-            lines.append(f"TP        : ${new_tp:,.4f}  ({tp_dist:.2f}%)")
-
-        # Close / scale quantity
-        if close_qty is not None:
-            lines += [
-                "",
-                f"Qtd fech. : {close_qty:.6f}",
-            ]
-
-        lines += [
-            "",
-            f"Motivo    : _{reason}_",
-            "",
-            f"Modo      : {settings.mode_label}",
-        ]
+            lines.append(f"Novo stop: ${new_sl:,.4f}")
+        if reason:
+            _r = reason if len(reason) < 140 else reason[:140] + "…"
+            lines.append(f"💡 _{_r}_")
 
         text = "\n".join(lines)
         try:
@@ -673,25 +635,15 @@ class TelegramAlerter:
             return False
 
         tag = "📄 PAPER" if is_paper else "🔴 LIVE"
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
         lines = [
-            f"🚨 *KILL SWITCH ATIVADO*  {tag} 🚨",
-            "",
-            f"Drawdown  : {intraday_drawdown_pct:.2f}%",
-            f"Posições  : {positions_count} abertas",
-            "",
-            "⛔ *Trading pausado automaticamente até amanhã (UTC).*",
+            f"🚨 *Trading pausado automaticamente* {tag}",
+            f"Perda no dia chegou a {intraday_drawdown_pct:.2f}% — {positions_count} posição(ões) aberta(s).",
+            "⛔ Nenhum trade novo até amanhã (UTC).",
         ]
         if notes:
-            short_notes = notes if len(notes) < 400 else notes[:400] + "…"
-            lines += ["", f"Detalhe: _{short_notes}_"]
-        lines += [
-            "",
-            f"Modo      : {settings.mode_label}",
-            f"Hora      : {now}",
-        ]
-
+            short_notes = notes if len(notes) < 160 else notes[:160] + "…"
+            lines.append(f"💡 _{short_notes}_")
         text = "\n".join(lines)
         try:
             return await self._post(text, parse_mode="Markdown")
@@ -716,19 +668,11 @@ class TelegramAlerter:
         if not settings.telegram_enabled:
             return False
 
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         lines = [
-            f"🚨 *ALERTA — Drawdown Crítico* 🚨",
-            "",
-            f"Drawdown  : {drawdown_pct:.2f}%  (limite: {threshold_pct:.1f}%)",
-            f"Equity    : ${current_equity:,.2f}",
-            f"Pico dia  : ${peak_equity:,.2f}",
-            f"Perda     : ${peak_equity - current_equity:,.2f}",
-            "",
-            "⚠️ *Trading pausado automaticamente até amanhã (UTC).*",
-            "",
-            f"Modo      : {settings.mode_label}",
-            f"Hora      : {now}",
+            f"🚨 *Trading pausado — perda no dia* 🚨",
+            f"Caiu {drawdown_pct:.2f}% hoje (limite: {threshold_pct:.1f}%).",
+            f"Perda: ${peak_equity - current_equity:,.2f}  ·  Saldo: ${current_equity:,.2f}",
+            "⚠️ Nenhum trade novo até amanhã (UTC).",
         ]
         text = "\n".join(lines)
         try:

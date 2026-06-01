@@ -182,12 +182,13 @@ def test_format_includes_core_fields():
         symbol="BTC",
         payload={"breaker": "exec_error"},
     )
-    assert "ERROR" in text
-    assert "RISK_KILL_SWITCH" in text
-    assert "BTC" in text
-    assert "Batman" in text
-    assert "kill engaged" in text
-    assert "breaker=exec_error" in text
+    # Novo formato (2026-06-01): curto e para leigo — título amigável + emoji
+    # de severidade no lugar do código de evento/agente cru.
+    assert "🔴" in text                                  # severidade ERROR
+    assert "Trading pausado" in text                     # título amigável do evento
+    assert "BTC" in text                                 # símbolo
+    assert "kill engaged" in text                        # mensagem
+    assert "breaker=exec_error" in text                  # dado simples preservado
 
 
 def test_format_truncates_very_long_message():
