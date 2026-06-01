@@ -136,7 +136,14 @@ class DailyPnLWriter:
         today = _today_utc()
         equity = float(equity_usd or 0.0)
 
-        # Day rollover or first call ever — reset in-memory state
+        # Day rollover or first call ever — restore today's baseline from the DB
+        # BEFORE seeding fresh (H3 fix, 2026-06-01). Without this, the first
+        # cycle after a mid-day restart re-seeded starting+peak with the already
+        # drawn-down equity → drawdown ≈ 0 → Batman's drawdown guard stopped
+        # blocking. hydrate_from_db only loads TODAY's row, so a genuine new day
+        # finds no row and seeds fresh below.
+        if self._state is None or self._state.date_utc != today:
+            await self.hydrate_from_db()
         if self._state is None or self._state.date_utc != today:
             self._state = _DayState(
                 date_utc=today,
@@ -169,6 +176,10 @@ class DailyPnLWriter:
                 wins=int(wins),
                 losses=int(losses),
                 starting_equity=starting,
+                # H3 fix (2026-06-01): persistir o peak (monotônico) para que o
+                # drawdown sobreviva a um restart. Antes, peak_equity_usd nunca
+                # era passado → ficava no default e o drawdown resetava.
+                peak_equity_usd=peak,
             )
         except Exception as exc:  # noqa: BLE001
             # Never let a persistence error break the main cycle. Audit
@@ -198,6 +209,42 @@ class DailyPnLWriter:
         )
         self._log.info(result.summary())
         return result
+
+    async def hydrate_from_db(self) -> None:
+        """Restore today's (starting_equity, peak_equity) from the DB into the
+        in-memory state. Idempotent. Called at NickFury boot so a mid-day
+        restart does not reset the drawdown baseline (H3 fix, 2026-06-01).
+
+        Never lowers an existing in-memory peak. Safe to call before any cycle.
+        """
+        try:
+            baseline = await MekkaRepository.get_today_daily_pnl_baseline()
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"hydrate_from_db failed (suppressed): {exc}")
+            return
+        if not baseline:
+            return
+        starting, peak = baseline
+        if starting <= 0 and peak <= 0:
+            return
+        today = _today_utc()
+        # starting é o baseline do dia; peak nunca desce.
+        _start = starting if starting > 0 else peak
+        _peak = max(starting, peak)
+        if self._state is None or self._state.date_utc != today:
+            self._state = _DayState(
+                date_utc=today,
+                starting_equity=_start,
+                peak_equity=_peak,
+            )
+        else:
+            if self._state.starting_equity <= 0:
+                self._state.starting_equity = _start
+            self._state.peak_equity = max(self._state.peak_equity, _peak)
+        self._log.info(
+            f"[DailyPnL] Hydrated baseline from DB: "
+            f"start=${self._state.starting_equity:,.2f} peak=${self._state.peak_equity:,.2f}"
+        )
 
     # ------------------------------------------------------------------
     # Diagnostics / tests

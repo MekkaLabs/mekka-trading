@@ -245,6 +245,29 @@ class MekkaRepository:
             return existing.id
 
     @staticmethod
+    async def get_today_daily_pnl_baseline() -> Optional[tuple[float, float]]:
+        """Return today's (starting_equity, peak_equity_usd), or None if no row.
+
+        H3 fix (2026-06-01 audit): usado para hidratar o DailyPnLWriter após um
+        restart. Sem o starting+peak persistidos, o primeiro ciclo pós-restart
+        re-semeava a baseline com a equity já rebaixada → drawdown ≈ 0 → o gate
+        de drawdown do Batman deixava de bloquear num dia ruim.
+        """
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    select(
+                        DailyPnLRecord.starting_equity,
+                        DailyPnLRecord.peak_equity_usd,
+                    ).where(DailyPnLRecord.date_utc == today)
+                )
+            ).first()
+            if row is None:
+                return None
+            return (float(row[0] or 0.0), float(row[1] or 0.0))
+
+    @staticmethod
     async def get_today_peak_equity() -> float:
         """Read today's persisted peak_equity_usd, or 0.0 if no row yet.
 

@@ -170,17 +170,18 @@ class NickFury(BaseAgent[list[CycleReport]]):
         except Exception as _dd_exc:  # noqa: BLE001
             self._log.debug(f"[NickFury] degradation detector skipped: {_dd_exc}")
 
-        # Restore peak_equity from DB so a mid-day restart does not hide
-        # intra-day drawdown from Batman's daily drawdown guard (Story 057).
+        # Restore the daily PnL baseline (starting + peak) from DB so a mid-day
+        # restart does not hide intra-day drawdown from Batman's daily drawdown
+        # guard (Story 057 + H3 fix 2026-06-01).
+        # ANTES: gravava em self._daily_pnl._peak_equity — um atributo MORTO que
+        # o DailyPnLWriter nunca lê (o estado real é _state.peak_equity). O peak
+        # restaurado era silenciosamente descartado e o primeiro ciclo pós-restart
+        # re-semeava a baseline com a equity já rebaixada → drawdown ≈ 0 → Batman
+        # voltava a aprovar trades num dia ruim.
         try:
-            persisted_peak = await MekkaRepository.get_today_peak_equity()
-            if persisted_peak > 0:
-                self._daily_pnl._peak_equity = persisted_peak
-                self._log.info(
-                    f"[NickFury] Restored peak_equity from DB: ${persisted_peak:,.2f}"
-                )
+            await self._daily_pnl.hydrate_from_db()
         except Exception as _exc:
-            self._log.warning(f"[NickFury] Could not restore peak_equity: {_exc}")
+            self._log.warning(f"[NickFury] Could not hydrate daily PnL baseline: {_exc}")
 
         await MekkaRepository.log_event(
             agent="NickFury",
@@ -193,6 +194,42 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 "assets": settings.trading_assets,
             },
         )
+
+        # M1 fix (2026-06-01 audit): o kill-switch de PERDA ABSOLUTA diária
+        # (max_daily_loss_usd) default 0.0 fica DESLIGADO silenciosamente. Em
+        # mainnet+live isso é um buraco de risco — alerta alto no boot (defesa em
+        # profundidade; o gate autoritativo é o preflight check_daily_loss_cap).
+        try:
+            _cap = float(getattr(settings, "max_daily_loss_usd", 0.0) or 0.0)
+            _live = not bool(settings.paper_trading)
+            _is_testnet = settings.exchange_is_testnet(settings.active_exchange)
+            if _live and not _is_testnet and _cap <= 0:
+                self._log.error(
+                    "[NickFury] MAX_DAILY_LOSS_USD=0 em MAINNET+LIVE — kill-switch de "
+                    "perda absoluta DESLIGADO. Defina um teto no .env."
+                )
+                await MekkaRepository.log_event(
+                    agent="NickFury",
+                    event="DAILY_LOSS_CAP_DISABLED",
+                    severity="CRITICAL",
+                    message="MAX_DAILY_LOSS_USD=0 em mainnet+live — kill-switch absoluto desligado.",
+                )
+                try:
+                    await self._telegram.alert(
+                        event="DAILY_LOSS_CAP_DISABLED",
+                        severity="CRITICAL",
+                        agent="NickFury",
+                        message=(
+                            "⚠️ MAINNET+LIVE com MAX_DAILY_LOSS_USD=0 — o kill-switch de "
+                            "perda absoluta diária está DESLIGADO. Defina um teto (2–5% do "
+                            "capital) no .env."
+                        ),
+                        payload={},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as _exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury] daily-loss-cap boot check skipped: {_exc}")
 
         # [Boot reconciliation + SL guardian] In live mode, a restart must not
         # leave an open position unprotected for up to a full monitor interval.

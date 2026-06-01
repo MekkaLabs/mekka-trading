@@ -333,6 +333,45 @@ def check_risk_limits(report: PreflightReport) -> None:
         report.warn("risk_limits", f"Could not check risk limits: {exc}")
 
 
+def check_daily_loss_cap(report: PreflightReport) -> None:
+    """M1 (2026-06-01 audit): o kill-switch de PERDA ABSOLUTA diária
+    (max_daily_loss_usd) tem default 0.0, que o DESLIGA. Em mainnet + live isso
+    é inaceitável — força FAIL para que o operador defina um teto antes de
+    operar com dinheiro real. Em paper/testnet é só um WARN.
+    """
+    try:
+        s = _get_settings()
+        cap = float(getattr(s, "max_daily_loss_usd", 0.0) or 0.0)
+        live = not bool(s.paper_trading)
+        try:
+            is_testnet = bool(s.exchange_is_testnet(s.active_exchange))
+        except Exception:  # noqa: BLE001
+            is_testnet = True  # conservador
+        mainnet_live = live and not is_testnet
+
+        if cap > 0:
+            report.ok(
+                "daily_loss_cap",
+                f"Absolute daily-loss kill-switch armed: MAX_DAILY_LOSS_USD=${cap:,.2f}",
+            )
+        elif mainnet_live:
+            report.fail(
+                "daily_loss_cap",
+                "MAX_DAILY_LOSS_USD=0 desliga o kill-switch de perda absoluta diária "
+                "em MAINNET+LIVE.",
+                fix="Defina MAX_DAILY_LOSS_USD > 0 no .env (recomendado: 2–5% do capital).",
+            )
+        else:
+            report.warn(
+                "daily_loss_cap",
+                "MAX_DAILY_LOSS_USD=0 (kill-switch de perda absoluta desligado) — "
+                "tolerável em paper/testnet, obrigatório antes da mainnet.",
+                fix="Defina MAX_DAILY_LOSS_USD > 0 antes de ir para mainnet+live.",
+            )
+    except Exception as exc:  # noqa: BLE001
+        report.warn("daily_loss_cap", f"Could not check daily loss cap: {exc}")
+
+
 def check_telegram(report: PreflightReport) -> None:
     try:
         s = _get_settings()
@@ -545,6 +584,7 @@ def run_preflight(strict: bool = False) -> PreflightReport:
     check_kill_switch(report)
     check_network(report)
     check_risk_limits(report)
+    check_daily_loss_cap(report)
     check_telegram(report)
     check_sdk_availability(report)
     check_authorization_file(report)
