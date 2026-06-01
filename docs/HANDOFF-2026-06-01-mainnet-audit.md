@@ -95,12 +95,17 @@ Depois: `python scripts/preflight_mainnet.py --strict` → tudo verde.
 | L6 | SL emergencial ancorado no MARK atual (não entry) — `iron_man.py` |
 | L7 | PortfolioManager reusa `_CCXT_SHARED` do IronMan (não fecha) — `portfolio_manager.py` |
 
-## ⚠️ PENDÊNCIAS (apenas 2 follow-ups maiores — não bloqueiam mainnet)
+## ✅ FOLLOW-UPS H6/H7 — RESOLVIDOS (commit 90c79ab)
 
-- **Follow-up H6**: outbox completo (gravar TradeRecord PENDING *antes* da ordem +
-  update depois + fila de retry). Hoje há retry + alerta anti-órfão.
-- **Follow-up H7**: atribuição por-trade do realizedPnl (hoje só audit agregado
-  `LIVE_PNL_RECONCILED`).
+- **H6 outbox completo**: `ExecutionStatus` PENDING/ORPHAN; `save_pending_trade`
+  (antes da ordem) → `finalize_trade` (mesma linha, degradação segura p/ insert)
+  → `reap_stale_pending_trades` (marca órfãos >10min + alerta CRITICAL no monitor
+  cycle). Fecha o gap de CRASH entre a ordem e o registro.
+- **H7 atribuição por-trade**: `attribute_realized_pnl` grava o realizedPnl no
+  trade aberto do símbolo (coluna + raw.metadata), chamado no
+  `_reconcile_live_close_pnl`.
+
+**AUDITORIA 100% FECHADA — 28 findings + 2 follow-ups, nada pendente.**
 
 ---
 
