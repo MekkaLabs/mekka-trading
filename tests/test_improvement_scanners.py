@@ -228,3 +228,69 @@ async def test_scanners_fail_silent_on_empty_audit():
          patch("src.agents.batman.is_kill_switch_active", return_value=False):
         assert isinstance(await RiskScanner().scan(period_days=7), list)
         assert isinstance(await OpsScanner().scan(period_days=7), list)
+
+
+# ---------------------------------------------------------------------------
+# Sage v2 — atribuição por-melhoria (before/after de uma entrega específica)
+# ---------------------------------------------------------------------------
+
+def _patch_sage(decisions, baselines, saved_sink):
+    return (
+        patch.object(Sage, "_load_decisions_raw", return_value=decisions),
+        patch.object(Sage, "_load_improvement_baselines", return_value=baselines),
+        patch.object(Sage, "_save_improvement_baselines",
+                     lambda self, d: saved_sink.update(d)),
+    )
+
+
+def test_sage_v2_first_sight_captures_baseline():
+    """Primeira vez que Sage vê uma melhoria aceita → captura baseline, sem proposta."""
+    saved = {}
+    p1, p2, p3 = _patch_sage({"rec1": {"status": "accepted"}}, {}, saved)
+    with p1, p2, p3:
+        out = Sage()._track_deliveries({"win_rate": 55.0, "closed_trades": 20, "errors_24h": 1})
+    assert out == []
+    assert saved.get("rec1", {}).get("verdict") == "pending"
+    assert saved["rec1"]["win_rate"] == 55.0
+
+
+def test_sage_v2_regression_after_delivery_flagged():
+    """Win rate cai >= 8pp após a entrega → verdict regression + proposta."""
+    base = {"rec1": {"captured_at": "x", "win_rate": 60.0, "errors_24h": 1, "verdict": "pending"}}
+    p1, p2, p3 = _patch_sage({"rec1": {"status": "accepted"}}, base, {})
+    with p1, p2, p3:
+        out = Sage()._track_deliveries({"win_rate": 50.0, "closed_trades": 20})  # -10pp
+    assert any("regress" in pr.title.lower() for pr in out)
+    assert out[0].area == "measurement"
+
+
+def test_sage_v2_effective_no_council_noise():
+    """Win rate sobe >= 8pp → verdict effective, sem proposta (baixo ruído)."""
+    base = {"rec1": {"win_rate": 50.0, "verdict": "pending"}}
+    p1, p2, p3 = _patch_sage({"rec1": {"status": "accepted"}}, base, {})
+    with p1, p2, p3:
+        out = Sage()._track_deliveries({"win_rate": 62.0, "closed_trades": 20})  # +12pp
+    assert out == []
+
+
+def test_sage_v2_neutral_when_few_trades():
+    """Poucos trades fechados → não avalia (sem verdict forçado, sem proposta)."""
+    base = {"rec1": {"win_rate": 60.0, "verdict": "pending"}}
+    p1, p2, p3 = _patch_sage({"rec1": {"status": "accepted"}}, base, {})
+    with p1, p2, p3:
+        out = Sage()._track_deliveries({"win_rate": 40.0, "closed_trades": 3})  # < MIN_CLOSED
+    assert out == []
+
+
+def test_sage_v2_evaluations_counts():
+    """improvement_evaluations agrega verdicts por categoria."""
+    base = {
+        "a": {"verdict": "effective"},
+        "b": {"verdict": "regression"},
+        "c": {"verdict": "pending"},
+        "d": {"verdict": "neutral"},
+    }
+    with patch.object(Sage, "_load_improvement_baselines", return_value=base):
+        ev = Sage().improvement_evaluations()
+    assert ev["tracked"] == 4
+    assert ev["counts"] == {"effective": 1, "neutral": 1, "regression": 1, "pending": 1}

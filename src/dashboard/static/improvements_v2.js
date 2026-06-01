@@ -18,6 +18,7 @@
   const STATS_API = '/api/improvements';
   const QUEUED_API = '/api/improvements/queued';
   const RECONCILE_API = '/api/improvements/reconcile-manual';
+  const KPI_API = '/api/improvements/kpi';
   const POLL_MS = 60000;
 
   // ── helpers ────────────────────────────────────────────────────────────
@@ -61,6 +62,34 @@
       // 'paradas' vem do endpoint queued
     } catch (e) {
       console.debug('[improvements_v2] stats falhou:', e);
+    }
+  }
+
+  // ── KPI tile: Departamento de Melhoria Contínua (Sage v1+v2) ────────
+  async function refreshKpi() {
+    try {
+      const r = await fetch(KPI_API, { cache: 'no-store' });
+      if (!r.ok) return;
+      const data = await r.json();
+      const kpi = (data && data.kpi) || {};
+      const impact = ((data && data.impact) || {}).counts || {};
+      const snap = (data && data.latest_snapshot) || {};
+      // Throughput (Sage v1)
+      setText('imp2-kpi-accepted', kpi.accepted != null ? kpi.accepted : 0);
+      setText('imp2-kpi-rejected', kpi.rejected != null ? kpi.rejected : 0);
+      setText('imp2-kpi-rate', kpi.acceptance_rate != null ? kpi.acceptance_rate + '%' : '—');
+      // Impacto medido (Sage v2)
+      setText('imp2-kpi-effective', impact.effective != null ? impact.effective : 0);
+      setText('imp2-kpi-neutral', impact.neutral != null ? impact.neutral : 0);
+      setText('imp2-kpi-regression', impact.regression != null ? impact.regression : 0);
+      setText('imp2-kpi-pending', impact.pending != null ? impact.pending : 0);
+      // Saúde atual (último snapshot do Sage)
+      setText('imp2-kpi-winrate', snap.win_rate != null ? snap.win_rate + '%' : '—');
+      setText('imp2-kpi-errors', snap.errors_24h != null ? snap.errors_24h : '—');
+      const tile = $('imp2-kpi');
+      if (tile) tile.dataset.empty = '0';
+    } catch (e) {
+      console.debug('[improvements_v2] kpi falhou:', e);
     }
   }
 
@@ -201,14 +230,17 @@
     bindTabSwitching();
     refreshStats();
     refreshQueued(true);
+    refreshKpi();
     setInterval(refreshStats, POLL_MS);
     setInterval(() => refreshQueued(false), POLL_MS);
+    setInterval(refreshKpi, POLL_MS);
     // Hook no botão Atualizar pra refletir queued também
     const refreshBtn = $('impr-refresh');
     if (refreshBtn) {
       refreshBtn.addEventListener('click', () => {
         refreshStats();
         refreshQueued(true);
+        refreshKpi();
       });
     }
   }

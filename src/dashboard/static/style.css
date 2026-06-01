@@ -4975,3 +4975,55 @@ main:not(.layout) {
   background: rgba(91,232,245,0.22);
   transform: scale(1.05);
 }
+
+/* ── KPI tile — Departamento de Melhoria Contínua (Sage v1+v2) ─────────── */
+.imp2-kpi {
+  margin: 10px 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.imp2-kpi-head {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-2);
+  margin-bottom: 10px;
+  letter-spacing: 0.02em;
+}
+.imp2-kpi-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+}
+.imp2-kpi-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.imp2-kpi-group-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim, #8aa);
+  opacity: 0.75;
+  margin-right: 2px;
+}
+.imp2-kpi-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.03);
+  white-space: nowrap;
+}
+.imp2-kpi-chip b { color: var(--accent); font-variant-numeric: tabular-nums; }
+.imp2-kpi-chip.ok  { border-color: var(--good-border); background: var(--good-dim); }
+.imp2-kpi-chip.ok b  { color: var(--good); }
+.imp2-kpi-chip.bad { border-color: var(--bad-border);  background: var(--bad-dim); }
+.imp2-kpi-chip.bad b { color: var(--bad); }
+.imp2-kpi[data-empty="1"] { opacity: 0.6; }

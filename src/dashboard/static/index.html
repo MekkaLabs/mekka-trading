@@ -1626,6 +1626,31 @@
           <div class="imp2-stat imp2-stat-blocked"><div class="imp2-stat-value" id="imp2-stat-blocked">—</div><div class="imp2-stat-label">Bloqueadas</div></div>
         </div>
 
+        <!-- KPI tile — Departamento de Melhoria Contínua (Sage v1 throughput + v2 impacto) -->
+        <div class="imp2-kpi" id="imp2-kpi" data-empty="1">
+          <div class="imp2-kpi-head">📐 KPI — Departamento de Melhoria Contínua</div>
+          <div class="imp2-kpi-row">
+            <div class="imp2-kpi-group">
+              <div class="imp2-kpi-group-label">Throughput</div>
+              <span class="imp2-kpi-chip" title="Briefs aceitos pelo operador">✅ Aceitas <b id="imp2-kpi-accepted">—</b></span>
+              <span class="imp2-kpi-chip" title="Briefs rejeitados">🚫 Rejeitadas <b id="imp2-kpi-rejected">—</b></span>
+              <span class="imp2-kpi-chip" title="Taxa de aceitação">📈 Aceitação <b id="imp2-kpi-rate">—</b></span>
+            </div>
+            <div class="imp2-kpi-group">
+              <div class="imp2-kpi-group-label">Impacto (Sage v2)</div>
+              <span class="imp2-kpi-chip ok" title="Melhorias com impacto positivo medido">🟢 Efetivas <b id="imp2-kpi-effective">—</b></span>
+              <span class="imp2-kpi-chip" title="Sem mudança significativa">⚪ Neutras <b id="imp2-kpi-neutral">—</b></span>
+              <span class="imp2-kpi-chip bad" title="Win rate caiu após a entrega">🔴 Regressões <b id="imp2-kpi-regression">—</b></span>
+              <span class="imp2-kpi-chip" title="Ainda coletando dados">⏳ Pendentes <b id="imp2-kpi-pending">—</b></span>
+            </div>
+            <div class="imp2-kpi-group">
+              <div class="imp2-kpi-group-label">Saúde atual</div>
+              <span class="imp2-kpi-chip" title="Win rate no último snapshot">🎯 Win rate <b id="imp2-kpi-winrate">—</b></span>
+              <span class="imp2-kpi-chip" title="Erros/críticos em 24h">⚠️ Erros 24h <b id="imp2-kpi-errors">—</b></span>
+            </div>
+          </div>
+        </div>
+
         <!-- TABS — agora INCLUI 'paradas' como cidadã primária -->
         <div class="impr-views" id="impr-views">
           <button type="button" class="impr-view active" data-view="novas">🆕 Novas <span class="impr-view-n" data-n="novas">0</span></button>
