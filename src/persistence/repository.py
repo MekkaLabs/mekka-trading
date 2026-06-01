@@ -149,6 +149,20 @@ class MekkaRepository:
             raw=execution.model_dump(mode="json"),
         )
         async with get_session() as session:
+            # L4 fix (2026-06-01 audit): dedup por order_id (idempotência no write).
+            # ANTES não havia constraint UNIQUE nem checagem → uma re-inserção
+            # (ex.: retry de save_trade) duplicava a linha. Para order_id não-vazio,
+            # se já existe, retorna o id existente em vez de inserir de novo.
+            # order_id vazio (REJECTED/ERROR) não é deduplicado.
+            _oid = (getattr(execution, "order_id", None) or "").strip()
+            if _oid:
+                existing = (
+                    await session.execute(
+                        select(TradeRecord.id).where(TradeRecord.order_id == _oid)
+                    )
+                ).scalar_one_or_none()
+                if existing is not None:
+                    return int(existing)
             session.add(rec)
             await session.commit()
             await session.refresh(rec)

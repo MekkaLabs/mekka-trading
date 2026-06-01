@@ -709,6 +709,14 @@ def print_report(report: PreflightReport, as_json: bool = False, strict: bool = 
         warns = report.warn_count
         status = "🟢 ALL AUTOMATED CHECKS PASSED" if fails == 0 else f"🔴 {fails} CHECK(S) FAILED"
         print(f"  {status}  ({warns} warning(s))")
+        # L3 fix (2026-06-01 audit): "ALL PASSED" em PAPER_TRADING=true lia-se como
+        # prontidão de mainnet. Banner explícito de que NÃO é live.
+        try:
+            if bool(getattr(_get_settings(), "paper_trading", True)):
+                print("  📝 MODO PAPER (PAPER_TRADING=true) — nenhuma ordem real será")
+                print("     colocada. Isto NÃO é prontidão de mainnet com dinheiro real.")
+        except Exception:  # noqa: BLE001
+            pass
         print("=" * 60)
         print()
 

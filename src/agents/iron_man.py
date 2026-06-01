@@ -926,10 +926,51 @@ class IronMan(BaseAgent[ExecutionResult]):
             )
 
         # Set leverage
-        try:
-            await exchange.set_leverage(leverage, ccxt_symbol)
-        except Exception as _exc:
-            self._log.warning(f"[IronMan/{exchange_id}] set_leverage failed (proceeding): {_exc}")
+        # L2 fix (2026-06-01 audit): era fail-open silencioso — se set_leverage
+        # falhasse, a ordem abria com o leverage RESIDUAL da corretora (≠ aprovado
+        # pelo Batman) → risco real diferente do dimensionado. Agora: -4046 ("no
+        # need to change") é sucesso; demais falhas → 1 retry; se persistir em
+        # LIVE, REJEITA (fail-closed) + alerta. Testnet segue tolerante.
+        _lev_ok = False
+        _lev_exc: Optional[Exception] = None
+        for _lev_attempt in range(1, 3):
+            try:
+                await exchange.set_leverage(leverage, ccxt_symbol)
+                _lev_ok = True
+                break
+            except Exception as _exc:  # noqa: BLE001
+                _es = str(_exc).lower()
+                if "-4046" in _es or "no need to change" in _es:
+                    _lev_ok = True  # já está no leverage desejado
+                    break
+                _lev_exc = _exc
+                self._log.warning(
+                    f"[IronMan/{exchange_id}] set_leverage attempt {_lev_attempt}/2 failed: {_exc}"
+                )
+                if _lev_attempt < 2:
+                    await asyncio.sleep(float(_lev_attempt))
+        if not _lev_ok and not settings.paper_trading:
+            try:
+                from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+                asyncio.create_task(_TA().alert(
+                    event="SET_LEVERAGE_FAILED",
+                    severity="CRITICAL",
+                    agent="IronMan",
+                    symbol=symbol,
+                    message=(
+                        f"⛔ set_leverage falhou em {symbol} ({_lev_exc}) — ordem "
+                        "REJEITADA (fail-closed: leverage residual ≠ aprovado)."
+                    ),
+                ))
+            except Exception:  # noqa: BLE001
+                pass
+            return ExecutionResult(
+                symbol=symbol,
+                status=ExecutionStatus.REJECTED,
+                is_paper=False,
+                side="long" if is_buy else "short",
+                error=f"set_leverage failed in live ({_lev_exc}) — fail-closed.",
+            )
 
         # Pre-flight margin check via CCXT balance.
         # P0-4 fix (2026-05-28 audit): em COIN-M (inverse), saldo está em
@@ -1824,9 +1865,20 @@ class IronMan(BaseAgent[ExecutionResult]):
                 emergency = False
                 if not sl_price or sl_price <= 0:
                     emergency = True
+                    # L6 fix (2026-06-01 audit): ancorar o stop de emergência no
+                    # MARK ATUAL, não no entry. Após downtime longo o preço pode ter
+                    # andado muito e entry*(1±2%) ficaria do lado ERRADO (stop já
+                    # cruzado → trigger imediato/rejeição). O mark garante o lado
+                    # correto + buffer de 2% a partir de agora. Fallback p/ entry.
+                    _mark_g = 0.0
+                    try:
+                        _mark_g = float(p.get("markPrice") or p.get("markPx") or 0) or 0.0
+                    except Exception:  # noqa: BLE001
+                        _mark_g = 0.0
+                    _base_g = _mark_g if _mark_g > 0 else entry
                     sl_price = (
-                        entry * (1 - self._GUARDIAN_DEFAULT_SL_PCT) if is_long
-                        else entry * (1 + self._GUARDIAN_DEFAULT_SL_PCT)
+                        _base_g * (1 - self._GUARDIAN_DEFAULT_SL_PCT) if is_long
+                        else _base_g * (1 + self._GUARDIAN_DEFAULT_SL_PCT)
                     )
 
                 sl_side = "sell" if is_long else "buy"
@@ -2055,6 +2107,11 @@ class IronMan(BaseAgent[ExecutionResult]):
                     recent_trade_symbols.add(sym_recent)
 
         db_net: dict[str, float] = defaultdict(float)
+        # L5 fix (2026-06-01 audit): acumular preço médio ponderado para o
+        # synthetic close usar um avg_price PLAUSÍVEL (entry) em vez de 0.0, que
+        # distorcia agregações de preço.
+        _px_num: dict[str, float] = defaultdict(float)
+        _px_den: dict[str, float] = defaultdict(float)
         for t in trades or []:
             if getattr(t, "is_paper", True):
                 continue
@@ -2067,6 +2124,10 @@ class IronMan(BaseAgent[ExecutionResult]):
             if not sym or qty <= 0:
                 continue
             db_net[sym] += qty if side == "long" else -qty
+            _avg = float(getattr(t, "avg_price", 0) or 0)
+            if _avg > 0:
+                _px_num[sym] += qty * _avg
+                _px_den[sym] += qty
 
         db_open = {s for s, q in db_net.items() if abs(q) > 1e-8}
         summary["checked"] = len(db_open)
@@ -2113,14 +2174,17 @@ class IronMan(BaseAgent[ExecutionResult]):
                 offset_side = "short" if is_phantom_long else "long"
                 close_qty = abs(net_qty)
 
+                # L5: preço estimado = avg entry ponderado (close ~ break-even,
+                # honesto: não sabemos o preço real do fechamento na corretora).
+                _est_px = (_px_num.get(sym, 0.0) / _px_den[sym]) if _px_den.get(sym) else 0.0
                 close_result = ExecutionResult(
                     symbol=sym,
                     status=ExecutionStatus.FILLED,
                     is_paper=False,
                     side=offset_side,
                     quantity=close_qty,
-                    avg_price=0.0,
-                    notional_usd=0.0,
+                    avg_price=round(_est_px, 6),
+                    notional_usd=round(close_qty * _est_px, 2),
                     order_id=f"PHANTOM-{sym}-{uuid.uuid4().hex[:8]}",
                     metadata={
                         "action": "phantom_reconciled",
@@ -2128,6 +2192,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                         "reason": "DB had open position, exchange did not.",
                         "original_net_qty": round(net_qty, 8),
                         "original_side": "LONG" if is_phantom_long else "SHORT",
+                        "estimated_close_price": True,
                     },
                 )
                 await MekkaRepository.save_trade(close_result)
