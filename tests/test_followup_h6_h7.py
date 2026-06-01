@@ -129,3 +129,57 @@ async def test_h7_no_open_trade_returns_none(temp_db):
     from src.persistence.repository import MekkaRepository
 
     assert await MekkaRepository.attribute_realized_pnl("DOGE", 10.0) is None
+
+
+# ===========================================================================
+# Review-fixes (2026-06-01) — finalize não regride COIN-M; baseline filtra is_paper
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_review_finalize_resolves_coin_m_quote_currency(temp_db, monkeypatch):
+    """#1: finalize_trade em COIN-M (inverse) resolve quote_currency = coin,
+    não o default 'USDT' da linha PENDING (regressão do fix COIN-1/P0-6)."""
+    from src.config.settings import settings
+    from src.persistence.repository import MekkaRepository
+
+    monkeypatch.setattr(settings, "active_exchange", "binance")
+    monkeypatch.setattr(settings, "binance_market_type", "inverse")
+
+    pid = await MekkaRepository.save_pending_trade(
+        signal_id=None, symbol="BTC", side="long", quantity=0.0, is_paper=False,
+    )
+    await MekkaRepository.finalize_trade(pid, execution=_exec(oid="COINM-1"))
+
+    trades = await MekkaRepository.list_recent_trades(limit=10)
+    row = [t for t in trades if t.id == pid][0]
+    assert row.quote_currency == "BTC"  # coin, não USDT
+
+
+@pytest.mark.asyncio
+async def test_review_baseline_filters_by_is_paper(temp_db, monkeypatch):
+    """#2: get_today_daily_pnl_baseline filtra por is_paper — não contamina a
+    baseline LIVE com a PAPER (ou vice-versa) no mesmo dia."""
+    from datetime import datetime, timezone
+    from src.config.settings import settings
+    from src.persistence.repository import MekkaRepository
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # Linha PAPER: peak 5000. Linha LIVE: peak 12000.
+    await MekkaRepository.upsert_daily_pnl(
+        date_utc=today, is_paper=True, ending_equity=5000, pnl_usd=0, pnl_pct=0,
+        drawdown_pct=0, trades_count=0, wins=0, losses=0,
+        starting_equity=5000, peak_equity_usd=5000,
+    )
+    await MekkaRepository.upsert_daily_pnl(
+        date_utc=today, is_paper=False, ending_equity=12000, pnl_usd=0, pnl_pct=0,
+        drawdown_pct=0, trades_count=0, wins=0, losses=0,
+        starting_equity=12000, peak_equity_usd=12000,
+    )
+
+    monkeypatch.setattr(settings, "paper_trading", False)
+    live = await MekkaRepository.get_today_daily_pnl_baseline()
+    assert live == (12000.0, 12000.0)  # pega a LIVE, não a PAPER
+
+    monkeypatch.setattr(settings, "paper_trading", True)
+    paper = await MekkaRepository.get_today_daily_pnl_baseline()
+    assert paper == (5000.0, 5000.0)

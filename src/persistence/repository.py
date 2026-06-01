@@ -68,6 +68,25 @@ class MekkaRepository:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _resolve_quote_currency(execution: ExecutionResult) -> str:
+        """Quote currency canônica para um trade (USDT linear, USDC HL, coin em
+        COIN-M inverse). Extraído para uso em save_trade E finalize_trade —
+        o outbox (finalize) não pode regredir o fix COIN-1/P0-6."""
+        exec_qc = getattr(execution, "quote_currency", None)
+        if exec_qc:
+            return str(exec_qc).upper().strip()
+        try:
+            from src.config.settings import settings  # noqa: WPS433
+            if settings.active_exchange == "hyperliquid":
+                return "USDC"
+            if (settings.active_exchange == "binance"
+                    and str(getattr(settings, "binance_market_type", "linear")) == "inverse"):
+                return str(execution.symbol).upper().strip()
+            return "USDT"
+        except Exception:  # noqa: BLE001
+            return "USDT"
+
+    @staticmethod
     async def save_trade(
         execution: ExecutionResult,
         signal_id: Optional[int] = None,
@@ -210,6 +229,7 @@ class MekkaRepository:
         trade_id: Optional[int],
         execution: ExecutionResult,
         signal_id: Optional[int] = None,
+        pnl_usd: Optional[float] = None,
     ) -> int:
         """H6 outbox: atualiza a linha PENDING (trade_id) com o resultado real.
 
@@ -217,7 +237,7 @@ class MekkaRepository:
         sumiu, cai para save_trade (insert) — nunca perde o registro.
         """
         if trade_id is None:
-            return await MekkaRepository.save_trade(execution=execution, signal_id=signal_id)
+            return await MekkaRepository.save_trade(execution=execution, signal_id=signal_id, pnl_usd=pnl_usd)
         try:
             async with get_session() as session:
                 rec = (
@@ -240,12 +260,30 @@ class MekkaRepository:
                 rec.tp_order_id = execution.tp_order_id
                 rec.error = execution.error
                 rec.raw = execution.model_dump(mode="json")
+                # Review-fix (2026-06-01): finalize NÃO pode regredir COIN-1/P0-6.
+                # A linha PENDING nasceu com quote_currency=default "USDT"; em
+                # COIN-M (inverse) isso quebra dashboard/Strategy tracker. Resolve
+                # a quote currency canônica (coin em inverse) na finalização.
+                _qc = MekkaRepository._resolve_quote_currency(execution)
+                rec.quote_currency = _qc
+                # pnl_quote: em entradas o pnl é NULL (realizado no close, via H7);
+                # se a finalização já trouxer pnl, deriva o quote nativo.
+                if pnl_usd is not None:
+                    rec.pnl_usd = pnl_usd
+                    if _qc in ("USDT", "USDC"):
+                        rec.pnl_quote = pnl_usd
+                    else:
+                        try:
+                            _avg = float(execution.avg_price or 0)
+                            rec.pnl_quote = (pnl_usd / _avg) if _avg > 0 else None
+                        except (TypeError, ValueError):
+                            rec.pnl_quote = None
                 if signal_id is not None:
                     rec.signal_id = signal_id
                 await session.commit()
                 return int(rec.id)
         except Exception:  # noqa: BLE001
-            return await MekkaRepository.save_trade(execution=execution, signal_id=signal_id)
+            return await MekkaRepository.save_trade(execution=execution, signal_id=signal_id, pnl_usd=pnl_usd)
 
     @staticmethod
     async def reap_stale_pending_trades(max_age_seconds: int = 600) -> list[dict]:
@@ -363,9 +401,16 @@ class MekkaRepository:
         drawdown calculation and hide intra-day losses from Batman.
         """
         async with get_session() as session:
+            # Review-fix (2026-06-01): a checagem de existência precisa filtrar
+            # por is_paper (a unique é (date_utc, is_paper)). Sem isso, o upsert
+            # encontrava a linha do OUTRO ambiente por date_utc e a sobrescrevia,
+            # misturando baseline paper/live no mesmo dia.
             existing = (
                 await session.execute(
-                    select(DailyPnLRecord).where(DailyPnLRecord.date_utc == date_utc)
+                    select(DailyPnLRecord).where(
+                        DailyPnLRecord.date_utc == date_utc,
+                        DailyPnLRecord.is_paper == is_paper,
+                    )
                 )
             ).scalar_one_or_none()
 
@@ -411,13 +456,21 @@ class MekkaRepository:
         de drawdown do Batman deixava de bloquear num dia ruim.
         """
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # Review-fix (2026-06-01): filtrar por is_paper. A unique é (date_utc,
+        # is_paper) → paper e live podem coexistir no mesmo dia. Sem o filtro,
+        # .first() podia hidratar o estado LIVE com a baseline PAPER (equity
+        # diferente) → gate de drawdown do Batman mal calibrado no bring-up.
+        from src.config.settings import settings as _settings  # noqa: WPS433
         async with get_session() as session:
             row = (
                 await session.execute(
                     select(
                         DailyPnLRecord.starting_equity,
                         DailyPnLRecord.peak_equity_usd,
-                    ).where(DailyPnLRecord.date_utc == today)
+                    ).where(
+                        DailyPnLRecord.date_utc == today,
+                        DailyPnLRecord.is_paper == bool(_settings.paper_trading),
+                    )
                 )
             ).first()
             if row is None:

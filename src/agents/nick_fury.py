@@ -2277,11 +2277,37 @@ class NickFury(BaseAgent[list[CycleReport]]):
             ),
         )
 
-        execution = await self._ironman.run(
-            signal=signal,
-            approval=approval,
-            equity_usd=equity_usd,
-        )
+        try:
+            execution = await self._ironman.run(
+                signal=signal,
+                approval=approval,
+                equity_usd=equity_usd,
+            )
+        except Exception as _run_exc:  # noqa: BLE001
+            # Review-fix (2026-06-01): IronMan.run pode LEVANTAR (AgentError/
+            # timeout) — em geral ANTES de qualquer ordem chegar à corretora.
+            # Sem tratamento, a linha PENDING ficava dangling e o reaper a marcava
+            # ORPHAN + Telegram CRITICAL (falso-órfão, ruído). Finaliza o PENDING
+            # como ERROR para não disparar o alerta falso; uma posição real na
+            # corretora (caso raro: exceção pós-ordem) continua protegida pelo SL
+            # guardian + phantom recon. Re-levanta para o tratamento do caller.
+            try:
+                from src.models.execution import ExecutionResult as _ER, ExecutionStatus as _ES  # noqa: WPS433
+                await MekkaRepository.finalize_trade(
+                    _pending_id,
+                    execution=_ER(
+                        symbol=symbol,
+                        status=_ES.ERROR,
+                        is_paper=settings.paper_trading,
+                        side=_side_hint,
+                        error=f"IronMan.run raised: {_run_exc}",
+                    ),
+                    signal_id=signal_id,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+
         # Finaliza a linha PENDING com o resultado real. Se a gravação falhar,
         # retry + alerta CRITICAL anti-órfão. finalize_trade degrada para insert
         # se o pending não existir (nunca perde o registro).
