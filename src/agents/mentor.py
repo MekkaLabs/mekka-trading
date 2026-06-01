@@ -433,8 +433,11 @@ class Mentor(BaseAgent[MentorReport]):
                             "current_value": s.current_value,
                             "suggested_value": s.suggested_value,
                             "confidence": s.confidence,
-                            "n_samples": s.evidence_n,
-                            "reason": s.rationale,
+                            # Review-fix (2026-06-01): atributos certos (evidence
+                            # é dict; reason, não rationale) — antes lançava
+                            # AttributeError engolido → vault writer nunca rodava.
+                            "n_samples": (s.evidence or {}).get("n"),
+                            "reason": s.reason,
                             "metric": getattr(s, "metric", "win_rate"),
                             "scope": getattr(s, "scope", "global"),
                             "can_auto_apply": s.can_auto_apply,
@@ -477,27 +480,46 @@ class Mentor(BaseAgent[MentorReport]):
             for s in suggestions:
                 if s.parameter_name in existing_params:
                     continue
+                # Review-fix (2026-06-01): ANTES este dict usava s.rationale /
+                # s.evidence_n / s.evidence_period (atributos INEXISTENTES em
+                # ParameterSuggestion → AttributeError engolido pelo except externo
+                # → o inbox NUNCA era populado, o loop de aprendizado morria
+                # silenciosamente). E omitia direction/confidence/suggested_value/
+                # can_auto_apply, que o mentor_applier exige. Corrigido: nomes
+                # certos (reason/evidence dict) + os 4 campos do contrato do applier.
+                _ev = s.evidence or {}
                 current.append({
                     "title": (
                         f"Mentor: {s.parameter_name} "
                         f"{s.current_value} → {s.suggested_value}"
                     ),
-                    "description": s.rationale,
+                    "description": s.reason,
                     "impact": "MEDIUM" if s.confidence >= 0.8 else "LOW",
                     "area": "calibration",
                     "evidence": (
-                        f"win_rate, n={s.evidence_n}, period={s.evidence_period}, "
+                        f"n={_ev.get('n')}, period={_ev.get('period')}, "
                         f"mentor_conf={s.confidence:.2f}"
                     ),
                     "source": "mentor",
                     "suggested_story": f"Aplicar {s.parameter_name}={s.suggested_value}",
                     "parameter_name": s.parameter_name,
+                    # Contrato exigido pelo mentor_applier.apply_inbox:
+                    "suggested_value": s.suggested_value,
+                    "confidence": float(s.confidence),
+                    "can_auto_apply": bool(s.can_auto_apply),
+                    "direction": s.direction,
                     "env_line": s.to_env_line(),
                     "_mentor_ts": datetime.now(timezone.utc).isoformat(),
                 })
                 added += 1
             if added > 0:
-                inbox.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
+                # Review-fix: escrita atômica (era write_text direto, não-atômico,
+                # com race entre auto-learning loop e o Mekka council).
+                try:
+                    from src.services.atomic_json import atomic_write_json  # noqa: WPS433
+                    atomic_write_json(inbox, current)
+                except Exception:  # noqa: BLE001
+                    inbox.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
             return added
         except OSError:
             return 0

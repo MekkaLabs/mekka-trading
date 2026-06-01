@@ -102,17 +102,25 @@ def _detect_agents_code_vs_vault(
         "Batman Scalp Gates",   # módulo de gates auxiliar do Batman
         "Llm Client",           # utility
         "Vision Moa",           # variant do Vision (Mixture of Agents)
-        "Agents Scanner",       # Improvement Squad scanner
+        "Agents Scanner",       # Improvement Squad scanner (sem nota Marvel)
         "Backend Scanner",      # idem
         "Frontend Scanner",     # idem
         "Dashboard Scanner",    # idem
-        "Code Auditor",         # idem
-        "Ops Scanner",          # idem
-        "Risk Scanner",         # idem
     }
-    # Aliases vault → forma normalizada do código
+    # Review-fix (2026-06-01): os scanners do Improvement Squad SÃO agentes (têm
+    # nota no vault com codename Marvel). Antes Code Auditor/Ops Scanner/Risk
+    # Scanner eram excluídos do lado CÓDIGO mas suas notas (Cypher/Domino/Forge)
+    # contavam no vault → 3 falsos órfãos. Agora os aliases mapeiam codename↔arquivo.
     _VAULT_ALIASES = {
-        "Spider-Man": "Spider Man",  # vault usa hífen
+        "Spider-Man": "Spider Man",   # vault usa hífen
+        "Cypher": "Code Auditor",     # Doug Ramsey = CodeAuditor
+        "Domino": "Risk Scanner",     # Neena Thurman = RiskScanner
+        "Forge": "Ops Scanner",       # Forge = OpsScanner
+    }
+    # Agentes implementados como SERVIÇO (src/services), não src/agents, mas com
+    # nota no vault. Contados como "código existe" se o arquivo estiver presente.
+    _SERVICE_AGENTS = {
+        "Trade Outcome Resolver": repo_root / "src" / "services" / "trade_outcome_resolver.py",
     }
     code: set[str] = set()
     agents_dir = repo_root / "src" / "agents"
@@ -126,6 +134,9 @@ def _detect_agents_code_vs_vault(
             if title_n in _NOT_REAL_AGENTS:
                 continue
             code.add(title_n)
+    for _svc_name, _svc_path in _SERVICE_AGENTS.items():
+        if _svc_path.exists():
+            code.add(_normalize(_svc_name))
 
     vault_dir = vault / "20 - Areas" / "Agentes IA"
     vault_set: set[str] = set()
