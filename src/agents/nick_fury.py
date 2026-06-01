@@ -2259,7 +2259,58 @@ class NickFury(BaseAgent[list[CycleReport]]):
             approval=approval,
             equity_usd=equity_usd,
         )
-        await MekkaRepository.save_trade(execution=execution, signal_id=signal_id)
+        # H6 fix (2026-06-01 audit): se a ordem REAL preencheu mas o save_trade
+        # falha, a posição existe na corretora mas NÃO no DB → os gates do Batman
+        # (max_open_positions, count_trades_today) não a contam e o próximo ciclo
+        # pode aprovar uma ENTRADA DUPLICADA no mesmo símbolo. Antes a falha era
+        # silenciosa (sem try/except). Agora: retry + alerta CRITICAL com os dados
+        # para reconciliação manual. (Outbox completo PENDING-antes/update-depois
+        # fica como follow-up.)
+        _saved = False
+        for _save_attempt in range(1, 3):
+            try:
+                await MekkaRepository.save_trade(execution=execution, signal_id=signal_id)
+                _saved = True
+                break
+            except Exception as _save_exc:  # noqa: BLE001
+                self._log.error(
+                    f"[NickFury] save_trade attempt {_save_attempt}/2 failed for {symbol}: {_save_exc}"
+                )
+        if not _saved:
+            _is_real_open = (
+                not execution.is_paper
+                and execution.status in (ExecutionStatus.FILLED, ExecutionStatus.PARTIAL)
+            )
+            try:
+                await MekkaRepository.log_event(
+                    agent="NickFury",
+                    event="TRADE_SAVE_FAILED",
+                    severity="CRITICAL" if _is_real_open else "ERROR",
+                    symbol=symbol,
+                    message=f"save_trade falhou — possível posição órfã no DB: {execution.summary()}",
+                    payload={
+                        "order_id": getattr(execution, "order_id", None),
+                        "is_paper": execution.is_paper,
+                        "status": execution.status.value,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            if _is_real_open:
+                try:
+                    await self._telegram.alert(
+                        event="TRADE_SAVE_FAILED",
+                        severity="CRITICAL",
+                        agent="NickFury",
+                        message=(
+                            f"🚨 {symbol}: ordem REAL preenchida mas NÃO gravada no DB "
+                            f"(order_id={getattr(execution, 'order_id', None)}). Posição órfã — "
+                            "RECONCILIE MANUALMENTE antes do próximo ciclo (risco de entrada duplicada)."
+                        ),
+                        payload={},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
         await MekkaRepository.log_event(
             agent="IronMan",

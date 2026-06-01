@@ -290,44 +290,57 @@ def check_network(report: PreflightReport) -> None:
 
 
 def check_risk_limits(report: PreflightReport) -> None:
-    """Warn if risk limits are looser than recommended first-week mainnet values."""
+    """Gate de limites de risco conservadores para a 1ª semana de mainnet.
+
+    M5 (2026-06-01 audit): thresholds alinhados ao docs/MAINNET-AUTHORIZATION.md
+    (size ≤ 0.1%, lev ≤ 2x, ≤ 3 trades/dia) e promovidos a FAIL em mainnet+live
+    (antes eram só WARN e usavam 0.5%). O hard clamp do Batman já força 0.1%/2x;
+    o preflight agora exige coerência ANTES de operar com dinheiro real.
+    """
     try:
         s = _get_settings()
+        live = not bool(s.paper_trading)
+        try:
+            is_testnet = bool(s.exchange_is_testnet(s.active_exchange))
+        except Exception:  # noqa: BLE001
+            is_testnet = True
+        mainnet_live = live and not is_testnet
 
         issues = []
-        # Recommended first-week caps (conservative)
-        if s.max_position_size_pct > 0.005:
+        # Recommended first-week caps (conservative — per MAINNET-AUTHORIZATION).
+        if s.max_position_size_pct > 0.001:
             issues.append(
-                f"max_position_size_pct={s.max_position_size_pct:.3f} "
-                f"(recommended ≤ 0.005 = 0.5% for first week)"
+                f"max_position_size_pct={s.max_position_size_pct:.4f} "
+                f"(recomendado ≤ 0.001 = 0.1% na 1ª semana)"
             )
         if s.max_leverage > 2:
             issues.append(
-                f"max_leverage={s.max_leverage}x "
-                f"(recommended ≤ 2x for first week)"
+                f"max_leverage={s.max_leverage}x (recomendado ≤ 2x na 1ª semana)"
             )
-        if s.max_trades_per_day > 5:
+        if s.max_trades_per_day > 3:
             issues.append(
-                f"max_trades_per_day={s.max_trades_per_day} "
-                f"(recommended ≤ 5 for first week)"
+                f"max_trades_per_day={s.max_trades_per_day} (recomendado ≤ 3 na 1ª semana)"
             )
         if s.max_open_positions > 2:
             issues.append(
-                f"max_open_positions={s.max_open_positions} "
-                f"(recommended ≤ 2 for first week)"
+                f"max_open_positions={s.max_open_positions} (recomendado ≤ 2 na 1ª semana)"
             )
 
         if issues:
-            report.warn(
-                "risk_limits",
-                "Risk limits looser than first-week mainnet recommendation:\n  " + "\n  ".join(issues),
-                fix="Tighten limits in .env before going live.",
+            detail = (
+                "Limites de risco mais frouxos que a recomendação da 1ª semana:\n  "
+                + "\n  ".join(issues)
             )
+            fix = "Aperte os limites no .env antes de operar live (size 0.1%, lev 2x, 3 trades/dia)."
+            if mainnet_live:
+                report.fail("risk_limits", detail, fix=fix)
+            else:
+                report.warn("risk_limits", detail, fix=fix)
         else:
             report.ok(
                 "risk_limits",
-                f"Conservative: size={s.max_position_size_pct:.3f} "
-                f"lev={s.max_leverage}x trades/day={s.max_trades_per_day}",
+                f"Conservador: size={s.max_position_size_pct:.4f} "
+                f"lev={s.max_leverage}x trades/dia={s.max_trades_per_day}",
             )
     except Exception as exc:
         report.warn("risk_limits", f"Could not check risk limits: {exc}")

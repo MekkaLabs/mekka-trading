@@ -650,20 +650,28 @@ class IronMan(BaseAgent[ExecutionResult]):
             # routing or load_markets does not leak the underlying aiohttp
             # session — the half-initialised exchange is closed cleanly.
             try:
-                try:
-                    if exchange_id == "bybit" and settings.bybit_testnet:
+                # M3 fix (2026-06-01 audit): fail-CLOSED no roteamento de sandbox.
+                # ANTES, se set_sandbox_mode falhasse em modo testnet, o código só
+                # logava e SEGUIA — com o cliente ainda apontado para PRODUÇÃO.
+                # Uma intenção de testnet podia virar ordem real. Agora, se o
+                # sandbox era necessário e falhou, abortamos (o except externo
+                # fecha o exchange e re-levanta).
+                _need_sandbox = (
+                    (exchange_id == "bybit" and settings.bybit_testnet)
+                    or (exchange_id == "binance" and settings.binance_testnet)
+                )
+                if _need_sandbox:
+                    try:
                         exchange.set_sandbox_mode(True)
-                        self._log.warning("[IronMan/bybit] SANDBOX (testnet) mode ENABLED")
-                    elif exchange_id == "binance" and settings.binance_testnet:
-                        exchange.set_sandbox_mode(True)
-                        self._log.warning("[IronMan/binance] SANDBOX (testnet) mode ENABLED")
-                except Exception as _sbx_exc:
-                    # set_sandbox_mode is best-effort: log and continue. CCXT
-                    # raises for exchanges that don't support it, but bybit
-                    # and binance both do.
-                    self._log.error(
-                        f"[IronMan/{exchange_id}] set_sandbox_mode failed: {_sbx_exc}"
-                    )
+                        self._log.warning(
+                            f"[IronMan/{exchange_id}] SANDBOX (testnet) mode ENABLED"
+                        )
+                    except Exception as _sbx_exc:
+                        self._log.error(
+                            f"[IronMan/{exchange_id}] set_sandbox_mode FAILED — "
+                            f"abortando conexão (fail-closed, intenção=testnet): {_sbx_exc}"
+                        )
+                        raise
 
                 for attempt in range(1, 4):
                     try:
@@ -1030,6 +1038,18 @@ class IronMan(BaseAgent[ExecutionResult]):
             )
             _etype = "market"
         use_market = _etype == "market"
+        # M4 fix (2026-06-01 audit): em MAINNET+LIVE uma ordem `market` ignora o
+        # cap de slippage e pode preencher a um preço muito pior com dinheiro
+        # real. Rebaixar para limit_ioc (sempre com cap). O caminho `market` só é
+        # legítimo em testnet (book ralo) ou via Modo Deus — que já é bloqueado em
+        # mainnet pelo server. Nenhum novo flag: default seguro.
+        if use_market and not _is_testnet and not settings.paper_trading:
+            self._log.warning(
+                f"[IronMan/{exchange_id}] entrada `market` em MAINNET+LIVE rebaixada "
+                "para limit_ioc (proteção de slippage com dinheiro real)"
+            )
+            _etype = "limit_ioc"
+            use_market = False
         self._log.info(f"[IronMan/{exchange_id}] entry order type={_etype} (testnet={_is_testnet})")
 
         # Marketable limit price: a plain limit-IOC at signal.entry_price often
@@ -1704,12 +1724,46 @@ class IronMan(BaseAgent[ExecutionResult]):
         if exchange_id not in ("bybit", "binance"):
             return summary
 
-        try:
-            exchange = await self._get_ccxt_exchange(exchange_id)
-            positions = await exchange.fetch_positions()
-        except Exception as exc:  # noqa: BLE001
-            summary["errors"].append(f"connect/positions: {exc}")
-            self._log.warning(f"[IronMan/guardian] could not read positions: {exc}")
+        # M7 fix (2026-06-01 audit): retry + escalação. ANTES, uma falha em
+        # fetch_positions retornava em SILÊNCIO — em live, não conseguir ler
+        # posições significa que NÃO dá para garantir que os stops existem (risco
+        # de posição nua passar despercebida). Agora: 2 tentativas + alerta
+        # CRITICAL se ainda falhar.
+        positions = None
+        _pos_exc: Optional[Exception] = None
+        for _attempt in range(1, 3):
+            try:
+                exchange = await self._get_ccxt_exchange(exchange_id)
+                positions = await exchange.fetch_positions()
+                _pos_exc = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                _pos_exc = exc
+                self._log.warning(
+                    f"[IronMan/guardian] read positions attempt {_attempt}/2 failed: {exc}"
+                )
+                if _attempt < 2:
+                    await asyncio.sleep(float(_attempt))
+        if _pos_exc is not None or positions is None:
+            summary["errors"].append(f"connect/positions: {_pos_exc}")
+            summary["escalated"] = True
+            self._log.error(
+                f"[IronMan/guardian] could not read positions (live) — ESCALANDO: {_pos_exc}"
+            )
+            try:
+                from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+                asyncio.create_task(_TA().alert(
+                    event="GUARDIAN_POSITIONS_UNREADABLE",
+                    severity="CRITICAL",
+                    agent="IronMan",
+                    message=(
+                        f"🛡️ SL Guardian NÃO conseguiu ler posições da {exchange_id} "
+                        f"({_pos_exc}). Stops de posições abertas não puderam ser "
+                        "verificados neste ciclo — cheque conexão/clock da corretora."
+                    ),
+                ))
+            except Exception:  # noqa: BLE001
+                pass
             return summary
 
         sl_map = await self._recent_sl_map()
