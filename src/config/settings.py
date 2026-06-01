@@ -334,6 +334,15 @@ class Settings(BaseSettings):
             "Mainnet recommended: a conservative absolute floor independent of equity."
         ),
     )
+    min_equity_floor_usd: Annotated[float, Field(ge=0.0)] = Field(
+        default=0.0,
+        description=(
+            "M6 (2026-06-01 audit): piso de equity mínimo (USD). Quando > 0, o "
+            "preflight de mainnet exige que o equity real da conta esteja acima "
+            "deste valor antes de operar live (FAIL se abaixo ou ilegível). "
+            "0 = desativado. Read-only; nunca afrouxa nenhum gate."
+        ),
+    )
     # Story 066 — Trailing stop distance after TP1 scale-out
     trailing_stop_pct: Annotated[float, Field(gt=0.0, le=0.10)] = Field(
         default=0.015,

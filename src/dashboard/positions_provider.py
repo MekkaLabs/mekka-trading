@@ -745,12 +745,19 @@ async def fetch_positions(
             size = _to_float(p.size)
             # Live mark: prefer the streaming price feed, then the venue mark
             # from the snapshot, then entry (so PnL reads 0 rather than crash).
+            # M8 (2026-06-01 audit): só confiar no preço STREAMING se ele for
+            # recente. Um feed WS caído deixava um preço velho sobrepondo o mark
+            # fresco da venue (snapshot) → PnL/painel enganoso.
             snap_mark = _to_float(getattr(p, "mark_price", None))
-            mark = (
-                _to_float(prices.get(sym) or prices.get(sym.upper()))
-                or snap_mark
-                or entry
-            )
+            ws_mark = _to_float(prices.get(sym) or prices.get(sym.upper()))
+            if ws_mark > 0:
+                try:
+                    from src.services.price_feed import mark_is_fresh  # noqa: WPS433
+                    if not mark_is_fresh(sym, ttl_seconds=15.0):
+                        ws_mark = 0.0  # stale → cai para o mark da venue
+                except Exception:  # noqa: BLE001
+                    pass
+            mark = ws_mark or snap_mark or entry
 
             # Prefer a live-recomputed PnL from the streaming mark so the panel
             # updates in real time. Fall back to the snapshot's uPnL when we

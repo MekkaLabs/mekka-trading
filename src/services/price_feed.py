@@ -48,12 +48,45 @@ import abc
 import asyncio
 import json
 import logging
-from typing import Iterable
+import time
+from typing import Iterable, Optional
 
 import aiohttp
 
 from src.config.settings import settings
 from src.services.market_registry import to_bybit_wire, to_mekka
+
+# M8 (2026-06-01 audit): rastreio de frescor do feed de markPrice. ANTES, um
+# preço WS velho (feed caído) sobrepunha silenciosamente o mark fresco da venue
+# → PnL/painel enganoso. Stamp de monotonic por símbolo a cada update; os
+# consumidores checam ``mark_is_fresh`` antes de confiar no preço streaming.
+_LAST_MARK_TS: dict[str, float] = {}
+
+
+def _stamp_mark(symbol: str) -> None:
+    """Registra o instante (monotonic) do último update de mark para o símbolo."""
+    if symbol:
+        _LAST_MARK_TS[symbol] = time.monotonic()
+
+
+def mark_age_seconds(symbol: str) -> Optional[float]:
+    """Idade (s) do último mark streaming do símbolo, ou None se nunca visto."""
+    ts = _LAST_MARK_TS.get(symbol)
+    if ts is None and symbol:
+        ts = _LAST_MARK_TS.get(symbol.upper())
+    if ts is None:
+        return None
+    return max(0.0, time.monotonic() - ts)
+
+
+def mark_is_fresh(symbol: str, ttl_seconds: float = 15.0) -> bool:
+    """True se o mark streaming do símbolo é recente (≤ ttl).
+
+    Idade desconhecida (sem registro WS — ex.: paper/Hyperliquid) → tratado
+    como fresco para não quebrar caminhos que não usam o feed Binance.
+    """
+    age = mark_age_seconds(symbol)
+    return True if age is None else age <= ttl_seconds
 
 logger = logging.getLogger("mekka.price_feed")
 
@@ -318,6 +351,7 @@ class BinancePriceFeed(PriceFeedProvider):
                                         continue
                                     try:
                                         prices[coin] = float(mark)
+                                        _stamp_mark(coin)  # M8: marca frescor
                                     except (TypeError, ValueError):
                                         pass
                                 except Exception:

@@ -1781,6 +1781,27 @@ class Batman(BaseAgent[RiskApproval]):
         )
 
         # ---------------------------------------------------------------
+        # 5d. COIN-M per-symbol leverage cap (M9, 2026-06-01 audit)
+        # ANTES, clamp_leverage só rodava no dashboard (Trade Now manual). No loop
+        # automático, um leverage acima do cap COIN-M do Binance (ex.: altcoin 25x)
+        # passava direto e a corretora rejeitava a ordem. Aplicar aqui também.
+        # No-op em USDT-M (linear): clamp_leverage devolve o valor inalterado.
+        # ---------------------------------------------------------------
+        try:
+            _mt = getattr(settings, "binance_market_type", "linear")
+            if _mt == "inverse":
+                from src.services.coin_m_leverage_caps import clamp_leverage  # noqa: WPS433
+                _eff_lev, _coinm_warn = clamp_leverage(
+                    adjusted_leverage, symbol, market_type=_mt
+                )
+                if _coinm_warn and _eff_lev < adjusted_leverage:
+                    reasons.append(f"[5d] COIN-M: {_coinm_warn}")
+                    breached.append("coin_m_leverage_cap")
+                    adjusted_leverage = _eff_lev
+        except Exception as _coinm_exc:  # noqa: BLE001
+            self._log.debug("[Batman] COIN-M leverage clamp skipped: %s", _coinm_exc)
+
+        # ---------------------------------------------------------------
         # 5b. Mainnet first-week HARD CLAMP (real-money safety)
         # On Binance mainnet (live, non-testnet), clamp size/leverage DOWN to the
         # conservative first-week caps so a loose config or a large model-suggested

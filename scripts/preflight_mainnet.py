@@ -385,6 +385,69 @@ def check_daily_loss_cap(report: PreflightReport) -> None:
         report.warn("daily_loss_cap", f"Could not check daily loss cap: {exc}")
 
 
+def check_min_balance(report: PreflightReport) -> None:
+    """M6 (2026-06-01 audit): gate de saldo mínimo no preflight.
+
+    Antes, a verificação de saldo era só um checkbox HUMANO. Agora, quando
+    ``min_equity_floor_usd > 0``, o preflight LÊ o equity real da conta e FALHA
+    se estiver abaixo do piso (ou se não conseguir confirmar) em mainnet+live.
+    Em mainnet+live sem piso definido → WARN (recomenda definir). Nunca levanta.
+    """
+    import asyncio
+
+    try:
+        s = _get_settings()
+        live = not bool(s.paper_trading)
+        try:
+            is_testnet = bool(s.exchange_is_testnet(s.active_exchange))
+        except Exception:  # noqa: BLE001
+            is_testnet = True
+        mainnet_live = live and not is_testnet
+        floor = float(getattr(s, "min_equity_floor_usd", 0.0) or 0.0)
+
+        if floor <= 0:
+            if mainnet_live:
+                report.warn(
+                    "min_balance",
+                    "MIN_EQUITY_FLOOR_USD não definido — sem piso de saldo mínimo em mainnet+live.",
+                    fix="Defina MIN_EQUITY_FLOOR_USD no .env (capital mínimo aceitável).",
+                )
+            else:
+                report.ok("min_balance", "MIN_EQUITY_FLOOR_USD não definido (tolerável em paper/testnet).")
+            return
+
+        # floor > 0 → ler o equity real da conta.
+        try:
+            from src.agents.portfolio_manager import PortfolioManager
+            pm = PortfolioManager()
+            try:
+                snap = asyncio.run(pm.run())
+            except RuntimeError:
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    snap = pool.submit(asyncio.run, pm.run()).result(timeout=30)
+            equity = float(getattr(snap, "equity_usd", 0.0) or 0.0)
+            degraded = bool(getattr(snap, "is_degraded", False))
+            if degraded or equity <= 0:
+                report.warn(
+                    "min_balance",
+                    f"Não foi possível confirmar o equity (snapshot degradado). piso=${floor:,.2f}",
+                    fix="Verifique conexão/credenciais da corretora.",
+                )
+            elif equity < floor:
+                report.fail(
+                    "min_balance",
+                    f"Equity ${equity:,.2f} ABAIXO do piso MIN_EQUITY_FLOOR_USD=${floor:,.2f}.",
+                    fix="Aporte ou ajuste o piso antes de operar live.",
+                )
+            else:
+                report.ok("min_balance", f"Equity ${equity:,.2f} ≥ piso ${floor:,.2f}")
+        except Exception as exc:  # noqa: BLE001
+            report.warn("min_balance", f"Não foi possível verificar saldo: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        report.warn("min_balance", f"Could not check min balance: {exc}")
+
+
 def check_telegram(report: PreflightReport) -> None:
     try:
         s = _get_settings()
@@ -598,6 +661,7 @@ def run_preflight(strict: bool = False) -> PreflightReport:
     check_network(report)
     check_risk_limits(report)
     check_daily_loss_cap(report)
+    check_min_balance(report)
     check_telegram(report)
     check_sdk_availability(report)
     check_authorization_file(report)
