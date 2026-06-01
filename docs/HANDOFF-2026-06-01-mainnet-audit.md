@@ -2,7 +2,7 @@
 
 > Para a próxima janela. Estado completo da branch `fix/mainnet-p0-audit`.
 > Auditoria multi-agente do Mekka → veredito **NO-GO → GO-com-condições** após
-> endurecer todos os bloqueadores. 8 commits, ~38 testes novos.
+> endurecer todos os bloqueadores. 11 commits, ~48 testes novos.
 
 ---
 
@@ -10,8 +10,8 @@
 
 1. Rodou auditoria de **13 agentes** (8 dimensões + 4 pré-mortems) → relatório em
    `docs/audit/MAINNET-READINESS-AUDIT-2026-06-01.md`. Veredito inicial: **NO-GO**.
-2. **28 findings corrigidos** (todos CRITICAL/HIGH/MEDIUM) em 8 commits na branch
-   `fix/mainnet-p0-audit`. Só restam LOW (L1–L7) + 2 follow-ups.
+2. **28 findings corrigidos** (CRITICAL/HIGH/MEDIUM/LOW) em 11 commits na branch
+   `fix/mainnet-p0-audit`. Só restam 2 follow-ups maiores (H6 outbox, H7 por-trade).
 3. Também: corrigido o **edge "negativo" do backtest** (era bug de `export_signals`,
    não estratégia — Sharpe -4.58 → +6.64, mas métricas são simuladas, n pequeno).
 4. **Sem push** — push/merge é exclusivo do @devops (Gage).
@@ -40,7 +40,7 @@ Depois: `python scripts/preflight_mainnet.py --strict` → tudo verde.
 
 ---
 
-## 📦 BRANCH `fix/mainnet-p0-audit` — 8 commits
+## 📦 BRANCH `fix/mainnet-p0-audit` — 11 commits
 
 | Commit | Escopo |
 |--------|--------|
@@ -54,7 +54,6 @@ Depois: `python scripts/preflight_mainnet.py --strict` → tudo verde.
 | `61c83d3` | docs: handoff |
 | `5007f90` | L1 TTL cache snapshot / L7 reuso CCXT compartilhado |
 | `b2f9120` | L2-L6 (set_leverage fail-closed, banner paper, dedup order_id, synthetic price, SL ancorado no mark) |
-| `7b4ce30` | M6 saldo mínimo / M8 staleness feed / M9 clamp COIN-M |
 
 ---
 
@@ -105,7 +104,7 @@ Depois: `python scripts/preflight_mainnet.py --strict` → tudo verde.
 
 ---
 
-## 🧪 TESTES (novos nesta sessão, ~38)
+## 🧪 TESTES (novos nesta sessão, ~48)
 
 `test_iron_man_sl_failsafe_c1.py` · `test_iron_man_idempotency_c3_h4.py` ·
 `test_h3_drawdown_restart.py` · `test_m1_daily_loss_cap_preflight.py` ·
@@ -147,9 +146,9 @@ cat docs/audit/MAINNET-READINESS-AUDIT-2026-06-01.md
 
 Próxima sessão:
 1. Abrir este handoff + `docs/audit/MAINNET-READINESS-AUDIT-2026-06-01.md`.
-2. `git log --oneline main..fix/mainnet-p0-audit` (8 commits).
+2. `git log --oneline main..fix/mainnet-p0-audit` (11 commits).
 3. Decidir: (a) @devops revisa/mergeia a branch; (b) operador seta `.env` +
-   preflight verde; (c) opcional: fechar LOW L1–L7 + follow-ups H6/H7.
+   preflight verde; (c) opcional: follow-ups H6/H7 (outbox completo, atribuição por-trade).
 
 **Estado mental:** todos os bloqueadores de execução e risco fechados e testados.
 O sistema está **operável em mainnet sob condições** (config do operador + preflight
