@@ -734,6 +734,67 @@ class IronMan(BaseAgent[ExecutionResult]):
             )
         return True, skew_ms, "ok"
 
+    @staticmethod
+    def _deterministic_client_oid(
+        signal: Any, side: str, cycle_id: Optional[str]
+    ) -> str:
+        """ClientOrderId determinístico para idempotência de entrada (C3).
+
+        Mesma decisão (snapshot_id + symbol + side + cycle_id) → mesmo id. Como é
+        calculado UMA vez antes do loop de retry, é estável entre tentativas
+        (retry seguro: a Binance rejeita a 2ª submissão como duplicata) e único
+        entre decisões distintas. Se faltarem snapshot_id E cycle_id (identidade
+        fraca), usa um nonce único por chamada para NÃO colidir decisões reais.
+        Formato Binance: ^[A-Za-z0-9_-]{1,36}$.
+        """
+        import hashlib  # noqa: WPS433
+        import uuid  # noqa: WPS433
+
+        snap = str(getattr(signal, "snapshot_id", "") or "")
+        cyc = str(cycle_id or "")
+        if not snap and not cyc:
+            cyc = uuid.uuid4().hex
+        sym = str(getattr(signal, "symbol", "") or "")
+        seed = f"{snap}|{sym}|{side}|{cyc}"
+        return "mk_" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:28]
+
+    async def _fetch_order_by_client_oid(
+        self, exchange: Any, ccxt_symbol: str, client_oid: Optional[str]
+    ) -> Optional[dict]:
+        """Recupera uma ordem pela clientOrderId (reconciliação pós-duplicata).
+
+        Usado quando a Binance rejeita uma re-submissão como duplicata: a ordem
+        original DE FATO entrou, então buscamos por clientOrderId em vez de
+        abrir uma segunda. Retorna None se não encontrar (caller re-levanta).
+        """
+        if not client_oid:
+            return None
+        # 1) fetch_order direto via origClientOrderId (Binance suporta).
+        try:
+            o = await exchange.fetch_order(
+                None, ccxt_symbol, params={"origClientOrderId": client_oid}
+            )
+            if o:
+                return o
+        except Exception:  # noqa: BLE001
+            pass
+        # 2) Varrer ordens abertas/recentes e casar pela clientOrderId.
+        for _fname in ("fetch_open_orders", "fetch_orders"):
+            try:
+                fn = getattr(exchange, _fname, None)
+                if fn is None:
+                    continue
+                orders = await fn(ccxt_symbol)
+                for o in (orders or []):
+                    _coid = o.get("clientOrderId") or (
+                        (o.get("info") or {}).get("clientOrderId")
+                    )
+                    if _coid == client_oid:
+                        return o
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
     async def _place_ccxt_order(
         self,
         signal: Any,
@@ -998,30 +1059,74 @@ class IronMan(BaseAgent[ExecutionResult]):
                 limit_price = float(signal.entry_price)
 
         order: Any = None
+        # C3+H4 fix (2026-06-01 audit): idempotência + retry CCXT correto.
+        # ANTES: o filtro de retry usava (TimeoutError, ConnectionError) built-ins,
+        # que NÃO casam com ccxt.RequestTimeout/NetworkError (herdam de BaseError)
+        # → retry MORTO. E não havia clientOrderId; re-enviar uma ordem após
+        # timeout da RESPOSTA (a ordem chegou, mas a resposta se perdeu) DUPLICARIA
+        # a posição (2× notional, sem aprovação do Batman).
+        # AGORA: clientOrderId determinístico (mesma decisão = mesmo id, calculado
+        # UMA vez e reusado em todas as tentativas) torna o retry seguro — a Binance
+        # rejeita a 2ª submissão como duplicata e nós RECONCILIAMOS a ordem que de
+        # fato entrou, em vez de abrir uma segunda.
+        import ccxt.async_support as _ccxt  # noqa: WPS433
+        _client_oid = self._deterministic_client_oid(signal, ccxt_side, cycle_id)
+        _entry_params: dict[str, Any] = {"reduceOnly": False}
+        if _client_oid:
+            _entry_params["newClientOrderId"] = _client_oid
+        _retry_excs = (
+            _ccxt.NetworkError,
+            _ccxt.RequestTimeout,
+            _ccxt.ExchangeNotAvailable,
+            _ccxt.DDoSProtection,
+        )
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1.0, min=1, max=8),
-            retry=retry_if_exception_type((TimeoutError, ConnectionError)),
+            retry=retry_if_exception_type(_retry_excs),
             reraise=True,
         ):
             with attempt:
-                if use_market:
-                    order = await exchange.create_order(
-                        symbol=ccxt_symbol,
-                        type="market",
-                        side=ccxt_side,
-                        amount=quantity,
-                        params={"reduceOnly": False},
+                try:
+                    if use_market:
+                        order = await exchange.create_order(
+                            symbol=ccxt_symbol,
+                            type="market",
+                            side=ccxt_side,
+                            amount=quantity,
+                            params=_entry_params,
+                        )
+                    else:
+                        order = await exchange.create_order(
+                            symbol=ccxt_symbol,
+                            type="limit",
+                            side=ccxt_side,
+                            amount=quantity,
+                            price=limit_price,
+                            params={**_entry_params, "timeInForce": "IOC"},
+                        )
+                except _ccxt.InvalidOrder as _io:
+                    # Idempotência: se a Binance rejeitou por DUPLICATA, é porque
+                    # uma tentativa anterior REALMENTE entrou (só a resposta se
+                    # perdeu). Recupera a ordem existente em vez de duplicar.
+                    _io_str = str(_io).lower()
+                    _is_dup = (
+                        isinstance(_io, _ccxt.DuplicateOrderId)
+                        or "-2010" in _io_str
+                        or "duplicate" in _io_str
+                        or (bool(_client_oid) and _client_oid.lower() in _io_str)
                     )
-                else:
-                    order = await exchange.create_order(
-                        symbol=ccxt_symbol,
-                        type="limit",
-                        side=ccxt_side,
-                        amount=quantity,
-                        price=limit_price,
-                        params={"timeInForce": "IOC", "reduceOnly": False},
+                    if not _is_dup:
+                        raise
+                    self._log.warning(
+                        f"[IronMan/{exchange_id}] entrada duplicada detectada "
+                        f"(clientOrderId={_client_oid}) — reconciliando ordem existente"
                     )
+                    order = await self._fetch_order_by_client_oid(
+                        exchange, ccxt_symbol, _client_oid
+                    )
+                    if order is None:
+                        raise
 
         if order is None:
             return ExecutionResult(
