@@ -140,3 +140,91 @@ def test_proposal_shape():
     assert p.title and p.area and p.evidence
     block = p.to_telegram_block()
     assert "x" in block
+
+
+# ---------------------------------------------------------------------------
+# scan() end-to-end — RiskScanner / OpsScanner (com audit_log mockado)
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+from unittest.mock import AsyncMock, patch  # noqa: E402
+
+
+class _AuditRow:
+    """Fake AuditRecord para alimentar os scanners."""
+
+    def __init__(self, event, severity="INFO", agent="X", payload=None, message="", age_min=1):
+        from datetime import timedelta
+        self.event = event
+        self.severity = severity
+        self.agent = agent
+        self.payload = payload or {}
+        self.message = message
+        self.timestamp = datetime.now(timezone.utc) - timedelta(minutes=age_min)
+
+
+def _patch_audit(rows):
+    return patch(
+        "src.persistence.repository.MekkaRepository.list_recent_audit",
+        AsyncMock(return_value=rows),
+    )
+
+
+@pytest.mark.asyncio
+async def test_risk_scanner_flags_repeated_kill_switch():
+    from src.agents.risk_scanner import RiskScanner
+
+    rows = [
+        _AuditRow("DAILY_DRAWDOWN_KILL_SWITCH", severity="CRITICAL", agent="NickFury"),
+        _AuditRow("DAILY_LOSS_USD_KILL_SWITCH", severity="CRITICAL", agent="NickFury"),
+    ]
+    with _patch_audit(rows), \
+         patch("src.agents.batman.is_kill_switch_active", return_value=False):
+        out = await RiskScanner()._scan_kill_switch(period_days=7)
+    assert len(out) == 1
+    assert out[0].area == "risk"
+    assert "2" in out[0].title
+
+
+@pytest.mark.asyncio
+async def test_risk_scanner_single_kill_not_flagged():
+    from src.agents.risk_scanner import RiskScanner
+
+    rows = [_AuditRow("DAILY_DRAWDOWN_KILL_SWITCH", severity="CRITICAL")]
+    with _patch_audit(rows), \
+         patch("src.agents.batman.is_kill_switch_active", return_value=False):
+        out = await RiskScanner()._scan_kill_switch(period_days=7)
+    assert out == []  # 1 evento < threshold 2
+
+
+@pytest.mark.asyncio
+async def test_ops_scanner_flags_recurring_error():
+    from src.agents.ops_scanner import OpsScanner
+
+    rows = [_AuditRow("WRITE_ERROR", severity="ERROR", agent="DailyPnLWriter") for _ in range(4)]
+    with _patch_audit(rows):
+        out = await OpsScanner()._scan_audit_errors(period_days=7)
+    assert len(out) >= 1
+    assert "DailyPnLWriter" in out[0].title and "4" in out[0].title
+
+
+@pytest.mark.asyncio
+async def test_ops_scanner_below_threshold_not_flagged():
+    from src.agents.ops_scanner import OpsScanner
+
+    rows = [_AuditRow("WRITE_ERROR", severity="ERROR", agent="DailyPnLWriter") for _ in range(2)]
+    with _patch_audit(rows):
+        out = await OpsScanner()._scan_audit_errors(period_days=7)
+    assert out == []  # 2 < threshold 3
+
+
+@pytest.mark.asyncio
+async def test_scanners_fail_silent_on_empty_audit():
+    """Guard-rail: scanners são fail-silent — audit vazio → lista, sem erro."""
+    from src.agents.risk_scanner import RiskScanner
+    from src.agents.ops_scanner import OpsScanner
+
+    with _patch_audit([]), \
+         patch("src.agents.batman.is_kill_switch_active", return_value=False):
+        assert isinstance(await RiskScanner().scan(period_days=7), list)
+        assert isinstance(await OpsScanner().scan(period_days=7), list)
