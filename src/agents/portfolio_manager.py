@@ -118,7 +118,23 @@ class PortfolioManager(BaseAgent[EquitySnapshot]):
             raw_balance, raw_positions = await self._fetch_bybit_account_snapshot()
             return self._parse_bybit_rest_snapshot(raw_balance, raw_positions)
 
-        exchange = await self._connect_ccxt(exchange_id)
+        # L7 fix (2026-06-01 audit): reusar o exchange CCXT process-wide do IronMan
+        # (_CCXT_SHARED, já pré-aquecido com load_markets) em vez de construir e
+        # FECHAR um novo a cada snapshot — antes pagava load_markets (9-18s) toda
+        # vez (o motivo real da lentidão do painel). A instância é compartilhada:
+        # NÃO fechar. Fallback para cliente próprio se o cache não estiver pronto.
+        _shared = False
+        exchange = None
+        try:
+            from src.agents.iron_man import IronMan  # noqa: WPS433
+            exchange = await IronMan()._get_ccxt_exchange(exchange_id)
+            _shared = True
+        except Exception as _share_exc:  # noqa: BLE001
+            self._log.debug(
+                f"[PortfolioManager] shared CCXT indisponível, fallback próprio: {_share_exc}"
+            )
+            exchange = await self._connect_ccxt(exchange_id)
+
         try:
             balance = await exchange.fetch_balance()
             positions = await exchange.fetch_positions()
@@ -145,11 +161,14 @@ class PortfolioManager(BaseAgent[EquitySnapshot]):
                     )
             return self._parse_ccxt_snapshot(exchange_id, balance, positions)
         finally:
-            close_fn = getattr(exchange, "close", None)
-            if close_fn is not None:
-                maybe_awaitable = close_fn()
-                if hasattr(maybe_awaitable, "__await__"):
-                    await maybe_awaitable
+            # L7: só fechar se for um cliente PRÓPRIO (fallback). O exchange
+            # compartilhado do IronMan é process-wide e não deve ser fechado aqui.
+            if not _shared:
+                close_fn = getattr(exchange, "close", None)
+                if close_fn is not None:
+                    maybe_awaitable = close_fn()
+                    if hasattr(maybe_awaitable, "__await__"):
+                        await maybe_awaitable
 
     async def _connect_ccxt(self, exchange_id: str) -> Any:
         import ccxt.async_support as ccxt  # noqa: WPS433
@@ -641,6 +660,28 @@ class PortfolioManager(BaseAgent[EquitySnapshot]):
             snap = EquitySnapshot.model_validate(raw)
             if snap.source.value != settings.active_exchange.upper():
                 return None
+            # L1 fix (2026-06-01 audit): TTL + flag de staleness. ANTES, um cache
+            # arbitrariamente velho era servido como se confiável (sizing contra
+            # equity desatualizado). Agora: descarta se mais velho que o TTL
+            # (default 15min) e anota a idade no error (is_degraded fica True).
+            ttl = float(getattr(settings, "snapshot_cache_max_age_seconds", 900.0) or 900.0)
+            try:
+                from datetime import datetime, timezone  # noqa: WPS433
+                ts = getattr(snap, "timestamp", None)
+                if ts is not None:
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    age = (datetime.now(timezone.utc) - ts).total_seconds()
+                    if age > ttl:
+                        self._log.warning(
+                            f"[PortfolioManager] cache de snapshot expirado "
+                            f"({age:.0f}s > {ttl:.0f}s TTL) — descartando"
+                        )
+                        return None
+                    snap.error = f"{reason} (cache {age:.0f}s atrás)"
+                    return snap
+            except Exception:  # noqa: BLE001
+                pass
             snap.error = reason
             return snap
         except Exception:  # noqa: BLE001
