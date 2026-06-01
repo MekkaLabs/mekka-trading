@@ -1,6 +1,6 @@
 # Backtest Report — BTC
 
-**Gerado em:** 2026-06-01 15:52 UTC
+**Gerado em:** 2026-06-01 15:53 UTC
 **Período:** 2026-05-27 → 2026-05-29 (2 dias)
 
 ## Capital

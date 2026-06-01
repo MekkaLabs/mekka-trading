@@ -122,8 +122,13 @@ class BacktestOutcomeSimulator:
                 "pnl_pct": 0.0,
             })
 
-        # Sinal LONG/SHORT sem resultado real → simular
-        if trade.entry_price <= 0:
+        # Sinal LONG/SHORT sem resultado real → simular.
+        # Guard de robustez (2026-06-01): geometria de risco inválida
+        # (entry/sl/tp <= 0) não pode ser simulada. Sem isso, sl=0 fazia
+        # dist = |entry - 0| = entry → move_pct = 1.0 → perda de 100% da
+        # alocação (wipeout fantasma). Trades inválidos viram UNKNOWN e
+        # não contaminam as métricas (não contam como WIN/LOSS).
+        if trade.entry_price <= 0 or trade.stop_loss <= 0 or trade.take_profit <= 0:
             return trade.model_copy(update={"outcome": BacktestOutcome.UNKNOWN})
 
         p_win = self._compute_p_win(trade)

@@ -1050,18 +1050,37 @@ class MekkaRepository:
         result: list[dict] = []
         for s in rows:
             raw: dict = s.raw or {}
+            meta: dict = raw.get("metadata") or {}
+            # Bug-fix (2026-06-01): preferir as COLUNAS dedicadas da tabela
+            # (NOT NULL, fonte canônica) com fallback para o raw JSON. Antes
+            # lia-se apenas do raw — sinais com raw vazio (ex: seed id 1)
+            # devolviam stop_loss/take_profit/leverage=None, e o backtest
+            # tratava sl=0 como "stop a preço zero" → wipeout de -100% da
+            # alocação (avg_loss artificialmente 3× avg_win, Sharpe -4.58).
+            # Além disso a chave era 'risk_reward_ratio' enquanto o loader
+            # lê 'risk_reward' → R:R sempre 0.00 no relatório.
+            def _pick(col, *keys):
+                if col is not None and col != 0:
+                    return col
+                for k in keys:
+                    v = raw.get(k) if raw.get(k) is not None else meta.get(k)
+                    if v is not None:
+                        return v
+                return col
             result.append({
                 "id": s.id,
                 "timestamp_utc": s.timestamp.isoformat() if s.timestamp else None,
                 "symbol": s.symbol,
                 "action": s.action,
                 "confidence": s.confidence,
-                "entry_price": s.entry_price,
-                "stop_loss": raw.get("stop_loss") or (s.raw or {}).get("metadata", {}).get("stop_loss"),
-                "take_profit": raw.get("take_profit") or (s.raw or {}).get("metadata", {}).get("take_profit"),
-                "risk_reward_ratio": raw.get("risk_reward_ratio"),
-                "size_pct": raw.get("size_pct"),
-                "leverage": raw.get("leverage"),
+                "entry_price": _pick(s.entry_price, "entry_price"),
+                "stop_loss": _pick(s.stop_loss, "stop_loss"),
+                "take_profit": _pick(s.take_profit, "take_profit"),
+                "risk_reward": _pick(s.risk_reward, "risk_reward", "risk_reward_ratio"),
+                # Mantida por compat com o CSV download (Story 093)
+                "risk_reward_ratio": _pick(s.risk_reward, "risk_reward_ratio", "risk_reward"),
+                "size_pct": _pick(s.size_pct, "size_pct"),
+                "leverage": _pick(s.leverage, "leverage"),
                 "risk_verdict": raw.get("risk_verdict"),
                 "signal_quality_score": raw.get("signal_quality_score"),
             })
