@@ -299,11 +299,15 @@ class LLMClient:
         """
         async def _do_call() -> Tuple[str, int, int]:
             client = self._get_openai()
+            # Review-fix (2026-06-01): seed fixo p/ reprodutibilidade/auditabilidade
+            # das decisões de trade (best-effort — OpenAI honra seed quando possível).
+            _seed = int(getattr(settings, "openai_seed", 42) or 42)
             response = await client.chat.completions.create(
                 model=model_override or self._openai_model,
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
                 response_format={"type": "json_object"},
+                seed=_seed,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},

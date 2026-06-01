@@ -1615,10 +1615,22 @@ class Batman(BaseAgent[RiskApproval]):
         # ---------------------------------------------------------------
         # 4. Confidence and R:R quality gates
         # ---------------------------------------------------------------
-        if signal.confidence < settings.min_confidence_threshold:
+        # Review-fix (2026-06-01): consome o override de calibração do Mentor
+        # (mentor_overrides.json) COM CLAMP TIGHTEN-ONLY. Para confidence, maior =
+        # mais conservador → usamos max(override, default): nunca abaixo do default,
+        # mesmo que o arquivo (editável à mão, não-PROTECTED) tenha um valor menor.
+        # Isto religa o loop de aprendizado no runtime de trade SEM poder afrouxar.
+        _min_conf = float(settings.min_confidence_threshold)
+        try:
+            from src.services.mentor_applier import get_override as _get_ovr  # noqa: WPS433
+            _ovr = _get_ovr("min_confidence_threshold", _min_conf)
+            if _ovr is not None:
+                _min_conf = max(float(_ovr), _min_conf)  # tighten-only
+        except Exception:  # noqa: BLE001
+            pass
+        if signal.confidence < _min_conf:
             reasons.append(
-                f"Confidence {signal.confidence:.2f} < threshold "
-                f"{settings.min_confidence_threshold:.2f}"
+                f"Confidence {signal.confidence:.2f} < threshold {_min_conf:.2f}"
             )
             breached.append("min_confidence_threshold")
             return RiskApproval(

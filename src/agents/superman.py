@@ -437,10 +437,13 @@ class Superman(BaseAgent[MarketData]):
                 _use_ta = False
 
         if not _use_ta:
-            # RSI manual
+            # RSI manual — Review-fix (2026-06-01): usar suavização de WILDER
+            # (RMA, alpha=1/14), não SMA. pandas_ta.rsi usa Wilder; com SMA o RSI
+            # divergia mensuravelmente (afeta o trend e o gatilho de anomalia do
+            # Spider-Man). Agora o caminho manual ≈ pandas_ta.
             delta = df["close"].diff()
-            gain = delta.clip(lower=0).rolling(14).mean()
-            loss = (-delta.clip(upper=0)).rolling(14).mean()
+            gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+            loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
             rs = gain / loss.replace(0, float("nan"))
             df["RSI_14"] = 100 - (100 / (1 + rs))
 
@@ -462,12 +465,15 @@ class Superman(BaseAgent[MarketData]):
             df["MACDs_12_26_9"] = df["MACD_12_26_9"].ewm(span=9, adjust=False).mean()
             df["MACDh_12_26_9"] = df["MACD_12_26_9"] - df["MACDs_12_26_9"]
 
-            # ATR manual
+            # ATR manual — Review-fix (2026-06-01): WILDER (RMA, alpha=1/14), não
+            # EWM(span=14). pandas_ta.atr usa Wilder; o ATR alimenta DIRETAMENTE o
+            # regime do Thor (multiplicador de posição) → divergência mudava o
+            # sizing. Agora o caminho manual ≈ pandas_ta.
             hl = df["high"] - df["low"]
             hc = (df["high"] - df["close"].shift()).abs()
             lc = (df["low"] - df["close"].shift()).abs()
             tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
-            df["ATRr_14"] = tr.ewm(span=14, adjust=False).mean()
+            df["ATRr_14"] = tr.ewm(alpha=1 / 14, adjust=False).mean()
 
         rsi_col = "RSI_14"
 
