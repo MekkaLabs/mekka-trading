@@ -190,7 +190,11 @@ class PortfolioManager(BaseAgent[EquitySnapshot]):
 
         exchange = cls(cfg)
         try:
-            if exchange_id in ("bybit", "binance") and not settings.is_mainnet:
+            # H5 fix (2026-06-01 audit): rotear sandbox POR exchange, não por
+            # settings.is_mainnet (que só olha hyperliquid_network). Antes, um
+            # operador em Binance mainnet com hyperliquid_network=testnet lia
+            # saldo/posições da Binance TESTNET → equity fictício inflando sizing.
+            if exchange_id in ("bybit", "binance") and settings.exchange_is_testnet(exchange_id):
                 set_sandbox_mode = getattr(exchange, "set_sandbox_mode", None)
                 if callable(set_sandbox_mode):
                     set_sandbox_mode(True)

@@ -1469,6 +1469,26 @@ class Settings(BaseSettings):
     def is_mainnet(self) -> bool:
         return self.hyperliquid_network == "mainnet"
 
+    def exchange_is_testnet(self, exchange_id: str | None = None) -> bool:
+        """Resolve testnet/mainnet POR exchange (não atrelado ao Hyperliquid).
+
+        H5 fix (2026-06-01 audit): `is_mainnet` só olha `hyperliquid_network`.
+        Operador em Binance mainnet com `hyperliquid_network=testnet` (default)
+        fazia leitores de saldo/posições (PortfolioManager) cair em sandbox da
+        Binance TESTNET enquanto o IronMan executava na MAINNET → equity fictício
+        inflando sizing. Este helper é a fonte única de verdade de network por
+        exchange e deve ser usado em TODOS os clients CCXT.
+        """
+        ex = (exchange_id or self.active_exchange or "").lower()
+        if ex == "binance":
+            return bool(self.binance_testnet)
+        if ex == "bybit":
+            return bool(self.bybit_testnet)
+        if ex == "hyperliquid":
+            return self.hyperliquid_network != "mainnet"
+        # Desconhecido: conservador → assume testnet (nunca presumir mainnet).
+        return True
+
     @cached_property
     def telegram_enabled(self) -> bool:
         return bool(self.telegram_bot_token and self.telegram_chat_id)

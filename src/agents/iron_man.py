@@ -368,6 +368,13 @@ class IronMan(BaseAgent[ExecutionResult]):
                 # — IronMan honors it by forcing a market order in testnet
                 # so the IOC limit doesn't silently fill 0 (book is thin).
                 _force_execute = bool((approval.metadata or {}).get("force_execute", False))
+                # C1 fix (2026-06-01 audit): cycle_id precisa existir no escopo de
+                # _place_ccxt_order — sem isso o emergency_flatten lançava NameError
+                # justamente quando o SL falhava (posição ficava NUA). Propagado do
+                # approval.metadata quando disponível (NickFury injeta o cycle id).
+                _cycle_id = (approval.metadata or {}).get("cycle_id") or (
+                    getattr(signal, "snapshot_id", None)
+                )
                 result = await self._place_ccxt_order(
                     signal=signal,
                     quantity=quantity,
@@ -375,6 +382,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                     size_pct=size_pct,
                     exchange_id=active,
                     force_market_in_testnet=_force_execute,
+                    cycle_id=_cycle_id,
                 )
             self._log.info(result.summary())
             return result
@@ -734,6 +742,7 @@ class IronMan(BaseAgent[ExecutionResult]):
         size_pct: float,
         exchange_id: str,
         force_market_in_testnet: bool = False,
+        cycle_id: Optional[str] = None,
     ) -> ExecutionResult:
         """Place a live order via CCXT unified API (Bybit / Binance perps).
 
@@ -858,10 +867,60 @@ class IronMan(BaseAgent[ExecutionResult]):
         # BTC/ETH (settlement coin), NÃO em USDT. Hardcoded "USDT" antes
         # retornava 0 → todas ordens rejeitadas como "insufficient margin".
         # Helper resolve a chave certa baseada em market_type + symbol.
-        try:
-            bal = await exchange.fetch_balance()
+        # H2 fix (2026-06-01 audit): fail-CLOSED em live. Antes, qualquer exceção
+        # no fetch_balance (ex.: InvalidNonce -1021 conhecido) só logava warning e
+        # a ordem seguia SEM verificar saldo — com dinheiro real isso pode liquidar
+        # prematuro / rejeitar em loop. Agora: 2 tentativas com backoff; se ainda
+        # falhar e estivermos em LIVE, a ordem é REJEITADA (testnet segue tolerante
+        # para não travar os testes do operador).
+        _bal: Any = None
+        _bal_exc: Optional[Exception] = None
+        for _bal_attempt in range(1, 3):
+            try:
+                _bal = await exchange.fetch_balance()
+                _bal_exc = None
+                break
+            except Exception as _exc:  # noqa: BLE001
+                _bal_exc = _exc
+                self._log.warning(
+                    f"[IronMan/{exchange_id}] balance check attempt {_bal_attempt}/2 failed: {_exc}"
+                )
+                if _bal_attempt < 2:
+                    await asyncio.sleep(float(_bal_attempt))
+
+        if _bal_exc is not None or _bal is None:
+            if not settings.paper_trading:
+                # LIVE: nunca enviar ordem sem confirmar margem.
+                try:
+                    from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+                    asyncio.create_task(_TA().alert(
+                        event="MARGIN_CHECK_FAILED",
+                        severity="CRITICAL",
+                        agent="IronMan",
+                        symbol=symbol,
+                        message=(
+                            f"⛔ Checagem de margem falhou em {symbol} "
+                            f"({_bal_exc}) — ordem REJEITADA (fail-closed)."
+                        ),
+                    ))
+                except Exception:  # noqa: BLE001
+                    pass
+                return ExecutionResult(
+                    symbol=symbol,
+                    status=ExecutionStatus.REJECTED,
+                    is_paper=False,
+                    side="long" if is_buy else "short",
+                    error=(
+                        f"Margin check failed in live ({_bal_exc}) — "
+                        "fail-closed, order rejected."
+                    ),
+                )
+            self._log.warning(
+                f"[IronMan/{exchange_id}] balance check failed in testnet — proceeding (tolerant)"
+            )
+        else:
             balance_currency = self._balance_currency_for(exchange_id, symbol)
-            free_balance = float(bal.get(balance_currency, {}).get("free", 0) or 0)
+            free_balance = float(_bal.get(balance_currency, {}).get("free", 0) or 0)
             if self._is_inverse_for(exchange_id):
                 # Em inverse: margem requerida em coin (notional_usd / mark_price / leverage)
                 mark = signal.entry_price
@@ -882,8 +941,6 @@ class IronMan(BaseAgent[ExecutionResult]):
                         f"available {free_balance:.6f}"
                     ),
                 )
-        except Exception as _exc:
-            self._log.warning(f"[IronMan/{exchange_id}] balance check failed: {_exc}")
 
         # ── Entry order ──
         # Order type is configurable. 'auto' → market on testnet (reliable fills
@@ -1032,6 +1089,29 @@ class IronMan(BaseAgent[ExecutionResult]):
         tp_id: Optional[str] = None
         sl_side = "sell" if is_buy else "buy"
 
+        # C2 fix (2026-06-01 audit): quantizar stopPrice de SL/TP ao tickSize da
+        # corretora ANTES de enviar. Vision gera SL/TP como floats arbitrários
+        # (ex: entry*0.97); sem price_to_precision a Binance rejeita por
+        # PRICE_FILTER (-1111/-4014) — e essa rejeição é justamente o gatilho que
+        # leva ao fail-safe. Espelha o padrão já usado no SL Guardian.
+        # M2: quantizar também a quantidade (reduceOnly precisa casar o LOT_SIZE
+        # do fill; partial fill com `filled` bruto pode rejeitar por LOT_SIZE).
+        _sl_px: float = float(signal.stop_loss)
+        _tp_px: float = float(signal.take_profit)
+        _qty: float = float(filled)
+        try:
+            _sl_px = float(exchange.price_to_precision(ccxt_symbol, signal.stop_loss))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _tp_px = float(exchange.price_to_precision(ccxt_symbol, signal.take_profit))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _qty = float(exchange.amount_to_precision(ccxt_symbol, filled))
+        except Exception:  # noqa: BLE001
+            pass
+
         sl_error: Optional[Exception] = None
         for _sl_attempt in range(1, 4):
             try:
@@ -1039,9 +1119,9 @@ class IronMan(BaseAgent[ExecutionResult]):
                     symbol=ccxt_symbol,
                     type="stop_market",
                     side=sl_side,
-                    amount=filled,
+                    amount=_qty,
                     params={
-                        "stopPrice": signal.stop_loss,
+                        "stopPrice": _sl_px,
                         "reduceOnly": True,
                     },
                 )
@@ -1104,7 +1184,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                 f"flattening unprotected {symbol} position ({filled} units)"
             )
             close_ok, close_err = await self._emergency_flatten(
-                exchange, ccxt_symbol, is_buy, filled, exchange_id,
+                exchange, ccxt_symbol, is_buy, _qty, exchange_id,
                 mekka_symbol=symbol, cycle_id=cycle_id,
             )
             try:
@@ -1155,9 +1235,9 @@ class IronMan(BaseAgent[ExecutionResult]):
                 symbol=ccxt_symbol,
                 type="take_profit_market",
                 side=sl_side,
-                amount=filled,
+                amount=_qty,
                 params={
-                    "stopPrice": signal.take_profit,
+                    "stopPrice": _tp_px,
                     "reduceOnly": True,
                 },
             )

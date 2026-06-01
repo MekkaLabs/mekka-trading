@@ -616,6 +616,43 @@ class NickFury(BaseAgent[list[CycleReport]]):
             },
         )
 
+        # H1 fix (2026-06-01 audit): em LIVE, NUNCA dimensionar contra um snapshot
+        # PAPER_FALLBACK (equity sintético = paper_equity_usd, positions=[]). Isso
+        # inflaria o notional contra a conta real e cegaria os gates de exposição/
+        # concorrência. Pular o ciclo de ENTRADA (não abrir trade novo) + alertar.
+        # O monitoramento de posições já abertas roda em run_monitor_cycle (caminho
+        # separado, não afetado). CLI override de equity não cobre o loop de prod.
+        if (
+            not settings.paper_trading
+            and equity_usd is None
+            and snapshot.source == EquitySource.PAPER_FALLBACK
+        ):
+            self._log.error(
+                "[NickFury] Snapshot PAPER_FALLBACK em LIVE — ciclo de entrada "
+                f"PULADO (sizing sintético inaceitável com dinheiro real). erro={snapshot.error}"
+            )
+            await MekkaRepository.log_event(
+                agent="NickFury",
+                event="LIVE_CYCLE_SKIPPED_DEGRADED",
+                severity="CRITICAL",
+                message=f"Live entry cycle skipped: PAPER_FALLBACK / {snapshot.error}",
+            )
+            try:
+                from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+                asyncio.create_task(_TA().alert(
+                    event="LIVE_SNAPSHOT_DEGRADED",
+                    severity="CRITICAL",
+                    agent="NickFury",
+                    message=(
+                        "⛔ Snapshot de equity caiu em PAPER_FALLBACK em modo LIVE. "
+                        "Nenhum trade novo foi aberto neste ciclo. Verifique conexão/clock "
+                        "da corretora (InvalidNonce -1021?)."
+                    ),
+                ))
+            except Exception:  # noqa: BLE001
+                pass
+            return []
+
         # CLI override wins over Portfolio Manager. Otherwise use snapshot.
         effective_equity = (
             equity_usd if equity_usd is not None else snapshot.equity_usd
