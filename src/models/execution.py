@@ -22,6 +22,13 @@ class ExecutionStatus(str, Enum):
     PAPER = "PAPER"  # paper-trade simulation
     ERROR = "ERROR"
     SKIPPED = "SKIPPED"
+    # H6 outbox (2026-06-01 audit): linha gravada ANTES da ordem ir à corretora.
+    # Se o processo cair entre a ordem e a finalização, a linha PENDING sobrevive
+    # e o reaper a detecta (posição possivelmente aberta sem registro completo).
+    PENDING = "PENDING"
+    # Reaper marcou um PENDING órfão (finalização nunca ocorreu) — requer
+    # reconciliação manual / verificação na corretora.
+    ORPHAN = "ORPHAN"
 
 
 class ExecutionResult(BaseModel):

@@ -9,7 +9,7 @@ and the Telegram bot. All methods are coroutines.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import desc, func, select
@@ -167,6 +167,149 @@ class MekkaRepository:
             await session.commit()
             await session.refresh(rec)
             return rec.id
+
+    # ------------------------------------------------------------------
+    # H6 outbox — PENDING-before / finalize-after / reaper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def save_pending_trade(
+        signal_id: Optional[int],
+        symbol: str,
+        side: Optional[str],
+        quantity: float,
+        is_paper: bool,
+        cycle_id: Optional[str] = None,
+    ) -> Optional[int]:
+        """H6 outbox (2026-06-01 audit): grava uma linha PENDING ANTES de a ordem
+        ir à corretora. Se o processo cair entre a colocação da ordem e a
+        finalização, a linha PENDING sobrevive e o reaper a detecta. Retorna o id
+        (ou None se a gravação falhar — o caller degrada para save_trade)."""
+        try:
+            rec = TradeRecord(
+                signal_id=signal_id,
+                symbol=symbol,
+                status="PENDING",
+                is_paper=bool(is_paper),
+                side=side,
+                quantity=float(quantity or 0.0),
+                avg_price=0.0,
+                notional_usd=0.0,
+                raw={"outbox": True, "cycle_id": cycle_id},
+            )
+            async with get_session() as session:
+                session.add(rec)
+                await session.commit()
+                await session.refresh(rec)
+                return int(rec.id)
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    async def finalize_trade(
+        trade_id: Optional[int],
+        execution: ExecutionResult,
+        signal_id: Optional[int] = None,
+    ) -> int:
+        """H6 outbox: atualiza a linha PENDING (trade_id) com o resultado real.
+
+        Degradação segura: se trade_id é None (o save_pending falhou) ou a linha
+        sumiu, cai para save_trade (insert) — nunca perde o registro.
+        """
+        if trade_id is None:
+            return await MekkaRepository.save_trade(execution=execution, signal_id=signal_id)
+        try:
+            async with get_session() as session:
+                rec = (
+                    await session.execute(
+                        select(TradeRecord).where(TradeRecord.id == trade_id)
+                    )
+                ).scalar_one_or_none()
+                if rec is None:
+                    return await MekkaRepository.save_trade(
+                        execution=execution, signal_id=signal_id
+                    )
+                rec.timestamp = execution.timestamp
+                rec.status = execution.status.value
+                rec.side = execution.side
+                rec.quantity = execution.quantity
+                rec.avg_price = execution.avg_price
+                rec.notional_usd = execution.notional_usd
+                rec.order_id = execution.order_id
+                rec.sl_order_id = execution.sl_order_id
+                rec.tp_order_id = execution.tp_order_id
+                rec.error = execution.error
+                rec.raw = execution.model_dump(mode="json")
+                if signal_id is not None:
+                    rec.signal_id = signal_id
+                await session.commit()
+                return int(rec.id)
+        except Exception:  # noqa: BLE001
+            return await MekkaRepository.save_trade(execution=execution, signal_id=signal_id)
+
+    @staticmethod
+    async def reap_stale_pending_trades(max_age_seconds: int = 600) -> list[dict]:
+        """H6 outbox: detecta linhas PENDING órfãs (finalização nunca ocorreu —
+        processo caiu mid-execução) mais velhas que max_age, marca como ORPHAN e
+        retorna a lista para o caller alertar. Best-effort; nunca levanta."""
+        out: list[dict] = []
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+            async with get_session() as session:
+                rows = (
+                    await session.execute(
+                        select(TradeRecord).where(
+                            TradeRecord.status == "PENDING",
+                            TradeRecord.timestamp < cutoff,
+                        )
+                    )
+                ).scalars().all()
+                for r in rows:
+                    r.status = "ORPHAN"
+                    out.append({
+                        "id": r.id, "symbol": r.symbol, "side": r.side,
+                        "quantity": r.quantity, "signal_id": r.signal_id,
+                    })
+                if rows:
+                    await session.commit()
+        except Exception:  # noqa: BLE001
+            pass
+        return out
+
+    @staticmethod
+    async def attribute_realized_pnl(symbol: str, realized_pnl_usd: float) -> Optional[int]:
+        """H7 (2026-06-01 audit): atribui o realizedPnl de um close LIVE ao trade
+        de abertura mais recente do símbolo cujo pnl_usd ainda é NULL. Grava na
+        coluna pnl_usd e em raw.metadata.realized_pnl_usd (marca como fechado).
+        Best-effort; retorna o trade id atribuído (ou None)."""
+        try:
+            async with get_session() as session:
+                rec = (
+                    await session.execute(
+                        select(TradeRecord)
+                        .where(
+                            TradeRecord.symbol == symbol.upper(),
+                            TradeRecord.is_paper.is_(False),
+                            TradeRecord.status.in_(("FILLED", "PARTIAL")),
+                            TradeRecord.pnl_usd.is_(None),
+                        )
+                        .order_by(desc(TradeRecord.timestamp))
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if rec is None:
+                    return None
+                rec.pnl_usd = float(realized_pnl_usd)
+                raw = dict(rec.raw or {})
+                meta = dict(raw.get("metadata") or {})
+                meta["realized_pnl_usd"] = float(realized_pnl_usd)
+                meta["pnl_attributed_by"] = "H7_reconciler"
+                raw["metadata"] = meta
+                rec.raw = raw
+                await session.commit()
+                return int(rec.id)
+        except Exception:  # noqa: BLE001
+            return None
 
     # ------------------------------------------------------------------
     # Audit log

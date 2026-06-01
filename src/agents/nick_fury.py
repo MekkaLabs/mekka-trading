@@ -2254,27 +2254,48 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 self._log.warning("[NickFury] Trade approval gate error (skipped): %s", _appr_exc)
 
         # 4. Iron Man execution
+        # H6 outbox COMPLETO (2026-06-01 audit): grava uma linha PENDING ANTES de
+        # a ordem ir à corretora. Se o processo cair entre a colocação da ordem e
+        # o registro final, a linha PENDING sobrevive e o reaper a detecta — vs.
+        # uma posição órfã sem NENHUM registro (os gates do Batman não a contam →
+        # risco de entrada duplicada). Degradação segura: se o pending falhar
+        # (None), o finalize cai para save_trade (insert) = comportamento anterior.
+        _side_hint = (
+            "long" if signal.action == TradeAction.LONG
+            else ("short" if signal.action == TradeAction.SHORT else None)
+        )
+        _pending_id = await MekkaRepository.save_pending_trade(
+            signal_id=signal_id,
+            symbol=symbol,
+            side=_side_hint,
+            quantity=0.0,
+            is_paper=settings.paper_trading,
+            cycle_id=str(
+                (approval.metadata or {}).get("cycle_id")
+                or getattr(signal, "snapshot_id", "")
+                or ""
+            ),
+        )
+
         execution = await self._ironman.run(
             signal=signal,
             approval=approval,
             equity_usd=equity_usd,
         )
-        # H6 fix (2026-06-01 audit): se a ordem REAL preencheu mas o save_trade
-        # falha, a posição existe na corretora mas NÃO no DB → os gates do Batman
-        # (max_open_positions, count_trades_today) não a contam e o próximo ciclo
-        # pode aprovar uma ENTRADA DUPLICADA no mesmo símbolo. Antes a falha era
-        # silenciosa (sem try/except). Agora: retry + alerta CRITICAL com os dados
-        # para reconciliação manual. (Outbox completo PENDING-antes/update-depois
-        # fica como follow-up.)
+        # Finaliza a linha PENDING com o resultado real. Se a gravação falhar,
+        # retry + alerta CRITICAL anti-órfão. finalize_trade degrada para insert
+        # se o pending não existir (nunca perde o registro).
         _saved = False
         for _save_attempt in range(1, 3):
             try:
-                await MekkaRepository.save_trade(execution=execution, signal_id=signal_id)
+                await MekkaRepository.finalize_trade(
+                    _pending_id, execution=execution, signal_id=signal_id
+                )
                 _saved = True
                 break
             except Exception as _save_exc:  # noqa: BLE001
                 self._log.error(
-                    f"[NickFury] save_trade attempt {_save_attempt}/2 failed for {symbol}: {_save_exc}"
+                    f"[NickFury] finalize_trade attempt {_save_attempt}/2 failed for {symbol}: {_save_exc}"
                 )
         if not _saved:
             _is_real_open = (
@@ -2880,6 +2901,35 @@ class NickFury(BaseAgent[list[CycleReport]]):
             except Exception as _exc:  # noqa: BLE001
                 self._log.warning(f"[NickFury] live close PnL reconcile skipped: {_exc}")
 
+        # [C4d] H6 outbox reaper — detecta linhas PENDING órfãs (o processo caiu
+        # entre a ordem e a finalização). Marca como ORPHAN e alerta CRITICAL: a
+        # posição pode estar aberta na corretora sem registro completo.
+        try:
+            _orphans = await MekkaRepository.reap_stale_pending_trades(max_age_seconds=600)
+            if _orphans:
+                await MekkaRepository.log_event(
+                    agent="NickFury",
+                    event="PENDING_TRADE_ORPHANED",
+                    severity="CRITICAL",
+                    message=f"{len(_orphans)} trade(s) PENDING órfão(s) → marcados ORPHAN: {_orphans}",
+                    payload={"orphans": _orphans},
+                )
+                try:
+                    await self._telegram.alert(
+                        event="PENDING_TRADE_ORPHANED",
+                        severity="CRITICAL",
+                        agent="NickFury",
+                        message=(
+                            f"🚨 {len(_orphans)} ordem(ns) PENDING sem finalização (provável "
+                            "crash mid-execução). Verifique posições abertas na corretora vs DB."
+                        ),
+                        payload={},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as _exc:  # noqa: BLE001
+            self._log.warning(f"[NickFury] pending reaper skipped: {_exc}")
+
         # [C5] Mentor — Charles Xavier: distila resolved outcomes + rejections
         # + drawdown em ParameterSuggestion. Read-only; só audita se houver
         # sugestão (zero spam). Roda a cada monitor cycle (~5min) — leve
@@ -3020,14 +3070,30 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 realized += rpf
                 n += 1
             if n > 0:
+                # H7 atribuição por-trade (2026-06-01 audit): grava o realizedPnl
+                # no trade de abertura mais recente do símbolo (pnl_usd=NULL), não
+                # só no audit agregado. Cobre o caso comum 1-posição-por-símbolo.
+                _attributed_id = None
+                try:
+                    _attributed_id = await MekkaRepository.attribute_realized_pnl(sym, realized)
+                except Exception:  # noqa: BLE001
+                    pass
                 try:
                     await MekkaRepository.log_event(
                         agent="NickFury",
                         event="LIVE_PNL_RECONCILED",
                         severity="INFO",
                         symbol=sym,
-                        message=f"{sym}: realized PnL ${realized:+.2f} em {n} fills (brackets live)",
-                        payload={"symbol": sym, "realized_pnl_usd": round(realized, 4), "fills": n},
+                        message=(
+                            f"{sym}: realized PnL ${realized:+.2f} em {n} fills (brackets live)"
+                            + (f" → trade #{_attributed_id}" if _attributed_id else "")
+                        ),
+                        payload={
+                            "symbol": sym,
+                            "realized_pnl_usd": round(realized, 4),
+                            "fills": n,
+                            "attributed_trade_id": _attributed_id,
+                        },
                     )
                 except Exception:  # noqa: BLE001
                     pass
