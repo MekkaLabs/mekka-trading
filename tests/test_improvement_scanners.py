@@ -294,3 +294,34 @@ def test_sage_v2_evaluations_counts():
         ev = Sage().improvement_evaluations()
     assert ev["tracked"] == 4
     assert ev["counts"] == {"effective": 1, "neutral": 1, "regression": 1, "pending": 1}
+
+
+# ---------------------------------------------------------------------------
+# CodeAuditor._scan_large_files — threshold (com _SRC controlado)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_code_auditor_flags_huge_file(tmp_path):
+    from src.agents import code_auditor as ca
+
+    big = tmp_path / "monster.py"
+    big.write_text("\n".join(f"x = {i}" for i in range(ca._HUGE_FILE_LINES + 10)))
+    small = tmp_path / "ok.py"
+    small.write_text("x = 1\n")
+
+    with patch.object(ca, "_SRC", tmp_path), patch.object(ca, "_REPO_ROOT", tmp_path):
+        out = await ca.CodeAuditor()._scan_large_files()
+
+    assert any("monster.py" in p.evidence for p in out)
+    huge = [p for p in out if "monster.py" in p.evidence][0]
+    assert huge.impact == "HIGH"  # >= _HUGE_FILE_LINES
+
+
+@pytest.mark.asyncio
+async def test_code_auditor_ignores_small_files(tmp_path):
+    from src.agents import code_auditor as ca
+
+    (tmp_path / "tiny.py").write_text("x = 1\n")
+    with patch.object(ca, "_SRC", tmp_path), patch.object(ca, "_REPO_ROOT", tmp_path):
+        out = await ca.CodeAuditor()._scan_large_files()
+    assert out == []  # nada acima do limite

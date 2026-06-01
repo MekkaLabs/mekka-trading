@@ -504,17 +504,26 @@ class Batman(BaseAgent[RiskApproval]):
         0.0 (default) disables the gate. Fails open on errors.
         Emits GATE_REJECTED audit (Story 112).
         """
-        if settings.min_atr_pct > 0.0:
+        # P3 fix (2026-06-01 review): aplicar o override do preset
+        # `min_atr_pct_for_entry` (None em swing → cai p/ settings; 0.15% em
+        # scalp). Antes a chave do preset era órfã (nunca lida) e o filtro
+        # "evita range morto" do scalp não era aplicado pelo modo.
+        try:
+            from src.config.runtime_mode import get_params as _gp3q  # noqa: WPS433
+            _min_atr_3q = _gp3q().get("min_atr_pct_for_entry") or settings.min_atr_pct
+        except Exception:  # noqa: BLE001
+            _min_atr_3q = settings.min_atr_pct
+        if _min_atr_3q > 0.0:
             try:
                 from src.analytics.atr import compute_atr_pct as _atr3q  # noqa: WPS433
                 _current_atr_3q = await _atr3q(
                     symbol=symbol,
                     lookback=settings.atr_lookback_candles,
                 )
-                if _current_atr_3q is not None and _current_atr_3q < settings.min_atr_pct:
+                if _current_atr_3q is not None and _current_atr_3q < _min_atr_3q:
                     reasons.append(
                         f"[3q] Min ATR: ATR% {_current_atr_3q:.4f} < mínimo "
-                        f"{settings.min_atr_pct:.4f} — mercado parado."
+                        f"{_min_atr_3q:.4f} — mercado parado."
                     )
                     breached.append("min_atr_pct")
                     # Story 112 — audit gate rejection
@@ -1338,9 +1347,13 @@ class Batman(BaseAgent[RiskApproval]):
         # F7b (2026-05-28): hook minimalista (módulo já validado por testes).
         # ---------------------------------------------------------------
         try:
-            from src.config.runtime_mode import get_active_mode, get_params
+            # P0 fix (2026-06-01 review): a função era `get_active_mode`, que NÃO
+            # existe em runtime_mode (só `get_mode`). O ImportError era engolido
+            # pelo except genérico abaixo → os gates EXCLUSIVOS de scalp (cap
+            # horário 3s + hard-cap de idade 3t) NUNCA rodavam. Reativado.
+            from src.config.runtime_mode import get_mode, get_params
             from src.agents.batman_scalp_gates import evaluate_all_scalp_gates
-            if get_active_mode() == "scalp":
+            if get_mode() == "scalp":
                 mode_params = get_params()
                 # Lazy conversion: current_positions é list[PositionSummary]
                 pos_dicts = [
@@ -1387,13 +1400,23 @@ class Batman(BaseAgent[RiskApproval]):
                 breached_limits=[],
             )
 
+        # P1/P2 fix (2026-06-01 review): drawdown diário, trades/dia e R:R mínimo
+        # liam de `settings`, IGNORANDO o preset do modo ativo → trocar de modo
+        # NÃO ajustava esses gates de risco (falsa sensação de controle). Carrega
+        # o preset uma vez e aplica nos 3 gates (com fallback p/ settings).
+        from src.config.runtime_mode import get_params as _gp_risk
+        _mp_risk = _gp_risk()
+        _mode_max_dd = _mp_risk.get("max_daily_drawdown_pct", settings.max_daily_drawdown_pct)
+        _mode_max_trades = _mp_risk.get("max_trades_per_day", settings.max_trades_per_day)
+        _mode_min_rr = _mp_risk.get("min_risk_reward_ratio", settings.min_risk_reward_ratio)
+
         # ---------------------------------------------------------------
         # 2. Daily drawdown breaker
         # ---------------------------------------------------------------
-        if current_drawdown_pct >= settings.max_daily_drawdown_pct:
+        if current_drawdown_pct >= _mode_max_dd:
             reasons.append(
                 f"Daily drawdown {current_drawdown_pct:.2%} ≥ "
-                f"limit {settings.max_daily_drawdown_pct:.2%}"
+                f"limit {_mode_max_dd:.2%}"
             )
             breached.append("max_daily_drawdown_pct")
             return RiskApproval(
@@ -1426,10 +1449,10 @@ class Batman(BaseAgent[RiskApproval]):
                 breached_limits=breached,
             )
 
-        if trades_today >= settings.max_trades_per_day:
+        if trades_today >= _mode_max_trades:
             reasons.append(
                 f"Trades today {trades_today} ≥ "
-                f"daily cap {settings.max_trades_per_day}"
+                f"daily cap {_mode_max_trades}"
             )
             breached.append("max_trades_per_day")
             return RiskApproval(
@@ -1606,9 +1629,9 @@ class Batman(BaseAgent[RiskApproval]):
             )
 
         rr = signal.risk_reward_ratio
-        if rr < settings.min_risk_reward_ratio:
+        if rr < _mode_min_rr:
             reasons.append(
-                f"R:R {rr:.2f} < required {settings.min_risk_reward_ratio:.2f}"
+                f"R:R {rr:.2f} < required {_mode_min_rr:.2f}"
             )
             breached.append("min_risk_reward_ratio")
             return RiskApproval(
