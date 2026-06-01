@@ -201,13 +201,20 @@ class BacktestSignalLoader:
             all_signals = await MekkaRepository.export_signals(limit=10_000)
             filtered = []
             for s in all_signals:
-                ts = self._ensure_tz(s.get("timestamp"))
+                # A (2026-05-30) bug-fix: export_signals retorna a chave
+                # 'timestamp_utc', não 'timestamp'. Sem isso o loader
+                # descartava 100% dos sinais (ts=None) e o backtest dava
+                # WR=0%/PF=0/Sharpe=0 falsamente.
+                ts_raw = s.get("timestamp_utc") or s.get("timestamp")
+                ts = self._ensure_tz(ts_raw)
                 if ts is None:
                     continue
                 if ts < start_date or ts > end_date:
                     continue
                 if symbol != "*" and s.get("symbol", "").upper() != symbol.upper():
                     continue
+                # Garantir que o dict que segue tenha 'timestamp' (downstream)
+                s.setdefault("timestamp", ts_raw)
                 filtered.append(s)
             return filtered
         except Exception as exc:  # noqa: BLE001

@@ -197,7 +197,21 @@ _CLASS_USE_RE = re.compile(r'class=["\']([^"\']+)["\']')
 
 def _detect_orphan_css_classes(files: list[_StaticFile]) -> list[ImprovementProposal]:
     """Heurística simples: classes em .css que NÃO aparecem em nenhum HTML/JS.
-    False positives possíveis (classes geradas dinamicamente). Threshold alto."""
+
+    C (2026-05-30): Audit Agent C identificou ~70% de falsos positivos
+    nesta heurística porque:
+      - Não detecta template strings: `btn-${state}`
+      - Não detecta classList.add(...variableName)
+      - Não detecta className={cn(...)} composição utilitária
+      - Não detecta CSS-in-JS ou data-class attributes
+    Fixes aplicados:
+      1. Whitelist de prefixos conhecidos por uso dinâmico:
+         btn-*, state-*, mode-*, theme-*, is-*, has-*, sprite-*, agent-*
+      2. Threshold elevado para 50 (era 20) — reduz noise de runs com FP
+      3. impact=INFO (era LOW) — sinaliza "revisão", não "ação"
+    Recomendação Agent C: substituir por PurgeCSS dedicado. Esta heurística
+    fica como early warning até migrarmos.
+    """
     out: list[ImprovementProposal] = []
     defined: set[str] = set()
     used: set[str] = set()
@@ -217,21 +231,34 @@ def _detect_orphan_css_classes(files: list[_StaticFile]) -> list[ImprovementProp
             for c in defined:
                 if c in f.text:
                     used.add(c)
-    orphans = defined - used
-    if len(orphans) < 20:
+
+    # Whitelist de prefixos usados dinamicamente (sem que o regex pegue).
+    # Cada classe começando com um desses é considerada "presumed used".
+    _DYNAMIC_PREFIXES = (
+        "btn-", "state-", "mode-", "theme-", "is-", "has-",
+        "sprite-", "agent-", "icon-", "tab-", "view-",
+        "panel-", "modal-", "tooltip-", "badge-", "tag-",
+    )
+    orphans = {
+        c for c in (defined - used)
+        if not any(c.startswith(p) for p in _DYNAMIC_PREFIXES)
+    }
+    if len(orphans) < 50:  # raised threshold (was 20) — noise reduction
         return out
     out.append(ImprovementProposal(
         title=f"Frontend: ~{len(orphans)} classes CSS potencialmente órfãs",
         description=(
             f"Heurística detectou {len(orphans)} classes definidas em CSS "
-            "que não aparecem em nenhum HTML/JS. Sujeito a falsos positivos "
-            "(classes geradas dinamicamente, BEM siblings) — revisar antes "
-            "de remover."
+            "que não aparecem em nenhum HTML/JS após filtrar prefixos "
+            "dinâmicos conhecidos. ALTA chance de falsos positivos restantes "
+            "(template strings, classList.add dinâmico, data-attributes). "
+            "Recomendação: migrar para PurgeCSS dedicado em vez de revisar "
+            "manualmente."
         ),
         impact="LOW",
         area="frontend",
-        evidence=f"~{len(orphans)} classes definidas e aparentemente não-usadas",
-        suggested_story="Limpar CSS dead code (revisar antes de aplicar)",
+        evidence=f"~{len(orphans)} classes definidas, threshold ≥50, prefixos dinâmicos filtrados",
+        suggested_story="Migrar para PurgeCSS / Tailwind purge em vez de heurística regex",
     ))
     return out
 

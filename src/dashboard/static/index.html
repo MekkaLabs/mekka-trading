@@ -667,6 +667,39 @@
         <div id="memory-hub-panel"></div>
       </section>
 
+      <!-- D (2026-05-30) — Learning Hub: dashboard widget unificado que
+           consome os endpoints novos (server health, prometheus, vault,
+           implementer, mentor). Auto-monta via learning_hub.js. -->
+      <section class="panel full" id="sec-learning-hub" data-page="improvements">
+        <style>
+          #sec-learning-hub .lh-grid {
+            display: grid; grid-template-columns: repeat(2, 1fr);
+            gap: 12px; padding: 8px 12px;
+          }
+          #sec-learning-hub .lh-card {
+            background: #131821; border: 1px solid #1f2a38;
+            border-radius: 8px; padding: 12px; min-height: 80px;
+          }
+          #sec-learning-hub .lh-card h4 {
+            margin: 0 0 6px 0; font-size: 0.78rem; color: #5be8f5;
+            text-transform: uppercase; letter-spacing: 0.5px;
+          }
+          #sec-learning-hub .lh-card .lh-row {
+            display: flex; justify-content: space-between;
+            font-size: 0.78rem; padding: 2px 0;
+            color: #c8d1da;
+          }
+          #sec-learning-hub .lh-card .lh-row .lh-val { color: #9be8a4; font-weight: 600; }
+          #sec-learning-hub .lh-card .lh-row .lh-warn { color: #e89a3a; }
+          #sec-learning-hub .lh-card .lh-row .lh-bad { color: #d65a5a; }
+          #sec-learning-hub .lh-foot {
+            font-size: 0.7rem; color: #7c8b9d; text-align: right;
+            padding: 4px 12px;
+          }
+        </style>
+        <div id="learning-hub-panel"></div>
+      </section>
+
       <!-- Implementer Squad — agentes que implementam IMPs aceitas.
            Auto-monta via implementer_squad.js. Read-only display + 1 botão de ação. -->
       <section class="panel full" id="sec-implementer-squad" data-page="improvements">
@@ -1944,6 +1977,8 @@
     <script src="/static/derivatives_intel.js?v=20260526a" defer></script>
     <!-- Memory Hub — visão unificada das 6 camadas de memória -->
     <script src="/static/memory_hub.js?v=20260527a" defer></script>
+    <!-- Learning Hub — server health + Prometheus + vault + implementer -->
+    <script src="/static/learning_hub.js?v=20260530a-D" defer></script>
     <!-- Improvements v2 — stats bar + tab Paradas (Bridge) -->
     <script src="/static/improvements_v2.js?v=20260527a" defer></script>
     <script src="/static/implementer_squad.js?v=20260527a" defer></script>

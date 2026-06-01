@@ -156,6 +156,31 @@ async def run_one_cycle() -> dict[str, Any]:
     # 3. Mentor (async, mais lento)
     results["steps"].append(await run_mentor_step())
 
+    # 3.5 INV-14 (2026-05-30) — Mentor auto-apply.
+    # Lê o inbox que o Mentor acabou de popular e aplica em overrides.json
+    # se MENTOR_AUTO_APPLY_ENABLED=true. Fail-silent.
+    try:
+        from src.services.mentor_applier import apply_inbox, is_enabled as _ma_enabled
+        if _ma_enabled():
+            apply_result = apply_inbox(dry_run=False)
+            results["steps"].append({
+                "step": "mentor_applier",
+                "ok": True,
+                "applied_count": len(apply_result.get("applied", [])),
+                "skipped_count": len(apply_result.get("skipped", [])),
+            })
+        else:
+            results["steps"].append({
+                "step": "mentor_applier",
+                "ok": True,
+                "note": "disabled (set MENTOR_AUTO_APPLY_ENABLED=true)",
+            })
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[auto_learning] mentor_applier step failed: {exc}")
+        results["steps"].append({
+            "step": "mentor_applier", "ok": False, "error": str(exc),
+        })
+
     # 4. Cable vault (síncrono)
     results["steps"].append(run_cable_vault_step())
 

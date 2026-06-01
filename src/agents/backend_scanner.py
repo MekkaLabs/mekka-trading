@@ -148,12 +148,18 @@ _LAZY_IMPORT_RE = re.compile(
 
 def _detect_lazy_imports(files: list[_BackendFile]) -> list[ImprovementProposal]:
     """Lazy imports dentro de funções/métodos são sinal de import cycle não
-    resolvido. Não é erro per se, mas indica débito arquitetural."""
+    resolvido. Não é erro per se, mas indica débito arquitetural.
+
+    C (2026-05-30): threshold de 4 → 8. Audit Agent C identificou que
+    threshold baixo gerava noise — lazy imports SÃO INTENCIONAIS em vários
+    casos (circular deps, cold-start, feature gates). Mantemos só os
+    arquivos com volume excepcional que indicam real débito.
+    """
     out: list[ImprovementProposal] = []
     offenders: list[tuple[str, int]] = []
     for f in files:
         count = len(_LAZY_IMPORT_RE.findall(f.text))
-        if count >= 4:  # noise threshold
+        if count >= 8:  # raised from 4 (noise reduction)
             offenders.append((f.rel, count))
     if not offenders:
         return out
@@ -163,12 +169,14 @@ def _detect_lazy_imports(files: list[_BackendFile]) -> list[ImprovementProposal]
         title=f"Backend: {len(offenders)} arquivos com lazy imports excessivos",
         description=(
             "Lazy imports dentro de funções (`from src... import` indentado) "
-            "geralmente indicam ciclo de import não-resolvido. "
+            "podem indicar ciclo de import não-resolvido. Threshold ≥8 evita "
+            "falsos positivos (lazy é intencional em vários padrões: circular "
+            "deps, cold-start optimization, feature gates). "
             f"Top offenders: {sample}. Vale revisar dependências."
         ),
         impact="LOW",
         area="backend",
-        evidence=f"{len(offenders)} arquivos com >=4 lazy imports",
+        evidence=f"{len(offenders)} arquivos com >=8 lazy imports",
         suggested_story="Resolver ciclos de import em services",
     ))
     return out
