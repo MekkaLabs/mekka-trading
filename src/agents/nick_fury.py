@@ -2179,7 +2179,13 @@ class NickFury(BaseAgent[list[CycleReport]]):
         # Request operator confirmation via Telegram before IronMan executes.
         # Story 127 adds LangGraph interrupt() path when lg_thread_id is set.
         # Falls open: any non-BaseException error skips the gate and proceeds.
-        if settings.telegram_trade_approval_enabled:
+        #
+        # Operation Mode (2026-06-01): o gate humano é dirigido por
+        # operation_mode — manual exige confirmação, automatic auto-executa.
+        # Os gates de risco do Batman/kill-switch já rodaram acima e seguem
+        # valendo em ambos os modos; aqui removemos apenas a camada HUMANA.
+        from src.config.operation_mode import requires_trade_approval  # noqa: WPS433
+        if requires_trade_approval():
             try:
                 import uuid as _uuid  # noqa: WPS433
                 _trade_id = f"T-{_uuid.uuid4().hex[:10].upper()}"
@@ -2252,6 +2258,13 @@ class NickFury(BaseAgent[list[CycleReport]]):
             except Exception as _appr_exc:  # noqa: BLE001
                 # Note: NodeInterrupt inherits from BaseException — NOT caught here.
                 self._log.warning("[NickFury] Trade approval gate error (skipped): %s", _appr_exc)
+        else:
+            # Modo automatic: sem gate humano. Os gates de risco do Batman/
+            # kill-switch já aprovaram acima. Log para auditoria/observabilidade.
+            self._log.info(
+                "[NickFury] AUTO mode — trade %s %s auto-aprovado (sem gate humano)",
+                signal.action.value, symbol,
+            )
 
         # 4. Iron Man execution
         # H6 outbox COMPLETO (2026-06-01 audit): grava uma linha PENDING ANTES de

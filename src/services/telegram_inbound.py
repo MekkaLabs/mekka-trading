@@ -74,7 +74,10 @@ _HELP_TEXT = (
     "/positions  — posições abertas\n"
     "/perf [N]   — relatório Deadpool (N dias, padrão: 30)\n"
     "/gates      — status gates H1–H6 mainnet\n"
-    "/mode [X]   — mostra ou muda modo (conservative/balanced/aggressive)\n"
+    "/mode [X]   — mostra ou muda modo de trading (conservative/balanced/aggressive)\n"
+    "/opmode [X] — modo de operação: manual (você aprova) ou automatic (sistema sozinho)\n"
+    "/manual     — atalho: operador aprova trades e melhorias\n"
+    "/auto       — atalho: sistema aprova sozinho (gates de risco seguem ativos)\n"
     "/report     — envia relatório diário agora (Slack + Telegram)\n"
     "/ping       — testa conexão e exibe status do bot\n"
     "/risk       — painel de risco ao vivo (exposure, PnL, cooldowns, blacklist, ATR)\n"
@@ -248,6 +251,9 @@ class TelegramInboundPoller:
             "/perf": self._cmd_perf,
             "/gates": self._cmd_gates,
             "/mode": self._cmd_mode,
+            "/opmode": self._cmd_opmode,       # Operation Mode (manual/automatic)
+            "/manual": self._cmd_opmode_manual,
+            "/auto": self._cmd_opmode_auto,
             "/report": self._cmd_report,
             "/ping": self._cmd_ping,
             "/risk": self._cmd_risk,
@@ -273,7 +279,7 @@ class TelegramInboundPoller:
         handler = handlers.get(command)
         if handler is None:
             reply = await self._cmd_help()
-        elif command in ("/pnl", "/perf", "/mode", "/leaderboard", "/stats", "/unblacklist", "/dryrun", "/aprovar", "/reprovar"):
+        elif command in ("/pnl", "/perf", "/mode", "/opmode", "/leaderboard", "/stats", "/unblacklist", "/dryrun", "/aprovar", "/reprovar"):
             reply = await handler(args)  # type: ignore[call-arg]
         else:
             reply = await handler()  # type: ignore[call-arg]
@@ -306,9 +312,17 @@ class TelegramInboundPoller:
         else:
             ks_str = "🟢 clear"
 
+        try:
+            from src.config.operation_mode import get_operation_mode
+            _op = get_operation_mode()
+            op_str = "🤖 AUTOMÁTICO" if _op == "automatic" else "🙋 MANUAL"
+        except Exception:  # noqa: BLE001
+            op_str = "?"
+
         return (
             f"📊 Mekka Trading — Status\n"
             f"Mode    : {settings.mode_label}\n"
+            f"Operação: {op_str}\n"
             f"Network : {settings.hyperliquid_network.upper()}\n"
             f"Kill sw : {ks_str}\n"
             f"Positions: {positions_count}\n"
@@ -652,6 +666,63 @@ class TelegramInboundPoller:
             )
         except Exception as exc:
             return f"⚠️ Erro ao mudar modo: {exc}"
+
+    @staticmethod
+    def _opmode_status_text(mode: str) -> str:
+        """Renderiza o status do modo de operação."""
+        if mode == "automatic":
+            return (
+                "🤖 Modo de operação: AUTOMÁTICO\n"
+                "O sistema aprova trades e melhorias sozinho.\n\n"
+                "• Trades: auto-executam após os gates do Batman\n"
+                "• Melhorias: auto-aplicam (apenas tighten — nunca afrouxam risco)\n"
+                "• Gates de risco/kill-switch/double-gate: SEGUEM ATIVOS\n\n"
+                "Use /manual para voltar a aprovar você mesmo."
+            )
+        return (
+            "🙋 Modo de operação: MANUAL\n"
+            "Você aprova cada trade e cada melhoria via Telegram.\n\n"
+            "• Trades: pedem sua confirmação antes do IronMan executar\n"
+            "• Melhorias: ficam na fila aguardando sua aprovação\n\n"
+            "Use /auto para o sistema operar sozinho."
+        )
+
+    async def _cmd_opmode(self, args: list[str]) -> str:
+        """
+        /opmode            — mostra o modo de operação atual
+        /opmode manual     — você aprova trades e melhorias
+        /opmode automatic  — o sistema aprova sozinho
+        """
+        from src.config.operation_mode import (
+            VALID_OPERATION_MODES,
+            get_operation_mode,
+            set_operation_mode,
+        )
+
+        if not args:
+            return self._opmode_status_text(get_operation_mode())
+
+        target = args[0].lower()
+        if target in ("auto",):
+            target = "automatic"
+        if target not in VALID_OPERATION_MODES:
+            return (
+                f"❌ Modo de operação '{target}' desconhecido.\n"
+                f"Válidos: {', '.join(VALID_OPERATION_MODES)} (ou /manual, /auto)"
+            )
+        try:
+            new_mode = set_operation_mode(target)
+            return "✅ " + self._opmode_status_text(new_mode)
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ Erro ao mudar modo de operação: {exc}"
+
+    async def _cmd_opmode_manual(self) -> str:
+        """/manual — atalho para o modo de operação manual."""
+        return await self._cmd_opmode(["manual"])
+
+    async def _cmd_opmode_auto(self) -> str:
+        """/auto — atalho para o modo de operação automático."""
+        return await self._cmd_opmode(["automatic"])
 
     async def _cmd_ping(self) -> str:
         """

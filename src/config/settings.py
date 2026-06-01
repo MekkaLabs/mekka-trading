@@ -393,13 +393,36 @@ class Settings(BaseSettings):
         le=1.0,
         description="Floor for ATR size multiplier — never reduces size below this fraction.",
     )
+    # Modo de Operação — switch RAIZ (manual vs automatic)
+    # Governa quem aprova trades E melhorias. Ver src/config/operation_mode.py.
+    #   manual    → operador aprova cada trade e cada melhoria via Telegram
+    #   automatic → sistema aprova sozinho (gates de risco/kill-switch seguem ativos)
+    # Default 'manual' = seguro (operador no comando). O modo pode ser trocado
+    # em runtime via Telegram (/opmode) sem reiniciar — override em
+    # data/operation_mode.json tem precedência sobre este default.
+    operation_mode: Literal["manual", "automatic"] = Field(
+        default="manual",
+        description=(
+            "Root operation mode. 'manual' = operator approves every trade AND "
+            "improvement via Telegram. 'automatic' = system approves autonomously "
+            "(deterministic safety gates — double-gate, Batman, kill-switch, "
+            "daily-loss, tighten-only clamp — still apply). Default 'manual'."
+        ),
+    )
+
     # Story 074 — Telegram Trade Approval
+    # NB (2026-06-01): o LIGA/DESLIGA do gate de trade agora é derivado de
+    # operation_mode (manual=gate ON, automatic=gate OFF) via
+    # operation_mode.requires_trade_approval(). Este campo NÃO liga/desliga
+    # mais o gate — fica para compatibilidade de .env e para o timeout
+    # (telegram_trade_approval_timeout_s) usado quando o gate ESTÁ ativo.
     telegram_trade_approval_enabled: bool = Field(
         default=True,
         description=(
-            "If True, Batman-approved trades are sent to Telegram for operator confirmation "
-            "before IronMan executes. In paper mode, auto-approves on timeout. "
-            "In live mode, auto-rejects on timeout (safety-first)."
+            "SUPERSEDED by operation_mode (manual=gate ON, automatic=gate OFF). "
+            "Kept for .env back-compat; no longer toggles the trade-approval gate. "
+            "When the gate is active (manual mode), paper auto-approves on timeout "
+            "and live auto-rejects on timeout (safety-first)."
         ),
     )
     telegram_trade_approval_timeout_s: int = Field(

@@ -72,7 +72,7 @@ Vision recebe `MarketAnalysis` consolidado com todos os dados de Layer 1.
 | **IronMan** | `ironman.py` | Executor — envia ordens para Hyperliquid |
 | **Cyclops** | `cyclops.py` | Monitor de posições abertas — stop loss, take profit |
 
-Fluxo obrigatório: `Batman.approve()` → (Telegram approval se habilitado) → `IronMan.execute()`
+Fluxo obrigatório: `Batman.approve()` → (Telegram approval se `OPERATION_MODE=manual`) → `IronMan.execute()`
 
 ### Orquestração
 
@@ -182,9 +182,25 @@ ANTHROPIC_MODEL=claude-sonnet-4-6
 ```env
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
-TELEGRAM_TRADE_APPROVAL_ENABLED=true  # Batman-approved trades precisam de confirmação
+TELEGRAM_TRADE_APPROVAL_ENABLED=true  # SUPERSEDED por OPERATION_MODE (compat .env)
 TELEGRAM_INBOUND_ENABLED=false        # comandos via Telegram (desabilitado por default)
 ```
+
+### Modo de Operação (switch raiz de aprovação)
+```env
+OPERATION_MODE=manual   # manual | automatic — default: manual (seguro)
+```
+
+| Modo | Trades | Melhorias | Gates de risco |
+|------|--------|-----------|----------------|
+| **manual** (default) | operador aprova via Telegram | operador aprova | ✅ ativos |
+| **automatic** | auto-executam | auto-aplicam (tighten-only) | ✅ ativos |
+
+- **Fonte da verdade:** `src/config/operation_mode.py`. Default vem de `OPERATION_MODE` no `.env`; override em runtime persistido em `data/operation_mode.json`.
+- **Troca em runtime sem reiniciar:** Telegram `/opmode`, `/manual`, `/auto` (entra em vigor no próximo ciclo).
+- **Invariante de segurança:** `automatic` remove apenas o gate HUMANO. O double-gate, os gates do Batman, o kill-switch, o daily-loss e o clamp tighten-only do auto-apply continuam valendo — `automatic` **NUNCA** afrouxa risco automaticamente.
+- **Consumidores:** gate de trade em `nick_fury.py` (`requires_trade_approval()`), `mentor_applier.is_enabled()`, `implementer/worker` (`worker_is_enabled`/`worker_should_apply`).
+- **Preflight:** `automatic` + mainnet+live emite WARN bem visível (auto-trade com dinheiro real é decisão deliberada).
 
 ---
 

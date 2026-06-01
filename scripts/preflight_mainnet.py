@@ -385,6 +385,53 @@ def check_daily_loss_cap(report: PreflightReport) -> None:
         report.warn("daily_loss_cap", f"Could not check daily loss cap: {exc}")
 
 
+def check_operation_mode(report: PreflightReport) -> None:
+    """Modo de operação (manual/automatic) — switch raiz de aprovação.
+
+    Em MAINNET+LIVE, o modo 'automatic' significa que o sistema executa trades
+    com dinheiro REAL sem confirmação humana (os gates de risco do Batman/
+    kill-switch/daily-loss seguem ativos, mas não há gate humano). Isso é uma
+    decisão deliberada — em mainnet+live levantamos um WARN bem visível para
+    que o operador confirme que é intencional. Em manual, ou em paper/testnet,
+    é só informativo (PASS).
+    """
+    try:
+        s = _get_settings()
+        try:
+            from src.config.operation_mode import get_operation_mode
+            mode = get_operation_mode()
+        except Exception:  # noqa: BLE001
+            mode = str(getattr(s, "operation_mode", "manual"))
+
+        live = not bool(s.paper_trading)
+        try:
+            is_testnet = bool(s.exchange_is_testnet(s.active_exchange))
+        except Exception:  # noqa: BLE001
+            is_testnet = True
+        mainnet_live = live and not is_testnet
+
+        if mode == "automatic" and mainnet_live:
+            report.warn(
+                "operation_mode",
+                "OPERATION_MODE=automatic em MAINNET+LIVE — trades com dinheiro real "
+                "auto-executam SEM confirmação humana (gates de risco seguem ativos).",
+                fix="Confirme que é intencional. Para aprovar cada trade você mesmo, "
+                    "use OPERATION_MODE=manual (ou /manual no Telegram).",
+            )
+        elif mode == "automatic":
+            report.ok(
+                "operation_mode",
+                "OPERATION_MODE=automatic (sistema aprova sozinho) — seguro em paper/testnet.",
+            )
+        else:
+            report.ok(
+                "operation_mode",
+                "OPERATION_MODE=manual (operador aprova trades e melhorias via Telegram).",
+            )
+    except Exception as exc:  # noqa: BLE001
+        report.warn("operation_mode", f"Could not check operation mode: {exc}")
+
+
 def check_min_balance(report: PreflightReport) -> None:
     """M6 (2026-06-01 audit): gate de saldo mínimo no preflight.
 
@@ -661,6 +708,7 @@ def run_preflight(strict: bool = False) -> PreflightReport:
     check_network(report)
     check_risk_limits(report)
     check_daily_loss_cap(report)
+    check_operation_mode(report)
     check_min_balance(report)
     check_telegram(report)
     check_sdk_availability(report)
