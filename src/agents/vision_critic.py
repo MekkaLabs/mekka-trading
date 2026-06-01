@@ -213,8 +213,14 @@ class VisionCritic(BaseAgent[VisionCritique]):
         except Exception:  # noqa: BLE001
             _min_disagreement = settings.vision_critic_min_disagreement
 
+        # Review-fix (2026-06-01): NÃO rebaixar REJECT por threshold de
+        # disagreement. REJECT é veto de SEGURANÇA; rebaixá-lo a ENDORSE por delta
+        # pequeno deixava passar um sinal arriscado. Só AMEND (ajuste de size/lev)
+        # está sujeito ao floor. E não re-chamar _get_mode_params() na string (ele
+        # pode estar fora de escopo se o try acima caiu no except → NameError →
+        # critique virava ENDORSE silenciosamente).
         if (
-            critique.action != CritiqueAction.ENDORSE
+            critique.action == CritiqueAction.AMEND
             and critique.confidence_delta < _min_disagreement
         ):
             critique.action = CritiqueAction.ENDORSE
@@ -224,8 +230,7 @@ class VisionCritic(BaseAgent[VisionCritique]):
             critique.amended_take_profit = None
             critique.reasoning = (
                 f"{critique.reasoning} (downgraded to ENDORSE: delta "
-                f"{critique.confidence_delta:.2f} < threshold "
-                f"{_min_disagreement:.2f} [{_get_mode_params().get('label', '?')}])"
+                f"{critique.confidence_delta:.2f} < threshold {_min_disagreement:.2f})"
             )
 
         self._log.info(critique.summary())

@@ -129,8 +129,19 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
                 onchain_data=onchain,
             )
         except Exception as exc:  # noqa: BLE001
-            self._log.warning(f"[ProfessorX] SpiderMan skipped: {exc}")
-            anomaly = None
+            # Review-fix (2026-06-01): FAIL-SAFE. Antes, falha do Spider-Man
+            # virava anomaly=None → is_safe_to_trade=True (fail-OPEN: o detector
+            # de anomalia, cujo trabalho é PAUSAR, quando quebra LIBERAVA o trade).
+            # Agora sintetiza um relatório com should_pause=True: sem o detector
+            # de anomalia funcionando, não operamos com dinheiro real.
+            self._log.error(f"[ProfessorX] SpiderMan FALHOU — pausando por segurança: {exc}")
+            from src.models.market_data import AnomalyReport, AnomalySeverity  # noqa: WPS433
+            anomaly = AnomalyReport(
+                symbol=symbol,
+                anomalies_detected=[f"SpiderMan unavailable: {exc}"],
+                severity=AnomalySeverity.HIGH,
+                should_pause=True,
+            )
 
         # Fase 2.4 — Qualidade mínima da análise.
         # Mapeia quantas fontes Layer 1 efetivamente respondem (chart é hard-required).

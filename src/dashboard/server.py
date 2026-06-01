@@ -587,7 +587,7 @@ class MekkaDashboardServer:
         r.add_get("/api/prometheus/snapshot", self._handle_prometheus_snapshot)
         r.add_get("/api/server/health", self._handle_server_health)
         r.add_get("/api/implementer/status", self._handle_implementer_status)
-        r.add_post("/api/implementer/run-once", self._handle_implementer_run_once)
+        # (rota /api/implementer/run-once já registrada acima — duplicata removida no review 2026-06-01)
         r.add_post("/api/decision-memory/janitor", self._handle_decision_janitor)
         # P1-3 — pre-flight check pra troca de Binance market_type (linear↔inverse)
         r.add_get("/api/binance-market-type/check-swap", self._handle_check_swap_safe)
@@ -7262,11 +7262,17 @@ class MekkaDashboardServer:
             return web.json_response({"ok": False, "error": str(exc)}, status=200)
 
     async def _handle_implementer_run_once(self, request: web.Request) -> web.Response:
-        """POST /api/implementer/run-once — dispara worker manual (1 batch)."""
+        """POST /api/implementer/run-once — dispara worker manual (1 batch).
+
+        Body opcional: {max|max_imps: int, dry_run: bool}. Review-fix (2026-06-01):
+        dry_run default = TRUE (seguro). Antes era False → uma chamada sem corpo
+        APLICAVA e commitava código local por default, fora dos gates do worker.
+        Para aplicar de verdade, o operador passa dry_run=false explicitamente.
+        """
         try:
             body = await self._safe_json_body(request) or {}
-            max_imps = int(body.get("max", 3))
-            dry_run = bool(body.get("dry_run", False))
+            max_imps = int(body.get("max", body.get("max_imps", 3)))
+            dry_run = bool(body.get("dry_run", True))
             import asyncio as _asyncio
             from src.services.implementer.worker import run_once
             result = await _asyncio.to_thread(run_once, max_imps, dry_run)
@@ -7538,20 +7544,8 @@ class MekkaDashboardServer:
         except Exception as exc:  # noqa: BLE001
             return web.json_response({"error": str(exc)}, status=200)
 
-    async def _handle_implementer_run_once(self, request: web.Request) -> web.Response:
-        """POST /api/implementer/run-once — dispara cycle manual.
-        Body opcional: {max_imps: int, dry_run: bool}."""
-        try:
-            body = {}
-            if request.can_read_body:
-                body = await request.json() or {}
-            max_imps = int(body.get("max_imps", 3))
-            dry_run = bool(body.get("dry_run", True))
-            from src.services.implementer.worker import run_once
-            result = run_once(max_imps=max_imps, dry_run=dry_run)
-            return web.json_response(result, status=200)
-        except Exception as exc:  # noqa: BLE001
-            return web.json_response({"error": str(exc)}, status=200)
+    # (handler duplicado _handle_implementer_run_once removido no review 2026-06-01
+    #  — a definição canônica acima sobrevivia por ordem de definição; consolidado)
 
     async def _handle_decision_janitor(self, request: web.Request) -> web.Response:
         """POST /api/decision-memory/janitor — MEM-AUDIT-3 (2026-05-29).
