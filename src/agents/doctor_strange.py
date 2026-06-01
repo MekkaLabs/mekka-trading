@@ -141,9 +141,15 @@ class DoctorStrange(BaseAgent[SentimentData]):
         else:
             composite = 0.0
 
+        # Review-fix (2026-06-01): se NENHUMA fonte respondeu (parts vazio),
+        # score=0.0 não distingue 'neutro real' de 'não consegui medir' →
+        # data_available=False (ProfessorX conta como fonte ausente).
+        _has_data = len(parts) > 0
+
         self._log.info(
             f"[DoctorStrange] {symbol} score={composite:+.3f} "
-            f"fg={fear_greed} dom={btc_dom} headlines={len(headlines)}"
+            f"fg={fear_greed} dom={btc_dom} headlines={len(headlines)} "
+            f"data_available={_has_data}"
         )
 
         return SentimentData(
@@ -153,4 +159,5 @@ class DoctorStrange(BaseAgent[SentimentData]):
             fear_greed_index=fear_greed,
             btc_dominance=btc_dom,
             headlines=headlines,
+            data_available=_has_data,
         )

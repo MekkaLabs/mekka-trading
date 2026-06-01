@@ -147,13 +147,19 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
         # Mapeia quantas fontes Layer 1 efetivamente respondem (chart é hard-required).
         # Se chegamos com poucas fontes além de chart, marcamos `degraded=True`
         # para que Vision/Batman sejam mais conservadores.
+        # Review-fix (2026-06-01): uma fonte PRESENTE mas SEM DADOS (sentiment
+        # score=0 de falha, onchain NEUTRAL de fetch vazio, liquidity de book
+        # indisponível) não deve contar como fonte saudável. Checa data_available.
+        def _has(x) -> bool:
+            return x is not None and bool(getattr(x, "data_available", True))
+
         _sources_present: dict[str, bool] = {
             "chart": chart is not None,
             "confirmation_chart": confirmation_chart is not None,
-            "sentiment": sentiment is not None,
-            "onchain": onchain is not None,
+            "sentiment": _has(sentiment),
+            "onchain": _has(onchain),
             "volatility": volatility is not None,
-            "liquidity": liquidity is not None,
+            "liquidity": _has(liquidity),
             "anomaly": anomaly is not None,
             "momentum": momentum is not None,
         }
@@ -270,10 +276,15 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
             }
             verdict = await moderator.run(context=context, symbol=symbol)
 
-            # Log assíncrono (fire-and-forget)
-            asyncio.create_task(
-                DebateVerdictLogger().log(verdict, symbol=symbol)
-            )
+            # Log assíncrono — Review-fix (2026-06-01): reter a referência (set
+            # de instância) + discard no done. Sem isso, o GC podia coletar a task
+            # antes de completar ("Task was destroyed but it is pending") e o log
+            # do veredito se perdia silenciosamente.
+            if not hasattr(self, "_bg_tasks"):
+                self._bg_tasks = set()
+            _t = asyncio.create_task(DebateVerdictLogger().log(verdict, symbol=symbol))
+            self._bg_tasks.add(_t)
+            _t.add_done_callback(self._bg_tasks.discard)
             return verdict
         except Exception as exc:
             self._log.warning(f"[ProfessorX] debate skipped: {exc}")

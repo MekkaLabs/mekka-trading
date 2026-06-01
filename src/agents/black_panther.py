@@ -160,9 +160,15 @@ class BlackPanther(BaseAgent[OnchainData]):
         else:
             signal = WhaleSignal.DISTRIBUTION
 
+        # Review-fix (2026-06-01): distingue 'sem dados' de 'neutro real'. Se nem
+        # funding nem trades vieram, o agente não mediu nada → data_available=False
+        # (ProfessorX conta como fonte ausente em vez de 'mercado calmo').
+        _has_data = (funding_rate is not None) or (abs(large_buys) + abs(large_sells) > 0)
+
         self._log.info(
             f"[BlackPanther] {symbol} | funding={funding_rate} OI={open_interest} "
-            f"buys=${large_buys:,.0f} sells=${large_sells:,.0f} signal={signal.value}"
+            f"buys=${large_buys:,.0f} sells=${large_sells:,.0f} signal={signal.value} "
+            f"data_available={_has_data}"
         )
 
         return OnchainData(
@@ -176,4 +182,5 @@ class BlackPanther(BaseAgent[OnchainData]):
             open_interest=open_interest,
             long_liquidations_24h=None,   # requires premium data feed
             short_liquidations_24h=None,
+            data_available=_has_data,
         )

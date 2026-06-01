@@ -81,8 +81,6 @@ class BaseAgent(ABC, Generic[T]):
 
     # Last measured runtime in milliseconds — useful for introspection,
     # dashboards, and adaptive timeout tuning. Reset on every run() call.
-    _last_elapsed_ms: float = 0.0
-
     def __init__(
         self,
         codename: str,
@@ -92,6 +90,9 @@ class BaseAgent(ABC, Generic[T]):
         self.codename = codename
         self.role = role
         self.timeout_s = timeout_s
+        # Review-fix (2026-06-01): instância, não atributo de classe — evita que
+        # todas as instâncias compartilhem o mesmo 0.0 antes do 1º run().
+        self._last_elapsed_ms: float = 0.0
         self._log = logger.bind(agent=codename)
 
     async def run(self, *args: Any, **kwargs: Any) -> T:

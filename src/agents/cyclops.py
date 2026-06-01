@@ -172,8 +172,18 @@ class Cyclops:
                 if tp is not None:
                     tp_values.append(tp)
 
-            if not sl_values and not tp_values:
-                continue  # no SL/TP defined for this position — skip
+            # Review-fix (2026-06-01): NÃO pular uma posição sem SL/TP se o
+            # time-stop (scalp) estiver ativo — antes o `continue` impedia que o
+            # bloco de idade (mais abaixo) rodasse, então posição sem SL/TP nunca
+            # expirava, contrariando a intenção do scalp. sl_trigger/tp_trigger
+            # ficam None (todos os blocos de SL/TP já guardam `if ... and`).
+            try:
+                from src.config.runtime_mode import get_params as _gp_age  # noqa: WPS433
+                _max_age_active = bool((_gp_age() or {}).get("max_position_age_minutes"))
+            except Exception:  # noqa: BLE001
+                _max_age_active = False
+            if not sl_values and not tp_values and not _max_age_active:
+                continue  # sem SL/TP e sem time-stop → nada a monitorar
 
             # For LONG: SL = highest of the sl values (most conservative = closest to entry)
             #           TP = lowest of the tp values (most conservative = first to trigger)

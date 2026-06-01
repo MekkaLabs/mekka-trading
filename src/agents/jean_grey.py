@@ -526,6 +526,7 @@ class JeanGrey(BaseAgent[VaultHealthReport]):
         Designed as the high-level memory interface other agents call when
         they need historical context (HANDOFF item 4 + 6).
         """
+        import asyncio  # noqa: WPS433
         hits: list[RecallHit] = []
         terms = [t for t in re.split(r"\W+", query.lower()) if len(t) > 2]
         if not terms:
@@ -533,7 +534,10 @@ class JeanGrey(BaseAgent[VaultHealthReport]):
 
         # 1) Vault search.
         try:
-            notes = self._scan_vault()
+            # Review-fix (2026-06-01): _scan_vault() lê TODOS os .md do disco
+            # (I/O síncrono). Chamado por recall() no caminho de decisão de trade,
+            # bloqueava o event loop. Rodar em thread.
+            notes = await asyncio.to_thread(self._scan_vault)
             for rel, n in notes.items():
                 body_l = n["body"].lower()
                 score = sum(body_l.count(t) for t in terms)

@@ -273,6 +273,20 @@ class VisionMoA:
                     symbol=symbol, price=price, reason=f"MoA vote fallback failed: {_vf_exc}",
                 )
 
+        # Review-fix (2026-06-01): clampar a confiança final ao MÁXIMO das
+        # proposals. A média ponderada por confiança auto-reportada pode amplificar
+        # um outlier (modelo barato alucinando 0.95 domina). A síntese não deve ser
+        # MAIS confiante que o proposal mais confiante.
+        try:
+            _max_prop_conf = max(
+                (float(getattr(p, "confidence", 0.0) or 0.0) for p in proposals),
+                default=1.0,
+            )
+            if getattr(final, "confidence", 0.0) > _max_prop_conf:
+                final = final.model_copy(update={"confidence": round(_max_prop_conf, 4)})
+        except Exception as _cc_exc:  # noqa: BLE001
+            self._log.debug(f"[VisionMoA] confidence clamp skip: {_cc_exc}")
+
         # Review-fix (2026-06-01): o MoA pulava os clamps determinísticos do Vision
         # (corte de size em análise degradada + flash scalp hard-block), contornando
         # proteções de segurança. Aplicá-los aqui também, usando a instância Vision.

@@ -148,6 +148,7 @@ class Aquaman(BaseAgent[LiquidityData]):
             order_book_depth_sell=0.0,
             estimated_slippage_pct=0.05,
             liquidity_score=0.0,        # 0.0 = sem liquidez (não 0.1)
+            data_available=False,       # sem dados de book (ProfessorX: fonte ausente)
         )
 
     async def _run(self, symbol: str) -> LiquidityData:  # type: ignore[override]
