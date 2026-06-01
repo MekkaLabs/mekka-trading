@@ -132,6 +132,12 @@ class BaseAgent(ABC, Generic[T]):
                 "timeout_s": timeout_s,
             })
             raise AgentTimeoutError(self.codename, timeout_s) from exc
+        except asyncio.CancelledError:
+            # Review-fix (2026-06-01): defensivo/documental. Cancelamento de task
+            # (shutdown do NickFury) NUNCA deve virar AgentError — propaga limpo.
+            # (CancelledError já é BaseException e escaparia o except Exception
+            # abaixo, mas explicitar evita que um futuro refactor o engula.)
+            raise
         except AgentError as exc:
             elapsed = (time.perf_counter() - t0) * 1000
             self._last_elapsed_ms = elapsed

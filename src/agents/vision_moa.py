@@ -261,7 +261,26 @@ class VisionMoA:
             )
         except Exception as exc:  # noqa: BLE001
             self._log.warning(f"[VisionMoA] orchestrator failed: {exc} — using vote fallback")
-            final = self._vote_fallback(proposals=proposals, symbol=symbol, price=price)
+            # Review-fix (2026-06-01): _vote_fallback constrói TradingSignal de
+            # médias ponderadas que podem violar a geometria (ValidationError) e
+            # propagar para fora de run() — quebrando o contrato "never raises" e
+            # derrubando o ciclo. Envolver → HOLD seguro.
+            try:
+                final = self._vote_fallback(proposals=proposals, symbol=symbol, price=price)
+            except Exception as _vf_exc:  # noqa: BLE001
+                self._log.error(f"[VisionMoA] vote fallback crashou: {_vf_exc} → HOLD")
+                return Vision._fallback_hold(
+                    symbol=symbol, price=price, reason=f"MoA vote fallback failed: {_vf_exc}",
+                )
+
+        # Review-fix (2026-06-01): o MoA pulava os clamps determinísticos do Vision
+        # (corte de size em análise degradada + flash scalp hard-block), contornando
+        # proteções de segurança. Aplicá-los aqui também, usando a instância Vision.
+        try:
+            final = self._vision_fallback._apply_degraded_quality_clamp(final, analysis)
+            final = self._vision_fallback._apply_flash_scalp_hard_block(final, analysis, price)
+        except Exception as _clamp_exc:  # noqa: BLE001
+            self._log.warning(f"[VisionMoA] clamps de segurança falharam (mantendo final): {_clamp_exc}")
 
         self._log.info(
             f"[VisionMoA] {symbol} consensus → {final.summary()} "

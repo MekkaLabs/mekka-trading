@@ -147,18 +147,26 @@ async def enrich_analysis_with_cable(
             "cable_value": cable_funding,
         }
 
-    # Inject cable value
+    # Review-fix (2026-06-01): NORMALIZAR a unidade. O funding do Cable vem do
+    # Binance /fapi/v1/fundingRate, que é taxa de 8h. Black Panther (Hyperliquid)
+    # produz taxa HORÁRIA. Os consumidores (Spider-Man EXTREME_FUNDING_THRESHOLD,
+    # Vision) tratam onchain.funding_rate como HORÁRIO. Injetar o valor 8h cru
+    # fazia o funding parecer ~8× maior → falso "funding extremo". Converte
+    # 8h → horário para o campo ficar numa unidade única.
+    cable_funding_hourly = cable_funding / 8.0
+
+    # Inject cable value (já normalizado para horário)
     applied = False
     try:
         if hasattr(analysis, "onchain") and analysis.onchain is not None:
             try:
-                analysis.onchain.funding_rate = cable_funding
+                analysis.onchain.funding_rate = cable_funding_hourly
                 applied = True
             except Exception:  # noqa: BLE001
                 # Pydantic immutable? Try model_copy
                 try:
                     new_onchain = analysis.onchain.model_copy(
-                        update={"funding_rate": cable_funding},
+                        update={"funding_rate": cable_funding_hourly},
                     )
                     analysis.onchain = new_onchain
                     applied = True
@@ -172,9 +180,10 @@ async def enrich_analysis_with_cable(
     return {
         "applied": applied,
         "source": "cable" if applied else "none",
-        "funding_rate": cable_funding,
+        "funding_rate": cable_funding_hourly,   # horário (normalizado)
+        "funding_rate_8h": cable_funding,        # 8h cru (referência)
         "reason": (
-            f"cable funding {cable_funding:.6f} injected"
+            f"cable funding {cable_funding:.6f}/8h → {cable_funding_hourly:.6f}/h injected"
             if applied else "inject failed"
         ),
         "enriched_at": datetime.now(timezone.utc).isoformat(),
