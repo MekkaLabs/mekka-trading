@@ -1642,6 +1642,40 @@ class Batman(BaseAgent[RiskApproval]):
             )
 
         # ---------------------------------------------------------------
+        # 4d. Stop-loss distance floor/ceiling (review-fix 2026-06-01)
+        # O LLM podia emitir SL a 0.01% do entry (R:R inflado tipo 3000 que passa
+        # no gate de R:R, mas estopa no 1º tick de ruído/spread) ou SL a 40% (perda
+        # real >> size sugerido, pois o size NÃO depende da distância do stop).
+        # Sem floor/teto, o R:R era gamificável. Rejeita geometria patológica.
+        # ---------------------------------------------------------------
+        _entry_px = float(getattr(signal, "entry_price", 0) or 0)
+        _sl_px = float(getattr(signal, "stop_loss", 0) or 0)
+        if _entry_px > 0 and _sl_px > 0:
+            _sl_dist = abs(_entry_px - _sl_px) / _entry_px
+            _min_sl = float(getattr(settings, "min_stop_distance_pct", 0.001))  # 0.1%
+            _max_sl = float(getattr(settings, "max_stop_distance_pct", 0.20))   # 20%
+            if _sl_dist < _min_sl:
+                reasons.append(
+                    f"Stop muito apertado: distância {_sl_dist:.3%} < mín {_min_sl:.3%} "
+                    "(seria estopado por ruído/spread)"
+                )
+                breached.append("min_stop_distance_pct")
+                return RiskApproval(
+                    symbol=symbol, verdict=RiskVerdict.REJECTED,
+                    reasons=reasons, breached_limits=breached,
+                )
+            if _sl_dist > _max_sl:
+                reasons.append(
+                    f"Stop muito largo: distância {_sl_dist:.3%} > máx {_max_sl:.3%} "
+                    "(perda real descasada do size)"
+                )
+                breached.append("max_stop_distance_pct")
+                return RiskApproval(
+                    symbol=symbol, verdict=RiskVerdict.REJECTED,
+                    reasons=reasons, breached_limits=breached,
+                )
+
+        # ---------------------------------------------------------------
         # 5. Size + leverage adjustment (REDUCED if any cap hit)
         # ---------------------------------------------------------------
         adjusted_size = signal.size_pct

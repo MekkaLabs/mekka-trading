@@ -130,21 +130,35 @@ class Cyclops:
             # Determine the net open position and its SL/TP
             # Use the SL/TP from the oldest open trade on the prevailing side.
             # ----------------------------------------------------------------
+            # Review-fix (2026-06-01): avg_entry deve usar só trades de ABERTURA.
+            # Os fechamentos parciais do próprio Cyclops (TP-ladder, scale-out,
+            # partial SL) são gravados a `mark` (não entry) e, em reentradas/
+            # reversões no mesmo símbolo, podiam contaminar o avg_entry → SL/TP/PnL
+            # sobre entrada errada. Filtra trades marcados como Cyclops.
+            def _is_cyclops_close(_t) -> bool:
+                _oid = str(getattr(_t, "order_id", "") or "")
+                _tb = str(((getattr(_t, "raw", {}) or {}).get("metadata", {}) or {}).get("triggered_by", "") or "")
+                return _oid.startswith("CYCLOPS-") or _tb.startswith("cyclops")
+
             if net > 0:
                 side = "long"
                 open_qty = net
                 open_trades = longs
+                _entry_trades = [t for t in longs if not _is_cyclops_close(t)]
+                _entry_qty = sum(t.quantity for t in _entry_trades)
                 avg_entry = (
-                    sum(t.quantity * t.avg_price for t in longs) / long_qty
-                    if long_qty > 0 else 0.0
+                    sum(t.quantity * t.avg_price for t in _entry_trades) / _entry_qty
+                    if _entry_qty > 0 else 0.0
                 )
             else:
                 side = "short"
                 open_qty = abs(net)
                 open_trades = shorts
+                _entry_trades = [t for t in shorts if not _is_cyclops_close(t)]
+                _entry_qty = sum(t.quantity for t in _entry_trades)
                 avg_entry = (
-                    sum(t.quantity * t.avg_price for t in shorts) / short_qty
-                    if short_qty > 0 else 0.0
+                    sum(t.quantity * t.avg_price for t in _entry_trades) / _entry_qty
+                    if _entry_qty > 0 else 0.0
                 )
 
             # Aggregate SL/TP: use the most conservative SL and most

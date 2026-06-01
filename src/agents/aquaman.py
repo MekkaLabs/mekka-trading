@@ -138,29 +138,40 @@ class Aquaman(BaseAgent[LiquidityData]):
             timeout_s=15.0,  # 1 chamada de L2 book + cálculos locais
         )
 
-    async def _run(self, symbol: str) -> LiquidityData:  # type: ignore[override]
-        async with aiohttp.ClientSession() as session:
-            book_data = await _fetch_l2_book(session, symbol)
+    def _no_liquidity(self, symbol: str) -> LiquidityData:
+        """Sentinela de 'sem dados de liquidez' (score 0.0, slip alto explícito)."""
+        return LiquidityData(
+            symbol=symbol,
+            timestamp=datetime.now(timezone.utc),
+            bid_ask_spread_pct=0.05,    # 5% — claramente ruim, não 1% plausível
+            order_book_depth_buy=0.0,
+            order_book_depth_sell=0.0,
+            estimated_slippage_pct=0.05,
+            liquidity_score=0.0,        # 0.0 = sem liquidez (não 0.1)
+        )
 
-        # Hyperliquid L2 format: {"levels": [[bids...], [asks...]]}
-        raw_levels = book_data.get("levels", [[], []])
-        bids_raw = raw_levels[0] if len(raw_levels) > 0 else []
-        asks_raw = raw_levels[1] if len(raw_levels) > 1 else []
+    async def _run(self, symbol: str) -> LiquidityData:  # type: ignore[override]
+        # Review-fix (2026-06-01): degradar em vez de LANÇAR. Antes _fetch_l2_book
+        # podia levantar AgentError (status≠200) e _run propagava → o orquestrador
+        # transformava em liquidity=None (trade podia prosseguir sem info de
+        # liquidez). Layer1 deve retornar um resultado degradado, não lançar.
+        try:
+            async with aiohttp.ClientSession() as session:
+                book_data = await _fetch_l2_book(session, symbol)
+            raw_levels = book_data.get("levels", [[], []])
+            bids_raw = raw_levels[0] if len(raw_levels) > 0 else []
+            asks_raw = raw_levels[1] if len(raw_levels) > 1 else []
+        except Exception as exc:  # noqa: BLE001
+            self._log.error(f"[Aquaman] {symbol} — book indisponível ({exc}) — sem dados")
+            return self._no_liquidity(symbol)
 
         bids = sorted(_parse_levels(bids_raw), key=lambda x: -x[0])  # high→low
         asks = sorted(_parse_levels(asks_raw), key=lambda x: x[0])   # low→high
 
         if not bids or not asks:
-            self._log.warning(f"[Aquaman] {symbol} — empty order book, returning defaults")
-            return LiquidityData(
-                symbol=symbol,
-                timestamp=datetime.now(timezone.utc),
-                bid_ask_spread_pct=0.01,
-                order_book_depth_buy=0.0,
-                order_book_depth_sell=0.0,
-                estimated_slippage_pct=0.01,
-                liquidity_score=0.1,
-            )
+            # Review-fix: book vazio = SEM DADOS, não "liquidez razoável".
+            self._log.warning(f"[Aquaman] {symbol} — order book VAZIO (sem dados)")
+            return self._no_liquidity(symbol)
 
         best_bid = bids[0][0]
         best_ask = asks[0][0]
@@ -176,8 +187,12 @@ class Aquaman(BaseAgent[LiquidityData]):
             usd for px, usd in asks if abs(px - mid) / mid <= _DEPTH_BAND_PCT
         )
 
-        # Slippage estimate
-        slippage = _estimate_slippage(asks, _SLIPPAGE_ORDER_USD)
+        # Review-fix: estimar slippage dos DOIS lados (asks p/ compra, bids p/
+        # venda) e reportar o PIOR (conservador). Antes só o lado ask era
+        # considerado — slippage errado para ordens de venda/short.
+        slippage_buy = _estimate_slippage(asks, _SLIPPAGE_ORDER_USD)
+        slippage_sell = _estimate_slippage(bids, _SLIPPAGE_ORDER_USD)
+        slippage = max(slippage_buy, slippage_sell)
 
         # Composite score
         liq_score = _compute_liquidity_score(spread_pct, depth_buy, depth_sell, slippage)
