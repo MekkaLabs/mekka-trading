@@ -205,12 +205,25 @@ class Settings(BaseSettings):
             "de validar end-to-end em testnet e estar confortável com o gasto."
         ),
     )
+    entry_maker_wait_seconds: float = Field(
+        default=8.0,
+        ge=1.0,
+        le=120.0,
+        description=(
+            "Quando binance_entry_order_type='limit_maker': segundos que o IronMan "
+            "espera a ordem post-only (maker, economiza taxa) preencher antes de "
+            "cancelar e cair para limit_ioc (taker). Nunca perde a entrada — só "
+            "tenta a taxa de maker primeiro."
+        ),
+    )
     binance_entry_order_type: str = Field(
         default="auto",
         description=(
-            "Entry order type for CCXT execution: 'auto' | 'market' | 'limit_ioc'. "
-            "'auto' resolves to 'market' on testnet (reliable fills so the full flow "
-            "can be tested) and 'limit_ioc' on mainnet (slippage control)."
+            "Entry order type for CCXT execution: 'auto' | 'market' | 'limit_ioc' "
+            "| 'limit_maker'. 'auto' → 'market' on testnet, 'limit_ioc' on mainnet. "
+            "'limit_maker' posta uma ordem post-only no touch (economiza taxa de "
+            "maker) e cai para limit_ioc se não encher em entry_maker_wait_seconds "
+            "— nunca perde a entrada."
         ),
     )
     binance_max_entry_slippage_bps: float = Field(

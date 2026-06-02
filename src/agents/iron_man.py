@@ -860,6 +860,74 @@ class IronMan(BaseAgent[ExecutionResult]):
                 continue
         return None
 
+    async def _try_maker_entry(
+        self,
+        exchange: Any,
+        ccxt_symbol: str,
+        ccxt_side: str,
+        is_buy: bool,
+        quantity: float,
+        wait_seconds: float,
+    ) -> Any:
+        """Tenta uma entrada MAKER: posta uma limit post-only no touch (não cruza
+        o book → paga taxa de maker) e espera até wait_seconds. Retorna a ordem
+        se preencheu (total ou parcial); caso contrário cancela e retorna None
+        (o caller cai para limit_ioc/taker). Nunca levanta — erros viram None.
+        """
+        import asyncio as _aio
+        import time as _time
+
+        # Preço no touch: comprar no melhor bid, vender no melhor ask (não cruza).
+        try:
+            ticker = await exchange.fetch_ticker(ccxt_symbol)
+            bid = float(ticker.get("bid") or 0.0)
+            ask = float(ticker.get("ask") or 0.0)
+        except Exception:  # noqa: BLE001
+            return None
+        px = bid if is_buy else ask
+        if px <= 0:
+            return None
+        try:
+            px = float(exchange.price_to_precision(ccxt_symbol, px))
+        except Exception:  # noqa: BLE001
+            pass
+
+        # post-only (maker). Sem clientOrderId determinístico aqui — é tentativa
+        # única; o id determinístico fica para o fallback taker (idempotência).
+        try:
+            mk = await exchange.create_order(
+                symbol=ccxt_symbol, type="limit", side=ccxt_side,
+                amount=quantity, price=px,
+                params={"reduceOnly": False, "postOnly": True},
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Rejeição comum: cruzaria o book (post-only) → fallback taker.
+            self._log.info(f"[IronMan] maker post-only não aceito ({exc}) — fallback")
+            return None
+
+        oid = str(mk.get("id") or "")
+        # Campo ccxt unificado (NÃO _extract_filled_size, que é do shape Hyperliquid).
+        filled = float(mk.get("filled") or 0.0)
+        deadline = _time.monotonic() + max(1.0, float(wait_seconds))
+        while filled <= 0 and _time.monotonic() < deadline:
+            await _aio.sleep(1.0)
+            if not oid:
+                break
+            try:
+                mk = await exchange.fetch_order(oid, ccxt_symbol)
+                filled = float(mk.get("filled") or 0.0)
+            except Exception:  # noqa: BLE001
+                break
+
+        # Cancela o que sobrou (resto parcial ou ordem inteira não preenchida).
+        if oid:
+            try:
+                await exchange.cancel_order(oid, ccxt_symbol)
+            except Exception:  # noqa: BLE001
+                pass
+
+        return mk if filled > 0 else None
+
     async def _place_ccxt_order(
         self,
         signal: Any,
@@ -1177,6 +1245,28 @@ class IronMan(BaseAgent[ExecutionResult]):
                 limit_price = float(signal.entry_price)
 
         order: Any = None
+        # limit_maker: tenta uma ordem post-only no touch (taxa de MAKER) e cai
+        # para limit_ioc (taker, já com cap) se não encher em
+        # entry_maker_wait_seconds. NUNCA perde a entrada. Só roda fora de market.
+        if _etype == "limit_maker" and not use_market:
+            try:
+                _wait = float(getattr(settings, "entry_maker_wait_seconds", 8.0) or 8.0)
+                order = await self._try_maker_entry(
+                    exchange, ccxt_symbol, ccxt_side, is_buy, quantity, _wait,
+                )
+            except Exception as _mk_exc:  # noqa: BLE001
+                self._log.warning(
+                    f"[IronMan/{exchange_id}] maker entry erro ({_mk_exc}) — fallback limit_ioc"
+                )
+                order = None
+            if order is None:
+                self._log.info(
+                    f"[IronMan/{exchange_id}] maker não encheu em {_wait:.0f}s — "
+                    f"fallback para limit_ioc (taker, com cap)"
+                )
+            else:
+                self._log.info(f"[IronMan/{exchange_id}] entrada preenchida como MAKER ✓")
+
         # C3+H4 fix (2026-06-01 audit): idempotência + retry CCXT correto.
         # ANTES: o filtro de retry usava (TimeoutError, ConnectionError) built-ins,
         # que NÃO casam com ccxt.RequestTimeout/NetworkError (herdam de BaseError)
@@ -1205,6 +1295,9 @@ class IronMan(BaseAgent[ExecutionResult]):
             reraise=True,
         ):
             with attempt:
+                # Maker já preencheu a entrada → não coloca ordem taker.
+                if order is not None:
+                    break
                 try:
                     if use_market:
                         order = await exchange.create_order(
