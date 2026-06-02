@@ -232,6 +232,17 @@ class Settings(BaseSettings):
             "Measurement-only (does not block — the IOC limit already caps placement)."
         ),
     )
+    max_entry_price_drift_pct: float = Field(
+        default=0.01,
+        ge=0.0,
+        description=(
+            "Guard de decisão obsoleta (NickFury): antes de executar, compara o "
+            "preço de mercado atual com signal.entry_price. Se o mercado andou "
+            "mais que esta fração (0.01 = 1%) desde a decisão do Vision (ex.: "
+            "demora na aprovação Telegram), a entrada é cancelada — a tese/SL/TP "
+            "ficaram obsoletos. Set 0 para desabilitar."
+        ),
+    )
     learning_loss_escalation_count: int = Field(
         default=5,
         ge=2,

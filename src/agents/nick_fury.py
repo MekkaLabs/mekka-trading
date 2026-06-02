@@ -2290,6 +2290,42 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 signal.action.value, symbol,
             )
 
+        # 3.9 Guard de decisão obsoleta (stale-price, 2026-06-02)
+        # Entre a decisão do Vision e este ponto pode ter passado tempo (espera
+        # de aprovação no Telegram, até 120s). Se o mercado andou demais, a tese
+        # e o SL/TP (calculados do entry antigo) ficaram obsoletos — cancela.
+        # Best-effort: sem preço atual disponível, não bloqueia (não derruba por
+        # feed transitoriamente ausente).
+        try:
+            _drift_lim = float(getattr(settings, "max_entry_price_drift_pct", 0.0) or 0.0)
+            _entry_px = float(getattr(signal, "entry_price", 0) or 0)
+            if _drift_lim > 0 and _entry_px > 0:
+                _mids = await self._fetch_current_mids([symbol])
+                _cur = float(_mids.get(symbol, 0) or 0)
+                if _cur > 0:
+                    _drift = self._entry_drift_pct(_entry_px, _cur)
+                    if _drift > _drift_lim:
+                        self._log.warning(
+                            "[NickFury] STALE entry %s: mercado %.4f vs entry %.4f "
+                            "(drift %.2f%% > %.2f%%) — execução cancelada",
+                            symbol, _cur, _entry_px, _drift * 100, _drift_lim * 100,
+                        )
+                        await MekkaRepository.log_event(
+                            agent="NickFury",
+                            event="ENTRY_STALE_PRICE",
+                            severity="WARNING",
+                            symbol=symbol,
+                            message=(
+                                f"Entrada cancelada: drift {_drift:.2%} "
+                                f"(mercado {_cur:.4f} vs entry {_entry_px:.4f})"
+                            ),
+                            payload={"symbol": symbol, "current": _cur,
+                                     "entry": _entry_px, "drift_pct": round(_drift, 5)},
+                        )
+                        return CycleReport(symbol=symbol, signal=signal, approval=approval)
+        except Exception as _drift_exc:  # noqa: BLE001
+            self._log.debug("[NickFury] stale-price guard skipped: %s", _drift_exc)
+
         # 4. Iron Man execution
         # H6 outbox COMPLETO (2026-06-01 audit): grava uma linha PENDING ANTES de
         # a ordem ir à corretora. Se o processo cair entre a colocação da ordem e
@@ -2771,6 +2807,14 @@ class NickFury(BaseAgent[list[CycleReport]]):
     # ------------------------------------------------------------------
     # Market price helper (for Wolverine real-time drawdown)
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _entry_drift_pct(entry_px: float, current_px: float) -> float:
+        """Fração de desvio entre o preço atual e o entry planejado.
+        0 se entry inválido. Usado pelo guard de decisão obsoleta."""
+        if entry_px <= 0 or current_px <= 0:
+            return 0.0
+        return abs(current_px - entry_px) / entry_px
 
     async def _fetch_current_mids(self, symbols: list[str]) -> dict[str, float]:
         """
