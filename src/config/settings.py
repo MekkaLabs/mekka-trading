@@ -256,6 +256,35 @@ class Settings(BaseSettings):
             "ficaram obsoletos. Set 0 para desabilitar."
         ),
     )
+    # CycleBudgetGuard (Story 189) — cap de custo LLM. Antes hardcoded; agora
+    # configurável via .env (Fields reais — extra="ignore" ignorava sem isto).
+    llm_budget_max_cost_usd: float = Field(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "Cap de custo LLM POR SÍMBOLO por sessão (USD). Ao exceder, Vision é "
+            "pulado (HOLD) para aquele símbolo. 0 desliga o cap por símbolo."
+        ),
+    )
+    llm_budget_max_cost_usd_global: float = Field(
+        default=3.0,
+        ge=0.0,
+        description=(
+            "Cap de custo LLM GLOBAL (soma de todos os símbolos) por janela de "
+            "reset (USD). Ao exceder, Vision é pulado para TODOS os símbolos — "
+            "proteção de créditos no agregado. 0 desliga o cap global."
+        ),
+    )
+    llm_budget_max_calls: int = Field(
+        default=500,
+        ge=0,
+        description="Máximo de chamadas Vision por símbolo por sessão. 0 desliga.",
+    )
+    llm_budget_reset_hours: float = Field(
+        default=24.0,
+        gt=0.0,
+        description="Janela de reset automático do budget LLM (horas). 24 ≈ diário.",
+    )
     vision_consume_learnings: bool = Field(
         default=False,
         description=(

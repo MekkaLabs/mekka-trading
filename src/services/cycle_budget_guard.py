@@ -102,15 +102,17 @@ class CycleBudgetGuard:
 
     def __init__(
         self,
-        max_cost_usd_per_session: float = 1.0,    # USD por sessão
+        max_cost_usd_per_session: float = 1.0,    # USD por sessão (por símbolo)
         max_calls_per_session: int = 500,           # chamadas Vision por sessão
         auto_reset_hours: float = 24.0,             # reset automático após N horas
+        max_cost_usd_global: float = 0.0,           # cap agregado (0 = desligado)
     ) -> None:
         self._sessions: Dict[str, BudgetSession] = {}
         self._global_session: BudgetSession = BudgetSession(symbol="__global__")
         self._max_cost_usd = max_cost_usd_per_session
         self._max_calls = max_calls_per_session
         self._auto_reset_hours = auto_reset_hours
+        self._max_cost_usd_global = max_cost_usd_global
         self._total_skipped: int = 0
 
     def _get_or_create(self, symbol: str) -> BudgetSession:
@@ -182,8 +184,22 @@ class CycleBudgetGuard:
             (should_skip: bool, reason: str)
         """
         sym = symbol.upper()
-        session = self._get_or_create(sym)
 
+        # Cap GLOBAL (agregado de todos os símbolos), com reset diário. Se o
+        # global está velho, reseta antes de checar (janela rolante ≈ diária).
+        if self._global_session.age_hours >= self._auto_reset_hours:
+            logger.debug("[CycleBudgetGuard] auto-reset GLOBAL session")
+            self._global_session = BudgetSession(symbol="__global__")
+        if (self._max_cost_usd_global > 0
+                and self._global_session.total_cost_usd > self._max_cost_usd_global):
+            self._total_skipped += 1
+            return True, (
+                f"global_budget_exceeded("
+                f"cost={self._global_session.total_cost_usd:.4f}>"
+                f"{self._max_cost_usd_global})"
+            )
+
+        session = self._get_or_create(sym)
         if not session.is_exceeded:
             return False, "budget_ok"
 
@@ -239,12 +255,14 @@ def get_cycle_budget_guard() -> CycleBudgetGuard:
             max_cost = float(getattr(settings, "llm_budget_max_cost_usd", 1.0))
             max_calls = int(getattr(settings, "llm_budget_max_calls", 500))
             reset_h = float(getattr(settings, "llm_budget_reset_hours", 24.0))
+            max_cost_global = float(getattr(settings, "llm_budget_max_cost_usd_global", 0.0))
         except Exception:  # noqa: BLE001
-            max_cost, max_calls, reset_h = 1.0, 500, 24.0
+            max_cost, max_calls, reset_h, max_cost_global = 1.0, 500, 24.0, 0.0
         _guard = CycleBudgetGuard(
             max_cost_usd_per_session=max_cost,
             max_calls_per_session=max_calls,
             auto_reset_hours=reset_h,
+            max_cost_usd_global=max_cost_global,
         )
     return _guard
 
