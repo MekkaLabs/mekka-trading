@@ -6266,16 +6266,25 @@ async function _loadExecQuality() {
       return;
     }
     let html = '<table class="exec-quality-table"><thead><tr>' +
-      '<th>Símbolo</th><th>Trades</th><th>Slippage médio</th><th>Pior</th></tr></thead><tbody>';
+      '<th>Símbolo</th><th>Trades</th><th>Slippage médio</th><th>Pior</th>' +
+      '<th>Maker/Taker</th><th>Taxas</th></tr></thead><tbody>';
+    let totalFees = 0;
     for (const r of rows) {
       const avg = Number(r.avg_slippage_bps);
       const cls = avg > alertBps ? 'eq-bad' : (avg > alertBps / 2 ? 'eq-warn' : 'eq-good');
       const max = (r.max_slippage_bps == null) ? '—' : `${r.max_slippage_bps} bps`;
+      const mk = r.maker || 0, tk = r.taker || 0;
+      const fees = Number(r.fees_usd || 0);
+      totalFees += fees;
       html += `<tr><td>${r.symbol}</td><td>${r.trades}</td>` +
-        `<td class="${cls}">${avg} bps</td><td>${max}</td></tr>`;
+        `<td class="${cls}">${avg} bps</td><td>${max}</td>` +
+        `<td><span class="eq-good">${mk}M</span> / ${tk}T</td>` +
+        `<td>$${fees.toFixed(4)}</td></tr>`;
     }
     html += '</tbody></table>';
-    html += `<div class="muted-line" style="margin-top:6px">Limite de alerta: ${alertBps} bps. Slippage positivo = fill pior que o planejado.</div>`;
+    html += `<div class="muted-line" style="margin-top:6px">Limite de alerta: ${alertBps} bps · ` +
+      `Total de taxas: $${totalFees.toFixed(4)} · M=maker (taxa menor), T=taker. ` +
+      `Slippage positivo = fill pior que o planejado.</div>`;
     body.innerHTML = html;
   } catch (_e) {
     body.innerHTML = '<div class="muted-line">Painel indisponível no momento.</div>';

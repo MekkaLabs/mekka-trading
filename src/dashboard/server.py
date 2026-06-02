@@ -3851,10 +3851,18 @@ class MekkaDashboardServer:
                     continue
                 bps = float(meta["entry_slippage_bps"])
                 sym = getattr(t, "symbol", "?")
-                a = agg.setdefault(sym, {"symbol": sym, "n": 0, "sum": 0.0, "max": None})
+                a = agg.setdefault(sym, {
+                    "symbol": sym, "n": 0, "sum": 0.0, "max": None,
+                    "maker": 0, "taker": 0, "fees": 0.0,
+                })
                 a["n"] += 1
                 a["sum"] += bps
                 a["max"] = bps if a["max"] is None else max(a["max"], bps)
+                if meta.get("entry_liquidity") == "maker":
+                    a["maker"] += 1
+                elif meta.get("entry_liquidity") == "taker":
+                    a["taker"] += 1
+                a["fees"] += float(meta.get("fee_usd") or 0.0)
             except Exception:  # noqa: BLE001
                 continue
 
@@ -3866,6 +3874,9 @@ class MekkaDashboardServer:
                 "trades": a["n"],
                 "avg_slippage_bps": round(a["sum"] / n, 1),
                 "max_slippage_bps": round(a["max"], 1) if a["max"] is not None else None,
+                "maker": a["maker"],
+                "taker": a["taker"],
+                "fees_usd": round(a["fees"], 4),
             })
         rows.sort(key=lambda r: r["avg_slippage_bps"], reverse=True)
         return web.json_response({

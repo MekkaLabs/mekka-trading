@@ -1245,6 +1245,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                 limit_price = float(signal.entry_price)
 
         order: Any = None
+        _entry_liquidity = "taker"  # default; vira "maker" se o post-only encher
         # limit_maker: tenta uma ordem post-only no touch (taxa de MAKER) e cai
         # para limit_ioc (taker, já com cap) se não encher em
         # entry_maker_wait_seconds. NUNCA perde a entrada. Só roda fora de market.
@@ -1265,6 +1266,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                     f"fallback para limit_ioc (taker, com cap)"
                 )
             else:
+                _entry_liquidity = "maker"
                 self._log.info(f"[IronMan/{exchange_id}] entrada preenchida como MAKER ✓")
 
         # C3+H4 fix (2026-06-01 audit): idempotência + retry CCXT correto.
@@ -1350,6 +1352,16 @@ class IronMan(BaseAgent[ExecutionResult]):
 
         filled = float(order.get("filled") or 0)
         avg_px = float(order.get("average") or signal.entry_price)
+        # Taxa paga na entrada (visibilidade maker vs taker). ccxt unificado:
+        # order["fee"]["cost"] ou soma de order["fees"]. Fail-safe → 0.
+        _fee_usd = 0.0
+        try:
+            _fee = order.get("fee") or {}
+            _fee_usd = float(_fee.get("cost") or 0.0)
+            if _fee_usd == 0.0 and isinstance(order.get("fees"), list):
+                _fee_usd = sum(float((f or {}).get("cost") or 0.0) for f in order["fees"])
+        except Exception:  # noqa: BLE001
+            _fee_usd = 0.0
         order_id = str(order.get("id") or "")
 
         # Slippage telemetry: how much the fill drifted from signal.entry_price.
@@ -1609,6 +1621,8 @@ class IronMan(BaseAgent[ExecutionResult]):
                 "stop_loss": signal.stop_loss,
                 "take_profit": signal.take_profit,
                 "tp_failed": _tp_failed,
+                "entry_liquidity": _entry_liquidity,
+                "fee_usd": round(_fee_usd, 6),
                 "raw_order": order,
             },
         )
