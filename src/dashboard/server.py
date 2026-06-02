@@ -534,6 +534,7 @@ class MekkaDashboardServer:
         r.add_post("/api/mode", self._handle_mode_set)
         r.add_get("/api/opmode", self._handle_opmode_get)
         r.add_post("/api/opmode", self._handle_opmode_set)
+        r.add_get("/api/learnings", self._handle_learnings_get)
         r.add_get("/api/exchange", self._handle_exchange_get)
         r.add_post("/api/exchange", self._handle_exchange_set)
         r.add_get("/api/report/daily", self._handle_report_daily)
@@ -3804,6 +3805,25 @@ class MekkaDashboardServer:
 
         logger.info("Operation mode changed to '%s' via dashboard API", mode)
         return web.json_response(snapshot())
+
+    # ------------------------------------------------------------------
+    # Agent Learnings — GET /api/learnings[?agent=Superman&limit=10]
+    # Diário de aprendizado por agente (consultivo). Ver agent_learning_journal.
+    # ------------------------------------------------------------------
+
+    async def _handle_learnings_get(self, request: web.Request) -> web.Response:
+        from src.services.agent_learning_journal import recall, stats
+        agent = request.query.get("agent")
+        try:
+            limit = max(1, min(50, int(request.query.get("limit", "10"))))
+        except (TypeError, ValueError):
+            limit = 10
+        if agent:
+            return web.json_response({
+                "agent": agent,
+                "learnings": recall(agent, limit=limit),
+            })
+        return web.json_response(stats())
 
     # ------------------------------------------------------------------
     # Active Exchange — GET /api/exchange  POST /api/exchange

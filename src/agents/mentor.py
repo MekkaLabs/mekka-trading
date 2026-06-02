@@ -184,6 +184,26 @@ class Mentor(BaseAgent[MentorReport]):
         except Exception as exc:  # noqa: BLE001
             self._log.debug(f"[Mentor] audit skipped: {exc}")
 
+        # Diário de aprendizado (2026-06-02): registra cada insight distilado
+        # como uma lição do Mentor — append-only, não esquece. SÓ CONSULTIVO:
+        # o auto-ajuste de parâmetros continua pelo caminho do mentor_applier
+        # (tighten-only). Aqui é só memória legível/recuperável.
+        try:
+            for s in report.suggestions:
+                lesson = (
+                    f"{s.reason} → sugere {s.direction} {s.parameter_name} "
+                    f"de {s.current_value} para {s.suggested_value}"
+                )
+                await self.learn(
+                    lesson,
+                    category="calibração",
+                    evidence=", ".join(f"{k}={v}" for k, v in (s.evidence or {}).items()),
+                    confidence=float(s.confidence),
+                    tags=["mentor", s.parameter_name, s.direction],
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[Mentor] learning journal skipped: {exc}")
+
         return report
 
     # ── Evidence collectors ───────────────────────────────────────────
