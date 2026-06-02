@@ -161,6 +161,51 @@ class BaseAgent(ABC, Generic[T]):
             })
             raise AgentError(self.codename, str(exc)) from exc
 
+    # ------------------------------------------------------------------
+    # Diário de Aprendizado por Agente (2026-06-02)
+    # Cada agente escreve e relê suas próprias lições. Só CONSULTIVO:
+    # as lições viram contexto, nunca ajustam risco (isso é do Mentor).
+    # Ver src/services/agent_learning_journal.py.
+    # ------------------------------------------------------------------
+
+    async def learn(
+        self,
+        lesson: str,
+        *,
+        category: str = "general",
+        evidence: str = "",
+        confidence: float = 0.5,
+        tags: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """Registra uma lição deste agente (dedup/reforço; espelha no Obsidian).
+        Roda em thread para não bloquear o loop. Nunca levanta."""
+        try:
+            from src.services.agent_learning_journal import record  # noqa: WPS433
+            return await asyncio.to_thread(
+                record, self.codename, lesson,
+                category=category, evidence=evidence,
+                confidence=confidence, tags=tags,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[{self.codename}] learn() failed (ignored): {exc}")
+            return {"status": "error", "reason": str(exc)}
+
+    async def recall_learnings(
+        self,
+        query: Optional[str] = None,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Relê as lições mais relevantes deste agente (por reforço×confiança×
+        recência). Roda em thread. Nunca levanta — retorna [] em falha."""
+        try:
+            from src.services.agent_learning_journal import recall  # noqa: WPS433
+            return await asyncio.to_thread(
+                recall, self.codename, query, limit,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[{self.codename}] recall_learnings() failed: {exc}")
+            return []
+
     def _emit_event(self, topic: str, extra: dict[str, Any]) -> None:
         """Best-effort event publication. Never raises."""
         try:
