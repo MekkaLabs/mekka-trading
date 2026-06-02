@@ -1419,6 +1419,25 @@ class NickFury(BaseAgent[list[CycleReport]]):
             if _bskip:
                 _budget_skipped = True
                 self._log.warning(f"[NickFury:189] CycleBudgetGuard → HOLD: {_breason}")
+                # Alerta o operador UMA vez por sessão: o guard de custo pausou
+                # as chamadas de LLM (proteção de créditos). Antes era silencioso.
+                if not getattr(self, "_budget_alert_sent", False):
+                    self._budget_alert_sent = True
+                    try:
+                        from src.services.telegram_alerter import TelegramAlerter
+                        await TelegramAlerter().alert(
+                            event="LLM_BUDGET_EXCEEDED",
+                            severity="WARNING",
+                            agent="NickFury",
+                            symbol=symbol,
+                            message=(
+                                f"Orçamento de LLM da sessão atingido — trades "
+                                f"forçados a HOLD (sem chamada de IA) para proteger "
+                                f"créditos. {_breason}"
+                            ),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
         except Exception as _bg189_exc:  # noqa: BLE001
             self._log.debug(f"[NickFury:189] CycleBudgetGuard check skipped: {_bg189_exc}")
 
