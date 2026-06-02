@@ -34,6 +34,23 @@ class _VerticalImplementer(BaseImplementer):
         rec_id = str(brief.get("rec_id") or brief.get("id") or "")
         branch = f"imp/IMP-{rec_id}"
 
+        # ---- dry-run: NÃO escreve nada no working tree ----
+        # Bug fix (2026-06-01): antes, deterministic/llm.try_apply escreviam os
+        # arquivos ANTES do check de dry_run no _post_apply_commit — deixando o
+        # tree sujo mesmo em modo manual (operation_mode=manual → worker dry-run).
+        # Agora dry-run só DETECTA o que seria feito, sem tocar em disco.
+        if self.dry_run:
+            pattern = deterministic.detect_pattern(brief)
+            result.layer_used = "deterministic" if pattern.matched else "none"
+            result.status = ImplementerStatus.PARTIAL
+            result.branch = branch
+            result.reason = (
+                f"dry-run: aplicaria padrão '{pattern.name}' (nada escrito)"
+                if pattern.matched
+                else "dry-run: nenhum padrão deterministic (nada escrito)"
+            )
+            return
+
         # ---- Step 1: tenta deterministic ----
         applied = deterministic.try_apply(brief, result)
         if result.status == ImplementerStatus.BLOCKED:
