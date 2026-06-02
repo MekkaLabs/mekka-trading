@@ -111,3 +111,24 @@ def test_empty_lesson_skipped(journal):
     r = journal.record("Mentor", "   ")
     assert r["status"] == "skipped"
     assert journal.recall("Mentor") == []
+
+
+# ---------------------------------------------------------------------------
+# Comando Telegram /aprendizados
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_telegram_aprendizados_command(journal):
+    journal.record("IronMan", "BTC long slippa acima do limite", category="execução", confidence=0.6)
+    journal.record("Mentor", "win-rate baixo → apertar confiança", confidence=0.7)
+    from src.services.telegram_inbound import TelegramInboundPoller
+    p = TelegramInboundPoller()
+
+    resumo = await p._cmd_learnings([])
+    assert "IronMan" in resumo and "Mentor" in resumo
+
+    detalhe = await p._cmd_learnings(["IronMan"])
+    assert "slippa" in detalhe
+
+    vazio = await p._cmd_learnings(["Batman"])
+    assert "ainda não registrou" in vazio
