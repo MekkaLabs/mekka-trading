@@ -218,6 +218,34 @@ class Vision(BaseAgent[TradingSignal]):
         except Exception as _mem_exc:  # noqa: BLE001
             self._log.debug(f"[Vision] Episodic memory fetch skipped: {_mem_exc}")
 
+        # Loop aprendizado→decisão (2026-06-02, opt-in via vision_consume_learnings):
+        # injeta as lições mais reforçadas do diário (Vision + outcomes do Cyclops
+        # para este símbolo) para calibrar a decisão. Default OFF — muda decisão,
+        # validar em paper/testnet primeiro. Fail-silent.
+        try:
+            if getattr(settings, "vision_consume_learnings", False):
+                import asyncio as _aio  # noqa: WPS433
+                from src.services.agent_learning_journal import (  # noqa: WPS433
+                    build_context_snippet, recall, top_reinforced,
+                )
+                _vis = await _aio.to_thread(recall, "Vision", 5)
+                _cyc = await _aio.to_thread(top_reinforced, 2, 4, "outcome-loss")
+                _lessons = (_vis or []) + [
+                    l for l in (_cyc or []) if analysis.symbol in str(l.get("lesson", ""))
+                ]
+                _snippet = build_context_snippet("Vision", _lessons)
+                if _snippet:
+                    try:
+                        from src.services.bounded_output import BoundedOutput as _BO3  # noqa: WPS433
+                        _snippet = _BO3.bound_prompt_section(
+                            "Lições do Diário", _snippet, max_chars=2_000
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    prompt = prompt + "\n\n" + _snippet
+        except Exception as _lrn_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision] learning journal fetch skipped: {_lrn_exc}")
+
         # Story #72 — Vault enrichment (Second-brain / Neural-graph).
         # Read-only: appends curated notes from the Obsidian vault when the
         # operator enabled VAULT_ENRICHMENT_ENABLED. Fail-silent + bounded

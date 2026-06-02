@@ -256,6 +256,16 @@ class Settings(BaseSettings):
             "ficaram obsoletos. Set 0 para desabilitar."
         ),
     )
+    vision_consume_learnings: bool = Field(
+        default=False,
+        description=(
+            "Quando True, o Vision injeta no prompt as lições mais reforçadas do "
+            "diário (suas + outcomes do Cyclops) para calibrar decisões. Default "
+            "OFF (opt-in): muda o comportamento de decisão, então deve ser "
+            "validado em paper/testnet antes da mainnet. Fecha o loop de "
+            "aprendizado→decisão."
+        ),
+    )
     learning_prune_stale_days: int = Field(
         default=30,
         ge=1,
