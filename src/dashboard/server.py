@@ -465,6 +465,7 @@ class MekkaDashboardServer:
         r.add_get("/api/audit", self._handle_audit)
         r.add_get("/api/env", self._handle_env)
         r.add_get("/api/mainnet-readiness", self._handle_mainnet_readiness)
+        r.add_get("/api/go-live-status", self._handle_go_live_status)
         r.add_get("/api/today-summary", self._handle_today_summary)
         r.add_get("/api/prefs", self._handle_prefs_get)
         r.add_post("/api/prefs", self._handle_prefs_set)
@@ -4026,6 +4027,101 @@ class MekkaDashboardServer:
         except Exception as exc:  # noqa: BLE001
             logger.warning("mainnet-readiness failed: %s", exc)
             return web.json_response({"ok": False, "error": str(exc)}, status=200)
+
+    async def _handle_go_live_status(self, _: web.Request) -> web.Response:
+        """GET /api/go-live-status — veredito GO/NO-GO consolidado para mainnet.
+
+        Combina em uma chamada:
+          1. Preflight (gates automáticos via scripts/preflight_mainnet.py --json)
+          2. Estado do loop de trading (parado/rodando)
+          3. Diário: padrões de perda recorrente (lições outcome-loss >= 5×)
+          4. Modo de operação atual
+          5. Veredito final: GO | GO_WITH_CONDITIONS | NO_GO
+        """
+        import sys as _sys
+        from pathlib import Path as _Path
+
+        result: dict[str, Any] = {
+            "verdict": "NO_GO",
+            "preflight": None,
+            "runtime": {},
+            "learning": {},
+            "operation_mode": None,
+            "conditions": [],
+            "blockers": [],
+        }
+
+        # 1. Preflight --json
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                _sys.executable, "scripts/preflight_mainnet.py", "--json",
+                cwd=str(_Path(__file__).resolve().parents[2]),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=25.0)
+            pf = json.loads(out.decode() or "{}")
+            result["preflight"] = pf
+            for c in (pf.get("checks") or []):
+                if c.get("level") == "FAIL":
+                    result["blockers"].append(f"Preflight FAIL: {c.get('name')} — {c.get('detail','')}")
+                elif c.get("level") == "WARN":
+                    result["conditions"].append(f"{c.get('name')}: {c.get('detail','')}")
+        except Exception as exc:  # noqa: BLE001
+            result["blockers"].append(f"preflight error: {exc}")
+
+        # 2. Estado do loop
+        try:
+            ctrl = getattr(self, "_controller", None)
+            if ctrl:
+                st = ctrl.status() if callable(getattr(ctrl, "status", None)) else {}
+                result["runtime"] = {
+                    "running": st.get("running", False),
+                    "state": st.get("state", "unknown"),
+                    "cycles": st.get("cycles", 0),
+                }
+            else:
+                result["runtime"] = {"running": False, "state": "no_controller"}
+        except Exception:  # noqa: BLE001
+            result["runtime"] = {"running": False, "state": "error"}
+
+        # 3. Padrões de perda recorrente no diário
+        try:
+            import asyncio as _aio
+            from src.services.agent_learning_journal import top_reinforced
+            losses = await _aio.to_thread(top_reinforced, 5, 5, "outcome-loss")
+            result["learning"] = {
+                "recurring_loss_patterns": len(losses),
+                "patterns": [
+                    {"agent": l.get("agent"), "count": l.get("reinforced_count"),
+                     "lesson": str(l.get("lesson", ""))[:80]}
+                    for l in losses
+                ],
+            }
+            if losses:
+                result["conditions"].append(
+                    f"{len(losses)} padrão(ões) de perda recorrente no diário "
+                    f"— revisar antes de escalar."
+                )
+        except Exception:  # noqa: BLE001
+            result["learning"] = {"recurring_loss_patterns": 0}
+
+        # 4. Modo de operação
+        try:
+            from src.config.operation_mode import get_operation_mode, snapshot
+            snap = snapshot()
+            result["operation_mode"] = snap
+        except Exception:  # noqa: BLE001
+            result["operation_mode"] = {"mode": "unknown"}
+
+        # 5. Veredito final
+        if result["blockers"]:
+            result["verdict"] = "NO_GO"
+        elif result["conditions"]:
+            result["verdict"] = "GO_WITH_CONDITIONS"
+        else:
+            result["verdict"] = "GO"
+
+        return web.json_response(result)
 
     async def _handle_env(self, _: web.Request) -> web.Response:
         """GET /api/env — environment & safety posture for the UI badge.

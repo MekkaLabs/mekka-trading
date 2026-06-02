@@ -1593,6 +1593,19 @@ body.sidebar-collapsed {
   border-radius: 4px; padding: 1px 6px; margin-right: 6px;
 }
 .learn-meta { display: block; font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
+
+/* Painel GO/NO-GO mainnet */
+.go-live-banner {
+  display: inline-block; padding: 8px 18px; border-radius: 8px;
+  font-weight: 700; font-size: 1.05rem; margin-bottom: 8px;
+}
+.gl-go   { background: rgba(72,199,142,0.18); color: #48c78e; border: 1px solid #48c78e; }
+.gl-warn { background: rgba(255,183,77,0.18); color: #ffb74d; border: 1px solid #ffb74d; }
+.gl-nogo { background: rgba(255,77,77,0.18);  color: #ff4d4d; border: 1px solid #ff4d4d; }
+.gl-section { margin: 8px 0; font-size: 0.9rem; }
+.gl-section ul { margin: 4px 0 0 16px; padding: 0; }
+.gl-section li { margin-bottom: 3px; }
+.gl-meta { color: var(--muted); font-size: 0.82rem; }
 .sys-power-reboot { color: var(--warn); }
 
 /* ============================================================

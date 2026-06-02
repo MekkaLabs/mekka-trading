@@ -6363,6 +6363,59 @@ function _bootLearnings() {
   _loadLearnings();
 }
 
+// ── Painel de prontidão mainnet (GO / GO_WITH_CONDITIONS / NO_GO) ────────────
+async function _loadGoLiveStatus() {
+  const verdict = document.getElementById('go-live-verdict');
+  const detail  = document.getElementById('go-live-detail');
+  if (!verdict) return;
+  verdict.innerHTML = '<span class="muted-line">Verificando…</span>';
+  detail.innerHTML  = '';
+  try {
+    const d = await fetch('/api/go-live-status', { cache: 'no-store' }).then(r => r.json());
+    const v = d.verdict || 'NO_GO';
+    const cls = { GO: 'gl-go', GO_WITH_CONDITIONS: 'gl-warn', NO_GO: 'gl-nogo' }[v] || 'gl-nogo';
+    const lbl = { GO: '✅ GO — pronto para mainnet',
+                  GO_WITH_CONDITIONS: '⚠️ GO COM CONDIÇÕES — revisar itens abaixo',
+                  NO_GO: '🔴 NO-GO — bloqueadores ativos' }[v] || '🔴 NO-GO';
+    verdict.innerHTML = `<div class="go-live-banner ${cls}">${lbl}</div>`;
+
+    let html = '';
+    if ((d.blockers || []).length) {
+      html += '<div class="gl-section"><strong>🔴 Bloqueadores</strong><ul>';
+      for (const b of d.blockers) html += `<li>${_learnEsc(b)}</li>`;
+      html += '</ul></div>';
+    }
+    if ((d.conditions || []).length) {
+      html += '<div class="gl-section"><strong>⚠️ Condições / WARNs</strong><ul>';
+      for (const c of d.conditions) html += `<li>${_learnEsc(c)}</li>`;
+      html += '</ul></div>';
+    }
+    const op = d.operation_mode || {};
+    const rt = d.runtime || {};
+    html += `<div class="gl-section gl-meta">` +
+      `<span>Modo: <strong>${_learnEsc(op.mode || '?')}</strong></span> · ` +
+      `<span>Loop: <strong>${rt.running ? '🟢 rodando' : '⬛ parado'}</strong></span> · ` +
+      `<span>Ciclos: ${rt.cycles || 0}</span>` +
+      `</div>`;
+    const lrn = d.learning || {};
+    if (lrn.recurring_loss_patterns > 0) {
+      html += `<div class="gl-section"><strong>📓 Padrões de perda recorrente no diário</strong><ul>`;
+      for (const p of (lrn.patterns || []))
+        html += `<li>${_learnEsc(p.agent)}: ${_learnEsc(p.lesson)} <em>(${p.count}×)</em></li>`;
+      html += '</ul></div>';
+    }
+    detail.innerHTML = html;
+  } catch (_e) {
+    verdict.innerHTML = '<span class="muted-line">Falha ao carregar status (servidor pode estar reiniciando).</span>';
+  }
+}
+
+function _bootGoLive() {
+  const btn = document.getElementById('go-live-refresh');
+  if (!btn) return;
+  btn.addEventListener('click', _loadGoLiveStatus);
+}
+
 // ── Boot all v2 features ─────────────────────────────────────
 function _mkBootDashboardV2() {
   // Sync prefs from server first (async, non-blocking — nav still works immediately)
@@ -6393,6 +6446,8 @@ function _mkBootDashboardV2() {
   try { _bootExecQuality(); } catch (e) { console.error('[v2] _bootExecQuality failed:', e); }
   // Painel do diário de aprendizado por agente
   try { _bootLearnings(); } catch (e) { console.error('[v2] _bootLearnings failed:', e); }
+  // Painel de prontidão mainnet (GO/NO-GO)
+  try { _bootGoLive(); } catch (e) { console.error('[v2] _bootGoLive failed:', e); }
   // Global WS — real-time topbar + positions across all pages
   try { _bootGlobalWs(); } catch (e) { console.error('[v2] _bootGlobalWs failed:', e); }
   // Office iframe auto-resize (no internal scrollbar)

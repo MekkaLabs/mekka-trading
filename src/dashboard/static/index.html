@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mekka Trading Command Center</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260602e" />
+    <link rel="stylesheet" href="/static/style.css?v=20260602g" />
     <link rel="stylesheet" href="/static/office-v2/office-v2.css" />
     <!-- Vendored copies first (no SRI needed — same-origin), CDN fallback
          on error with SRI matching the vendored bytes. If the CDN serves
@@ -1297,6 +1297,18 @@
       </section>
 
       <!-- ── Live Trading Panel ──────────────────────────────────────────── -->
+      <!-- Painel de prontidão mainnet: /api/go-live-status (GO/NO-GO/conditions) -->
+      <section class="panel full" id="sec-go-live" data-page="live">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+          <h2 style="margin:0">🚦 Prontidão para Mainnet</h2>
+          <button id="go-live-refresh" style="padding:4px 10px;cursor:pointer;font-size:0.85rem">↻ Verificar</button>
+        </div>
+        <div id="go-live-verdict" class="go-live-verdict">
+          <span class="muted-line">Clique em "Verificar" para checar o status de prontidão.</span>
+        </div>
+        <div id="go-live-detail" class="go-live-detail"></div>
+      </section>
+
       <section class="panel full live-trading-panel" id="sec-live-trading" data-page="live">
         <!-- Toolbar -->
         <div class="live-toolbar">
@@ -2052,7 +2064,7 @@
          the Pixel Office uses (P0.6, HANDOFF 2026-05-20). MUST load
          before app.js (which calls renderAgentsRoster() during boot). -->
     <script src="/static/agents-sprites.js" defer></script>
-    <script src="/static/app.js?v=20260602f" defer></script>
+    <script src="/static/app.js?v=20260602g" defer></script>
     <!-- second_brain_activity.js (carregado no head com defer) auto-monta
          em #second-brain-activity quando ele existe no DOM. Sem script
          inline aqui — bootstrap está dentro do próprio módulo. -->
