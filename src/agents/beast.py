@@ -213,6 +213,16 @@ class Beast(BaseAgent[BeastReport]):
         except Exception as exc:  # noqa: BLE001
             self._log.warning(f"[Beast] Prometheus audit skipped: {exc}")
 
+        # ── 6. (2026-06-02): consome o diário de aprendizado dos agentes ──
+        # Lições de PREJUÍZO recorrente (outcome-loss muito reforçadas) viram
+        # propostas de investigação — fecha o loop outcome→aprendizado→ação.
+        try:
+            learn_proposals = await self._analyze_agent_learnings()
+            stats["agent_learnings"] = {"proposals": len(learn_proposals)}
+            proposals.extend(learn_proposals)
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"[Beast] agent-learning audit skipped: {exc}")
+
         # ── Sort by priority ──────────────────────────────────────────────
         priority_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
         proposals.sort(key=lambda p: priority_order.get(p.impact, 3))
@@ -698,6 +708,42 @@ class Beast(BaseAgent[BeastReport]):
                 evidence=f"cycles={cycles}, executions=0",
             ))
 
+        return proposals
+
+    # -----------------------------------------------------------------------
+    # Agent-learning journal consumer (2026-06-02)
+    # -----------------------------------------------------------------------
+
+    async def _analyze_agent_learnings(self) -> list["ImprovementProposal"]:
+        """Lê o diário de aprendizado e converte padrões de PREJUÍZO recorrente
+        (outcome-loss muito reforçadas) em propostas de investigação. Fecha o
+        loop: Cyclops registra outcome → Beast propõe ação. Read-only, fail-safe.
+        """
+        proposals: list[ImprovementProposal] = []
+        try:
+            import asyncio as _aio
+            from src.services.agent_learning_journal import top_reinforced
+            # padrões de perda reforçados >=3× são candidatos a investigação
+            losses = await _aio.to_thread(
+                top_reinforced, 3, 5, "outcome-loss",
+            )
+            for lz in losses:
+                count = int(lz.get("reinforced_count", 0))
+                impact = "HIGH" if count >= 5 else "MEDIUM"
+                lesson = str(lz.get("lesson", ""))[:160]
+                proposals.append(ImprovementProposal(
+                    title="Padrão de prejuízo recorrente detectado",
+                    description=(
+                        f"O diário ({lz.get('agent', '?')}) acumulou {count} reforços "
+                        f"de uma lição de perda: \"{lesson}\". Investigar o setup "
+                        f"desse ativo/lado — ajustar gates, pausar, ou revisar a tese."
+                    ),
+                    impact=impact,
+                    area="risk_gates",
+                    evidence=f"reinforced_count={count}, category=outcome-loss",
+                ))
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[Beast] _analyze_agent_learnings error: {exc}")
         return proposals
 
     # -----------------------------------------------------------------------

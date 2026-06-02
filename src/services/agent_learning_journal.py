@@ -319,6 +319,43 @@ def recall(
             pass
 
 
+def top_reinforced(
+    min_count: int = 3,
+    limit: int = 10,
+    category: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Lições mais REFORÇADAS entre TODOS os agentes (reinforced_count >=
+    min_count), ordenadas por reforço. Filtro opcional por categoria (ex.:
+    'outcome-loss'). Usado pelo Beast para detectar padrões recorrentes.
+    Nunca levanta exceção."""
+    conn = _connect()
+    if conn is None:
+        return []
+    try:
+        with conn:
+            _ensure_schema(conn)
+            sql = (
+                "SELECT agent, lesson, category, confidence, reinforced_count, "
+                "       updated_at FROM agent_learnings WHERE reinforced_count >= ?"
+            )
+            params: list[Any] = [max(1, int(min_count))]
+            if category:
+                sql += " AND category = ?"
+                params.append(category)
+            sql += " ORDER BY reinforced_count DESC, updated_at DESC LIMIT ?"
+            params.append(max(1, int(limit)))
+            rows = conn.execute(sql, params).fetchall()
+            return [dict(r) for r in rows]
+    except sqlite3.Error as exc:
+        logger.debug("[agent_learning] top_reinforced error: %s", exc)
+        return []
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def build_context_snippet(agent: str, lessons: list[dict[str, Any]]) -> str:
     """Formata lições para injeção no prompt/contexto do agente. Vazio se nenhuma."""
     if not lessons:
