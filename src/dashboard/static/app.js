@@ -6289,6 +6289,71 @@ function _bootExecQuality() {
   _execQualityTimer = _registerInterval(setInterval(_loadExecQuality, 30000));
 }
 
+// ── Diário de Aprendizado por agente ────────────────────────────────────────
+function _learnEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function _loadLearningDetail(agent) {
+  const box = document.getElementById('learnings-detail');
+  if (!box) return;
+  box.innerHTML = `<div class="muted-line">Carregando lições de ${_learnEsc(agent)}…</div>`;
+  try {
+    const data = await fetch(`/api/learnings?agent=${encodeURIComponent(agent)}&limit=12`,
+      { cache: 'no-store' }).then(r => r.json());
+    const items = (data && data.learnings) || [];
+    if (!items.length) { box.innerHTML = `<div class="muted-line">Sem lições para ${_learnEsc(agent)}.</div>`; return; }
+    let html = `<h3>📌 ${_learnEsc(agent)} — ${items.length} lição(ões)</h3><ul class="learnings-list">`;
+    for (const it of items) {
+      const conf = Math.round((Number(it.confidence) || 0) * 100);
+      const rc = it.reinforced_count || 1;
+      const cat = _learnEsc(it.category || 'general');
+      html += `<li><span class="learn-cat">${cat}</span> ${_learnEsc(it.lesson)}` +
+        `<span class="learn-meta">conf ${conf}% · reforço ${rc}×</span></li>`;
+    }
+    html += '</ul>';
+    box.innerHTML = html;
+  } catch (_e) {
+    box.innerHTML = '<div class="muted-line">Detalhe indisponível.</div>';
+  }
+}
+
+async function _loadLearnings() {
+  const agentsBox = document.getElementById('learnings-agents');
+  if (!agentsBox) return;
+  try {
+    const data = await fetch('/api/learnings', { cache: 'no-store' }).then(r => r.json());
+    const byAgent = (data && data.by_agent) || {};
+    const names = Object.keys(byAgent);
+    if (!names.length) {
+      agentsBox.innerHTML = '<div class="muted-line">Nenhuma lição registrada ainda. Aparecem conforme os agentes aprendem (ex.: Cyclops ao fechar posições).</div>';
+      return;
+    }
+    names.sort((a, b) => (byAgent[b].lessons || 0) - (byAgent[a].lessons || 0));
+    let html = '';
+    for (const n of names) {
+      const m = byAgent[n];
+      html += `<button class="learn-chip" data-agent="${n}">${n} <span>${m.lessons}</span></button>`;
+    }
+    agentsBox.innerHTML = html;
+    agentsBox.querySelectorAll('.learn-chip').forEach(btn => {
+      btn.addEventListener('click', () => {
+        agentsBox.querySelectorAll('.learn-chip').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        _loadLearningDetail(btn.getAttribute('data-agent'));
+      });
+    });
+  } catch (_e) {
+    agentsBox.innerHTML = '<div class="muted-line">Painel indisponível.</div>';
+  }
+}
+
+function _bootLearnings() {
+  if (!document.getElementById('learnings-agents')) return;
+  _loadLearnings();
+}
+
 // ── Boot all v2 features ─────────────────────────────────────
 function _mkBootDashboardV2() {
   // Sync prefs from server first (async, non-blocking — nav still works immediately)
@@ -6317,6 +6382,8 @@ function _mkBootDashboardV2() {
   try { _bootOpMode(); } catch (e) { console.error('[v2] _bootOpMode failed:', e); }
   // Painel de qualidade de execução (slippage por símbolo)
   try { _bootExecQuality(); } catch (e) { console.error('[v2] _bootExecQuality failed:', e); }
+  // Painel do diário de aprendizado por agente
+  try { _bootLearnings(); } catch (e) { console.error('[v2] _bootLearnings failed:', e); }
   // Global WS — real-time topbar + positions across all pages
   try { _bootGlobalWs(); } catch (e) { console.error('[v2] _bootGlobalWs failed:', e); }
   // Office iframe auto-resize (no internal scrollbar)

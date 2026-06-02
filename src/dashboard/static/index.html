@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mekka Trading Command Center</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260602d" />
+    <link rel="stylesheet" href="/static/style.css?v=20260602e" />
     <link rel="stylesheet" href="/static/office-v2/office-v2.css" />
     <!-- Vendored copies first (no SRI needed — same-origin), CDN fallback
          on error with SRI matching the vendored bytes. If the CDN serves
@@ -1239,6 +1239,15 @@
       </section>
 
       <!-- ── Episodic Memory Panel (Story 064) ──────────────────────────── -->
+      <!-- Diário de aprendizado por agente: /api/learnings (stats + por agente).
+           Clique num agente para ver as lições. -->
+      <section class="panel full" id="sec-agent-learnings" data-page="memory">
+        <h2>📓 Diário de Aprendizado dos Agentes</h2>
+        <p class="muted-line">Lições que cada agente acumulou. Clique num agente para ver as mais relevantes (reforço × confiança).</p>
+        <div id="learnings-agents" class="learnings-agents"><div class="muted-line">Carregando…</div></div>
+        <div id="learnings-detail" class="learnings-detail"></div>
+      </section>
+
       <section class="panel full memory-panel" id="sec-memory" data-page="memory">
         <div class="memory-header">
           <h2>🧠 Episodic Memory — O que os Agentes Aprenderam</h2>
@@ -2043,7 +2052,7 @@
          the Pixel Office uses (P0.6, HANDOFF 2026-05-20). MUST load
          before app.js (which calls renderAgentsRoster() during boot). -->
     <script src="/static/agents-sprites.js" defer></script>
-    <script src="/static/app.js?v=20260602d" defer></script>
+    <script src="/static/app.js?v=20260602e" defer></script>
     <!-- second_brain_activity.js (carregado no head com defer) auto-monta
          em #second-brain-activity quando ele existe no DOM. Sem script
          inline aqui — bootstrap está dentro do próprio módulo. -->
