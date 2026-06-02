@@ -1453,6 +1453,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                 },
             )
 
+        _tp_failed = False
         try:
             tp_order = await exchange.create_order(
                 symbol=ccxt_symbol,
@@ -1466,7 +1467,29 @@ class IronMan(BaseAgent[ExecutionResult]):
             )
             tp_id = str(tp_order.get("id") or "")
         except Exception as _exc:
+            # Reconciliação SL/TP (2026-06-02): o SL JÁ está colocado (downside
+            # protegido), mas o TP falhou → proteção PARCIAL. Antes era só um log
+            # silencioso; agora alerta o operador (WARNING, não CRITICAL) e
+            # marca tp_failed no metadata. O Cyclops ainda cobre o TP via monitor
+            # (soft TP), mas o operador precisa saber que o TP de corretora faltou.
+            _tp_failed = True
+            tp_id = ""
             self._log.warning(f"[IronMan/{exchange_id}] TP placement failed: {_exc}")
+            try:
+                from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+                asyncio.create_task(_TA().alert(
+                    event="TP_PLACEMENT_FAILED",
+                    severity="WARNING",
+                    agent="IronMan",
+                    symbol=symbol,
+                    message=(
+                        f"{symbol}: SL colocado, mas o TAKE-PROFIT falhou ({_exc}). "
+                        f"Proteção PARCIAL — posição tem stop, mas sem TP de corretora. "
+                        f"O Cyclops cobre o TP via monitor; considere recolocar manualmente."
+                    ),
+                ))
+            except Exception:  # noqa: BLE001
+                pass
 
         notional = filled * avg_px
         status = (
@@ -1492,6 +1515,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                 "size_pct": size_pct,
                 "stop_loss": signal.stop_loss,
                 "take_profit": signal.take_profit,
+                "tp_failed": _tp_failed,
                 "raw_order": order,
             },
         )
