@@ -243,6 +243,15 @@ class Settings(BaseSettings):
             "ficaram obsoletos. Set 0 para desabilitar."
         ),
     )
+    learning_prune_stale_days: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Higiene do diário de aprendizado: o Beast poda lições com mais de N "
+            "dias sem atualização QUE TAMBÉM sejam nunca-reforçadas e de baixa "
+            "confiança (<0.6). Lições reforçadas ou confiáveis são preservadas."
+        ),
+    )
     learning_loss_escalation_count: int = Field(
         default=5,
         ge=2,

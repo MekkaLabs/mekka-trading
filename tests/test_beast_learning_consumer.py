@@ -53,3 +53,26 @@ async def test_beast_no_proposal_below_threshold(journal):
     from src.agents.beast import Beast
     props = await Beast()._analyze_agent_learnings()
     assert props == []                         # 1 reforço < min_count=3
+
+
+def test_prune_stale_keeps_signal(journal):
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+
+    journal.record("X", "velha fraca", confidence=0.4)          # poda
+    journal.record("X", "velha reforcada", confidence=0.4)
+    journal.record("X", "velha reforcada", confidence=0.4)      # reforço=2 → mantém
+    journal.record("X", "velha confiavel", confidence=0.8)      # alta conf → mantém
+    journal.record("X", "recente fraca", confidence=0.4)        # recente → mantém
+
+    old = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat(timespec="seconds")
+    conn = sqlite3.connect(str(journal._DB_PATH))
+    conn.execute("UPDATE agent_learnings SET updated_at=? WHERE lesson LIKE 'velha%'", (old,))
+    conn.commit()
+    conn.close()
+
+    pruned = journal.prune_stale(stale_days=30, min_keep_confidence=0.6)
+    assert pruned == 1                                          # só 'velha fraca'
+    kept = {r["lesson"] for r in journal.recall("X", limit=10)}
+    assert "velha fraca" not in kept
+    assert {"velha reforcada", "velha confiavel", "recente fraca"} <= kept

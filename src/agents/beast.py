@@ -722,7 +722,18 @@ class Beast(BaseAgent[BeastReport]):
         proposals: list[ImprovementProposal] = []
         try:
             import asyncio as _aio
-            from src.services.agent_learning_journal import top_reinforced
+            from src.config.settings import settings as _s
+            from src.services.agent_learning_journal import prune_stale, top_reinforced
+            # Higiene: poda lições obsoletas (velhas + nunca reforçadas + baixa
+            # confiança) para a memória não inflar. Preserva o que tem sinal.
+            try:
+                _pruned = await _aio.to_thread(
+                    prune_stale, int(getattr(_s, "learning_prune_stale_days", 30)), 0.6,
+                )
+                if _pruned:
+                    self._log.info(f"[Beast] podou {_pruned} lição(ões) obsoleta(s) do diário")
+            except Exception:  # noqa: BLE001
+                pass
             # padrões de perda reforçados >=3× são candidatos a investigação
             losses = await _aio.to_thread(
                 top_reinforced, 3, 5, "outcome-loss",

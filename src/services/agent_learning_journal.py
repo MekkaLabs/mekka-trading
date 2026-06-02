@@ -356,6 +356,44 @@ def top_reinforced(
             pass
 
 
+def prune_stale(
+    stale_days: int = 30,
+    min_keep_confidence: float = 0.6,
+) -> int:
+    """Poda lições obsoletas para a memória não inflar. Remove APENAS lições que
+    são, ao mesmo tempo:
+      - antigas (updated_at < agora - stale_days),
+      - nunca reforçadas (reinforced_count <= 1), e
+      - de baixa confiança (confidence < min_keep_confidence).
+
+    Lições reforçadas OU de alta confiança são SEMPRE preservadas (sinal real).
+    Retorna o número de linhas removidas. Nunca levanta exceção."""
+    conn = _connect()
+    if conn is None:
+        return 0
+    try:
+        from datetime import timedelta  # noqa: WPS433
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=max(1, int(stale_days)))
+        ).isoformat(timespec="seconds")
+        with conn:
+            _ensure_schema(conn)
+            cur = conn.execute(
+                "DELETE FROM agent_learnings "
+                "WHERE updated_at < ? AND reinforced_count <= 1 AND confidence < ?",
+                (cutoff, float(min_keep_confidence)),
+            )
+            return int(cur.rowcount or 0)
+    except sqlite3.Error as exc:
+        logger.debug("[agent_learning] prune_stale error: %s", exc)
+        return 0
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def build_context_snippet(agent: str, lessons: list[dict[str, Any]]) -> str:
     """Formata lições para injeção no prompt/contexto do agente. Vazio se nenhuma."""
     if not lessons:
