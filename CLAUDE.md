@@ -187,19 +187,20 @@ TELEGRAM_TRADE_APPROVAL_ENABLED=true  # SUPERSEDED por OPERATION_MODE (compat .e
 TELEGRAM_INBOUND_ENABLED=false        # comandos via Telegram (desabilitado por default)
 ```
 
-### Modo de Operação (switch raiz de aprovação)
+### Modo de Operação (switch raiz — governa SÓ trades)
 ```env
 OPERATION_MODE=manual   # manual | automatic — default: manual (seguro)
 ```
 
 | Modo | Trades | Melhorias | Gates de risco |
 |------|--------|-----------|----------------|
-| **manual** (default) | operador aprova via Telegram | operador aprova | ✅ ativos |
-| **automatic** | auto-executam | auto-aplicam (tighten-only) | ✅ ativos |
+| **manual** (default) | operador aprova via Telegram | **sempre exigem aprovação** | ✅ ativos |
+| **automatic** | auto-executam | **sempre exigem aprovação** | ✅ ativos |
 
+- **Melhorias são DESACOPLADAS do modo** (2026-06-02): o switch governa apenas TRADES. Melhorias nunca auto-aplicam por causa do modo — evita que um clique no botão faça o worker escrever/commitar código. O único auto-apply é o opt-in EXPLÍCITO via env (`MENTOR_AUTO_APPLY_ENABLED` / `IMPLEMENTER_WORKER_ENABLED` / `IMPLEMENTER_WORKER_AUTO_APPLY`, default OFF).
 - **Fonte da verdade:** `src/config/operation_mode.py`. Default vem de `OPERATION_MODE` no `.env`; override em runtime persistido em `data/operation_mode.json`.
 - **Troca em runtime sem reiniciar:** Telegram `/opmode`, `/manual`, `/auto` (entra em vigor no próximo ciclo).
-- **Invariante de segurança:** `automatic` remove apenas o gate HUMANO. O double-gate, os gates do Batman, o kill-switch, o daily-loss e o clamp tighten-only do auto-apply continuam valendo — `automatic` **NUNCA** afrouxa risco automaticamente.
+- **Invariante de segurança:** `automatic` remove apenas o gate HUMANO dos TRADES. O double-gate, os gates do Batman, o kill-switch e o daily-loss continuam valendo — `automatic` **NUNCA** afrouxa risco.
 - **Consumidores:** gate de trade em `nick_fury.py` (`requires_trade_approval()`), `mentor_applier.is_enabled()`, `implementer/worker` (`worker_is_enabled`/`worker_should_apply`).
 - **Preflight:** `automatic` + mainnet+live emite WARN bem visível (auto-trade com dinheiro real é decisão deliberada).
 

@@ -62,23 +62,24 @@ def test_dry_run_detects_pattern_without_side_effects():
     assert result.commit_sha in (None, "")
 
 
-def test_automatic_mode_enables_worker_apply(monkeypatch):
-    """Contrato de melhorias AUTOMÁTICAS: operation_mode=automatic liga o worker
-    E o apply real (não dry-run). manual mantém ambos OFF."""
+def test_worker_decoupled_from_operation_mode(monkeypatch):
+    """Melhorias SEMPRE exigem aprovação (2026-06-02): o modo de operação NÃO
+    liga o worker. Nem em 'automatic'. Só o opt-in EXPLÍCITO via env liga."""
     monkeypatch.delenv("IMPLEMENTER_WORKER_ENABLED", raising=False)
     monkeypatch.delenv("IMPLEMENTER_WORKER_AUTO_APPLY", raising=False)
     from src.config import operation_mode as om
     from src.services.implementer import worker
 
-    # estado em memória explícito (não depende do arquivo de override real)
     om._loaded = True               # type: ignore[attr-defined]
     om._current_mode = "automatic"  # type: ignore[attr-defined]
     try:
-        assert worker.worker_is_enabled() is True
-        assert worker.worker_should_apply() is True   # automatic → aplica de verdade
-        # manual → worker desligado (sem env opt-in)
-        om._current_mode = "manual"  # type: ignore[attr-defined]
+        # automatic NÃO liga o worker — melhorias exigem aprovação.
         assert worker.worker_is_enabled() is False
         assert worker.worker_should_apply() is False
+        # opt-in explícito via env liga, independente do modo.
+        monkeypatch.setenv("IMPLEMENTER_WORKER_ENABLED", "true")
+        monkeypatch.setenv("IMPLEMENTER_WORKER_AUTO_APPLY", "true")
+        assert worker.worker_is_enabled() is True
+        assert worker.worker_should_apply() is True
     finally:
         om._reset_for_tests()

@@ -75,9 +75,9 @@ _HELP_TEXT = (
     "/perf [N]   — relatório Deadpool (N dias, padrão: 30)\n"
     "/gates      — status gates H1–H6 mainnet\n"
     "/mode [X]   — mostra ou muda modo de trading (conservative/balanced/aggressive)\n"
-    "/opmode [X] — modo de operação: manual (você aprova) ou automatic (sistema sozinho)\n"
-    "/manual     — atalho: operador aprova trades e melhorias\n"
-    "/auto       — atalho: sistema aprova sozinho (gates de risco seguem ativos)\n"
+    "/opmode [X] — modo de operação (só TRADES): manual (você aprova) ou automatic\n"
+    "/manual     — atalho: você aprova cada trade\n"
+    "/auto       — atalho: trades executam sozinhos (gates de risco seguem ativos)\n"
     "/report     — envia relatório diário agora (Slack + Telegram)\n"
     "/ping       — testa conexão e exibe status do bot\n"
     "/risk       — painel de risco ao vivo (exposure, PnL, cooldowns, blacklist, ATR)\n"
@@ -673,18 +673,18 @@ class TelegramInboundPoller:
         if mode == "automatic":
             return (
                 "🤖 Modo de operação: AUTOMÁTICO\n"
-                "O sistema aprova trades e melhorias sozinho.\n\n"
+                "O sistema executa TRADES sozinho (gates de risco seguem ativos).\n\n"
                 "• Trades: auto-executam após os gates do Batman\n"
-                "• Melhorias: auto-aplicam (apenas tighten — nunca afrouxam risco)\n"
+                "• Melhorias: SEMPRE exigem sua aprovação (não muda com o modo)\n"
                 "• Gates de risco/kill-switch/double-gate: SEGUEM ATIVOS\n\n"
-                "Use /manual para voltar a aprovar você mesmo."
+                "Use /manual para aprovar os trades você mesmo."
             )
         return (
             "🙋 Modo de operação: MANUAL\n"
-            "Você aprova cada trade e cada melhoria via Telegram.\n\n"
+            "Você aprova cada TRADE via Telegram.\n\n"
             "• Trades: pedem sua confirmação antes do IronMan executar\n"
-            "• Melhorias: ficam na fila aguardando sua aprovação\n\n"
-            "Use /auto para o sistema operar sozinho."
+            "• Melhorias: sempre na fila aguardando sua aprovação\n\n"
+            "Use /auto para os trades executarem sozinhos."
         )
 
     async def _cmd_opmode(self, args: list[str]) -> str:

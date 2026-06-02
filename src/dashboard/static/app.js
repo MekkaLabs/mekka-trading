@@ -6179,12 +6179,12 @@ function _opModeRender(snap) {
   if (mode === 'manual') {
     pill.textContent = '🙋 MANUAL';
     pill.classList.add('opmode-manual');
-    pill.title = 'Você aprova cada trade e cada melhoria via Telegram.';
+    pill.title = 'Você aprova cada TRADE. Melhorias sempre exigem aprovação.';
     toggle.textContent = '→ Automático';
   } else if (mode === 'automatic') {
     pill.textContent = '🤖 AUTOMÁTICO';
     pill.classList.add('opmode-automatic');
-    pill.title = 'O sistema aprova trades e melhorias sozinho (gates de risco seguem ativos).';
+    pill.title = 'TRADES executam sozinhos (gates de risco ativos). Melhorias ainda exigem aprovação.';
     toggle.textContent = '→ Manual';
   } else {
     pill.textContent = 'MODO ???';
@@ -6210,11 +6210,11 @@ async function _opModeToggle() {
   const target = _opModeState === 'manual' ? 'automatic' : 'manual';
   if (target === 'automatic') {
     const ok = confirm(
-      '🤖 ATIVAR MODO AUTOMÁTICO?\n\n' +
-      'O sistema vai APROVAR e EXECUTAR trades sozinho, e aplicar melhorias ' +
-      'automaticamente — sem pedir sua confirmação.\n\n' +
+      '🤖 ATIVAR MODO AUTOMÁTICO (só TRADES)?\n\n' +
+      'O sistema vai EXECUTAR trades sozinho, sem pedir sua confirmação.\n\n' +
       'As travas de risco (Batman, kill-switch, limite de perda diária) ' +
-      'continuam ativas, e melhorias só APERTAM o risco (nunca afrouxam).\n\n' +
+      'continuam ativas.\n\n' +
+      'As MELHORIAS continuam exigindo sua aprovação — o modo não muda isso.\n\n' +
       'Confirmar?'
     );
     if (!ok) return;

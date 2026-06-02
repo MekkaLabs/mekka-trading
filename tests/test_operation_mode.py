@@ -53,7 +53,8 @@ def test_automatic_flips_decisions(om):
     om.set_operation_mode("automatic")
     assert om.is_automatic() is True
     assert om.requires_trade_approval() is False
-    assert om.improvements_auto_apply() is True
+    # Melhorias SEMPRE exigem aprovação — o modo não as auto-aplica.
+    assert om.improvements_auto_apply() is False
 
 
 def test_round_trip_back_to_manual(om):
@@ -96,46 +97,51 @@ def test_snapshot_atomic(om):
     snap = om.snapshot()
     assert snap["mode"] == "automatic"
     assert snap["requires_trade_approval"] is False
-    assert snap["improvements_auto_apply"] is True
+    # Melhorias sempre exigem aprovação — snapshot reflete False sempre.
+    assert snap["improvements_auto_apply"] is False
     assert "snapshot_at" in snap
 
 
 # ---------------------------------------------------------------------------
-# Wiring dos consumidores
+# Wiring dos consumidores — MELHORIAS SÃO DESACOPLADAS DO MODO (2026-06-02).
+# O modo manual/automatic governa só TRADES. Melhorias só auto-aplicam com
+# opt-in EXPLÍCITO via env (default OFF), independente do modo.
 # ---------------------------------------------------------------------------
 
-def test_mentor_applier_follows_automatic(om, monkeypatch):
+def test_mentor_applier_ignores_mode(om, monkeypatch):
     monkeypatch.delenv("MENTOR_AUTO_APPLY_ENABLED", raising=False)
     from src.services import mentor_applier
-    # manual → operador aprova
     assert mentor_applier.is_enabled() is False
+    om.set_operation_mode("automatic")
+    # automatic NÃO liga o mentor auto-apply — melhorias exigem aprovação.
+    assert mentor_applier.is_enabled() is False
+
+
+def test_mentor_applier_env_optin_works_regardless_of_mode(om, monkeypatch):
+    monkeypatch.setenv("MENTOR_AUTO_APPLY_ENABLED", "true")
+    from src.services import mentor_applier
+    assert mentor_applier.is_enabled() is True       # manual + env explícito
     om.set_operation_mode("automatic")
     assert mentor_applier.is_enabled() is True
 
 
-def test_mentor_applier_legacy_env_still_works_in_manual(om, monkeypatch):
-    # opt-in granular continua funcionando mesmo em manual
-    monkeypatch.setenv("MENTOR_AUTO_APPLY_ENABLED", "true")
-    from src.services import mentor_applier
-    assert om.is_manual() is True
-    assert mentor_applier.is_enabled() is True
-
-
-def test_worker_follows_automatic(om, monkeypatch):
+def test_worker_ignores_mode(om, monkeypatch):
     monkeypatch.delenv("IMPLEMENTER_WORKER_ENABLED", raising=False)
     monkeypatch.delenv("IMPLEMENTER_WORKER_AUTO_APPLY", raising=False)
     from src.services.implementer import worker
     assert worker.worker_is_enabled() is False
     assert worker.worker_should_apply() is False
     om.set_operation_mode("automatic")
-    assert worker.worker_is_enabled() is True
-    assert worker.worker_should_apply() is True
+    # automatic NÃO liga o worker — melhorias exigem aprovação.
+    assert worker.worker_is_enabled() is False
+    assert worker.worker_should_apply() is False
 
 
-def test_worker_legacy_env_still_works_in_manual(om, monkeypatch):
+def test_worker_env_optin_works_regardless_of_mode(om, monkeypatch):
     monkeypatch.setenv("IMPLEMENTER_WORKER_ENABLED", "true")
     from src.services.implementer import worker
-    assert om.is_manual() is True
+    assert worker.worker_is_enabled() is True        # opt-in explícito
+    om.set_operation_mode("automatic")
     assert worker.worker_is_enabled() is True
 
 

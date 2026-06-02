@@ -285,35 +285,25 @@ import asyncio as _asyncio
 _background_task: "Optional[_asyncio.Task]" = None
 
 
-def _operation_is_automatic() -> bool:
-    """True quando operation_mode == 'automatic'. Fail-safe: False se indisponível."""
-    try:
-        from src.config.operation_mode import is_automatic  # noqa: WPS433
-        return is_automatic()
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def worker_is_enabled() -> bool:
-    """O worker do squad roda quando QUALQUER um for verdadeiro:
-      - operation_mode == 'automatic' (switch raiz), OU
-      - env IMPLEMENTER_WORKER_ENABLED=true (opt-in legado).
-    Em modo 'manual' (default) fica OFF — o operador conduz as melhorias."""
-    env_opt_in = os.environ.get("IMPLEMENTER_WORKER_ENABLED", "false").lower() in (
+    """O worker do squad roda SOMENTE com opt-in EXPLÍCITO via env
+    IMPLEMENTER_WORKER_ENABLED=true (default OFF).
+
+    Melhorias sempre exigem aprovação (2026-06-02): o modo de operação
+    manual/automático NÃO liga o worker — evita que um clique no botão faça o
+    worker escrever/commitar código sozinho."""
+    return os.environ.get("IMPLEMENTER_WORKER_ENABLED", "false").lower() in (
         "1", "true", "yes", "on"
     )
-    return env_opt_in or _operation_is_automatic()
 
 
 def worker_should_apply() -> bool:
-    """Aplica de verdade (não dry-run) quando QUALQUER um for verdadeiro:
-      - operation_mode == 'automatic' (switch raiz), OU
-      - env IMPLEMENTER_WORKER_AUTO_APPLY=true (opt-in legado).
-    Em modo 'manual' o worker no máximo prepara em dry-run; o operador aplica."""
-    env_opt_in = os.environ.get("IMPLEMENTER_WORKER_AUTO_APPLY", "false").lower() in (
+    """Aplica de verdade (não dry-run) SOMENTE com opt-in EXPLÍCITO via env
+    IMPLEMENTER_WORKER_AUTO_APPLY=true (default OFF). O modo de operação não
+    influencia — melhorias sempre exigem aprovação."""
+    return os.environ.get("IMPLEMENTER_WORKER_AUTO_APPLY", "false").lower() in (
         "1", "true", "yes", "on"
     )
-    return env_opt_in or _operation_is_automatic()
 
 
 def worker_interval_seconds() -> float:

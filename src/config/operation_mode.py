@@ -3,13 +3,15 @@ src/config/operation_mode.py
 ============================
 Modo de Operação — switch RAIZ que governa quem aprova as ações do sistema.
 
-Dois modos, um único switch:
+Dois modos — governa APENAS a execução de TRADES:
 
-  manual     — o OPERADOR aprova cada trade E cada melhoria via Telegram.
-               Gate humano LIGADO em todas as superfícies. (default — seguro)
-  automatic  — o SISTEMA aprova sozinho, da melhor forma possível.
-               Gate humano DESLIGADO. Trades auto-executam e melhorias
-               auto-aplicam.
+  manual     — o OPERADOR aprova cada trade via Telegram. (default — seguro)
+  automatic  — TRADES auto-executam (gate humano desligado).
+
+IMPORTANTE (2026-06-02): MELHORIAS SEMPRE EXIGEM APROVAÇÃO, independente do
+modo. O switch NÃO liga auto-apply de melhorias — isso evita que um clique no
+botão faça o worker escrever/commitar código sozinho. O único caminho de
+auto-apply de melhorias é o opt-in EXPLÍCITO via env (default OFF).
 
 IMPORTANTE — invariantes de segurança preservadas em AMBOS os modos:
   - O double-gate (paper_trading/live_trading_confirmed) continua valendo.
@@ -156,15 +158,17 @@ def requires_trade_approval() -> bool:
 
 
 def improvements_auto_apply() -> bool:
-    """Se melhorias (Mentor overrides + Implementer worker) podem ser
-    aplicadas automaticamente, sem aprovação do operador.
+    """Melhorias SEMPRE exigem aprovação (decisão do operador, 2026-06-02).
 
-    manual → False (operador aprova) · automatic → True (auto-aplica).
+    O modo de operação governa APENAS trades. Melhorias (Mentor overrides +
+    Implementer worker) nunca são auto-aplicadas com base no modo — nem em
+    'automatic'. O único caminho de auto-apply é o opt-in EXPLÍCITO via env
+    (MENTOR_AUTO_APPLY_ENABLED / IMPLEMENTER_WORKER_AUTO_APPLY, default OFF),
+    que é uma escolha deliberada do operador, não um efeito colateral do botão.
 
-    NB: o clamp tighten-only do mentor_applier continua valendo mesmo aqui —
-    'automatic' nunca AFROUXA risco automaticamente.
+    Retorna sempre False. Mantido para estabilidade de API/snapshot.
     """
-    return is_automatic()
+    return False
 
 
 def snapshot() -> dict[str, Any]:
@@ -176,7 +180,8 @@ def snapshot() -> dict[str, Any]:
     return {
         "mode": mode,
         "requires_trade_approval": mode == "manual",
-        "improvements_auto_apply": mode == "automatic",
+        # Melhorias sempre exigem aprovação — o modo não as auto-aplica.
+        "improvements_auto_apply": False,
         "snapshot_at": datetime.now(timezone.utc).isoformat(),
     }
 

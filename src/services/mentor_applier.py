@@ -60,24 +60,16 @@ MIN_CONFIDENCE = 0.7
 def is_enabled() -> bool:
     """Auto-apply de melhorias do Mentor.
 
-    Ligado quando QUALQUER um for verdadeiro:
-      - operation_mode == 'automatic' (switch raiz — sistema aprova sozinho), OU
-      - env MENTOR_AUTO_APPLY_ENABLED=true (opt-in legado/granular).
+    Melhorias SEMPRE exigem aprovação (2026-06-02): o modo de operação NÃO liga
+    o auto-apply. O único jeito de habilitar é o opt-in EXPLÍCITO via env
+    MENTOR_AUTO_APPLY_ENABLED=true (default OFF) — escolha deliberada do
+    operador, não efeito colateral do botão manual/automático.
 
-    Em modo 'manual' (default) fica OFF — o operador aprova as melhorias.
-    O clamp tighten-only (loosen sempre bloqueado) vale em ambos os casos:
-    'automatic' NUNCA afrouxa risco automaticamente.
+    O clamp tighten-only (loosen sempre bloqueado) continua valendo quando ON.
     """
-    env_opt_in = os.environ.get("MENTOR_AUTO_APPLY_ENABLED", "false").lower() in (
+    return os.environ.get("MENTOR_AUTO_APPLY_ENABLED", "false").lower() in (
         "1", "true", "yes", "on"
     )
-    if env_opt_in:
-        return True
-    try:
-        from src.config.operation_mode import improvements_auto_apply  # noqa: WPS433
-        return improvements_auto_apply()
-    except Exception:  # noqa: BLE001
-        return False
 
 
 def _now_iso() -> str:
