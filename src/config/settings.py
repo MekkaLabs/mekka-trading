@@ -232,6 +232,17 @@ class Settings(BaseSettings):
             "Measurement-only (does not block — the IOC limit already caps placement)."
         ),
     )
+    max_entry_slippage_estimate_pct: float = Field(
+        default=0.02,
+        ge=0.0,
+        description=(
+            "Pre-trade liquidity gate (Batman): blocks the entry when Aquaman's "
+            "estimated slippage for the order exceeds this fraction (0.02 = 2%). "
+            "A thin book would destroy the R:R. Only blocks when liquidity data is "
+            "available (data_available=True); degraded data falls back to the size "
+            "penalty. Set 0 to disable the hard gate."
+        ),
+    )
     mainnet_dry_run: bool = Field(
         default=False,
         description=(

@@ -1688,6 +1688,27 @@ class Batman(BaseAgent[RiskApproval]):
                 )
 
         # ---------------------------------------------------------------
+        # 4e. Liquidity gate (2026-06-02) — bloqueia a entrada quando o slippage
+        # estimado da ordem é alto demais (book fino destrói o R:R). Complementa
+        # a penalidade de size (seção 5). Só bloqueia com data_available=True
+        # (medição real); em degradado, a penalidade de liquidity_score cuida —
+        # não derrubamos o sistema por book transitoriamente indisponível.
+        # ---------------------------------------------------------------
+        if liquidity is not None and getattr(liquidity, "data_available", True):
+            _est_slip = float(getattr(liquidity, "estimated_slippage_pct", 0.0) or 0.0)
+            _max_est = float(getattr(settings, "max_entry_slippage_estimate_pct", 0.02) or 0.0)
+            if _max_est > 0 and _est_slip > _max_est:
+                reasons.append(
+                    f"Liquidez insuficiente: slippage estimado {_est_slip:.2%} > "
+                    f"limite {_max_est:.2%} (book fino — entrada destruiria o R:R)"
+                )
+                breached.append("max_entry_slippage_estimate_pct")
+                return RiskApproval(
+                    symbol=symbol, verdict=RiskVerdict.REJECTED,
+                    reasons=reasons, breached_limits=breached,
+                )
+
+        # ---------------------------------------------------------------
         # 5. Size + leverage adjustment (REDUCED if any cap hit)
         # ---------------------------------------------------------------
         adjusted_size = signal.size_pct
