@@ -6416,6 +6416,50 @@ function _bootGoLive() {
   btn.addEventListener('click', _loadGoLiveStatus);
 }
 
+// ── Painel de custo de LLM (créditos) ───────────────────────────────────────
+let _llmCostTimer = null;
+
+async function _loadLlmCost() {
+  const body = document.getElementById('llm-cost-body');
+  if (!body) return;
+  try {
+    const d = await fetch('/api/cost', { cache: 'no-store' }).then(r => r.json());
+    if (!d || !d.ok || !d.cost) {
+      body.innerHTML = '<div class="muted-line">Sem dados de custo ainda (loop parado ou nenhuma chamada).</div>';
+      return;
+    }
+    const s = d.cost.session || {};
+    const provs = d.cost.by_provider || [];
+    const total = Number(s.total_cost_usd || 0);
+    const perHr = Number(s.cost_per_hour_usd || 0);
+    let html = '<div class="llm-cost-kpis">';
+    html += `<div class="llm-kpi"><span class="llm-kpi-val">$${total.toFixed(4)}</span><span class="llm-kpi-lbl">total sessão</span></div>`;
+    html += `<div class="llm-kpi"><span class="llm-kpi-val">$${perHr.toFixed(4)}</span><span class="llm-kpi-lbl">por hora</span></div>`;
+    html += `<div class="llm-kpi"><span class="llm-kpi-val">${s.total_calls || 0}</span><span class="llm-kpi-lbl">chamadas</span></div>`;
+    html += `<div class="llm-kpi"><span class="llm-kpi-val">${((s.total_tokens || 0) / 1000).toFixed(1)}k</span><span class="llm-kpi-lbl">tokens</span></div>`;
+    html += '</div>';
+    if (provs.length) {
+      html += '<table class="exec-quality-table" style="margin-top:8px"><thead><tr>' +
+        '<th>Provider</th><th>Chamadas</th><th>Custo</th></tr></thead><tbody>';
+      for (const p of provs) {
+        html += `<tr><td>${_learnEsc(p.provider)}</td><td>${p.calls || 0}</td>` +
+          `<td>$${Number(p.cost_usd || 0).toFixed(4)}</td></tr>`;
+      }
+      html += '</tbody></table>';
+    }
+    body.innerHTML = html;
+  } catch (_e) {
+    body.innerHTML = '<div class="muted-line">Painel de custo indisponível.</div>';
+  }
+}
+
+function _bootLlmCost() {
+  if (!document.getElementById('llm-cost-body')) return;
+  _loadLlmCost();
+  if (_llmCostTimer) clearInterval(_llmCostTimer);
+  _llmCostTimer = _registerInterval(setInterval(_loadLlmCost, 30000));
+}
+
 // ── Boot all v2 features ─────────────────────────────────────
 function _mkBootDashboardV2() {
   // Sync prefs from server first (async, non-blocking — nav still works immediately)
@@ -6448,6 +6492,8 @@ function _mkBootDashboardV2() {
   try { _bootLearnings(); } catch (e) { console.error('[v2] _bootLearnings failed:', e); }
   // Painel de prontidão mainnet (GO/NO-GO)
   try { _bootGoLive(); } catch (e) { console.error('[v2] _bootGoLive failed:', e); }
+  // Painel de custo de LLM (créditos)
+  try { _bootLlmCost(); } catch (e) { console.error('[v2] _bootLlmCost failed:', e); }
   // Global WS — real-time topbar + positions across all pages
   try { _bootGlobalWs(); } catch (e) { console.error('[v2] _bootGlobalWs failed:', e); }
   // Office iframe auto-resize (no internal scrollbar)

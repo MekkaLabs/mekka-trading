@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mekka Trading Command Center</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260602g" />
+    <link rel="stylesheet" href="/static/style.css?v=20260602h" />
     <link rel="stylesheet" href="/static/office-v2/office-v2.css" />
     <!-- Vendored copies first (no SRI needed — same-origin), CDN fallback
          on error with SRI matching the vendored bytes. If the CDN serves
@@ -1054,6 +1054,13 @@
         </div>
       </section>
 
+      <!-- Custo de LLM (créditos): /api/cost — sessão atual -->
+      <section class="panel" id="sec-llm-cost" data-page="performance">
+        <h2>💸 Custo de LLM (sessão)</h2>
+        <p class="muted-line">Gasto com chamadas de IA desde que o loop ligou. Ajuda a controlar o consumo de créditos.</p>
+        <div id="llm-cost-body"><div class="muted-line">Carregando…</div></div>
+      </section>
+
       <section class="panel replay-panel" id="sec-trades-timeline" data-page="performance">
         <h2>Trades Execution Timeline</h2>
         <div class="positions-toolbar">
@@ -2064,7 +2071,7 @@
          the Pixel Office uses (P0.6, HANDOFF 2026-05-20). MUST load
          before app.js (which calls renderAgentsRoster() during boot). -->
     <script src="/static/agents-sprites.js" defer></script>
-    <script src="/static/app.js?v=20260602g" defer></script>
+    <script src="/static/app.js?v=20260602h" defer></script>
     <!-- second_brain_activity.js (carregado no head com defer) auto-monta
          em #second-brain-activity quando ele existe no DOM. Sem script
          inline aqui — bootstrap está dentro do próprio módulo. -->

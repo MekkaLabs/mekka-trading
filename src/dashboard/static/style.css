@@ -1606,6 +1606,12 @@ body.sidebar-collapsed {
 .gl-section ul { margin: 4px 0 0 16px; padding: 0; }
 .gl-section li { margin-bottom: 3px; }
 .gl-meta { color: var(--muted); font-size: 0.82rem; }
+
+/* Painel de custo de LLM */
+.llm-cost-kpis { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 8px; }
+.llm-kpi { display: flex; flex-direction: column; align-items: flex-start; }
+.llm-kpi-val { font-size: 1.4rem; font-weight: 700; color: var(--text); }
+.llm-kpi-lbl { font-size: 0.78rem; color: var(--muted); }
 .sys-power-reboot { color: var(--warn); }
 
 /* ============================================================
