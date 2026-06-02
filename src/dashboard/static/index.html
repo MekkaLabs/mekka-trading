@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mekka Trading Command Center</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260602a" />
+    <link rel="stylesheet" href="/static/style.css?v=20260602b" />
     <link rel="stylesheet" href="/static/office-v2/office-v2.css" />
     <!-- Vendored copies first (no SRI needed — same-origin), CDN fallback
          on error with SRI matching the vendored bytes. If the CDN serves
@@ -170,6 +170,11 @@
             <select id="exchange-select" class="prefs-reset-btn">
               <option value="">…</option>
             </select>
+            <!-- Toggle de rede testnet↔mainnet da corretora ativa. SENSÍVEL.
+                 Muda só dados/roteamento; execução real ainda exige o
+                 double-gate (paper_trading=false + live_confirmed=true). -->
+            <button id="network-toggle" type="button" class="prefs-reset-btn network-btn network-unknown"
+                    title="Rede da corretora (testnet/mainnet)" disabled>REDE ???</button>
           </div>
           <label for="lang-toggle" class="muted-line">Idioma</label>
           <select id="lang-toggle" class="prefs-reset-btn">
@@ -2028,7 +2033,7 @@
          the Pixel Office uses (P0.6, HANDOFF 2026-05-20). MUST load
          before app.js (which calls renderAgentsRoster() during boot). -->
     <script src="/static/agents-sprites.js" defer></script>
-    <script src="/static/app.js?v=20260602a" defer></script>
+    <script src="/static/app.js?v=20260602b" defer></script>
     <!-- second_brain_activity.js (carregado no head com defer) auto-monta
          em #second-brain-activity quando ele existe no DOM. Sem script
          inline aqui — bootstrap está dentro do próprio módulo. -->

@@ -537,6 +537,7 @@ class MekkaDashboardServer:
         r.add_get("/api/learnings", self._handle_learnings_get)
         r.add_get("/api/exchange", self._handle_exchange_get)
         r.add_post("/api/exchange", self._handle_exchange_set)
+        r.add_post("/api/exchange/network", self._handle_exchange_network_set)
         r.add_get("/api/report/daily", self._handle_report_daily)
         r.add_get("/api/report/weekly", self._handle_report_weekly)
 
@@ -3880,6 +3881,65 @@ class MekkaDashboardServer:
 
         logger.info("Active exchange changed to '%s' via dashboard API", ex)
         return web.json_response({"ok": True, **summary()})
+
+    async def _handle_exchange_network_set(self, request: web.Request) -> web.Response:
+        """
+        POST /api/exchange/network
+            body: {"exchange": "binance", "network": "mainnet", "confirm": "MAINNET"}
+
+        Troca a rede (testnet/mainnet) de uma corretora em runtime. SENSÍVEL:
+        switching para MAINNET exige confirm="MAINNET" no body.
+
+        NÃO toca no double-gate. A rede só muda dados/roteamento; execução de
+        DINHEIRO REAL continua exigindo paper_trading=false + live_confirmed=true.
+        Por isso: mainnet + paper = simulado em dados reais (seguro).
+        """
+        from src.config.runtime_exchange import set_network, summary, network_for
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+
+        ex = str(body.get("exchange", "")).strip().lower()
+        net = str(body.get("network", "")).strip().lower()
+        if net == "mainnet" and str(body.get("confirm", "")).upper() != "MAINNET":
+            return web.json_response(
+                {"ok": False, "error": "Trocar para MAINNET exige confirm=\"MAINNET\"."},
+                status=400,
+            )
+        try:
+            set_network(ex, net)
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+        # Aviso explícito do estado de execução resultante.
+        is_live = (not settings.paper_trading) and getattr(settings, "live_trading_confirmed", False)
+        real_money = (net == "mainnet") and is_live
+
+        try:
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="NETWORK_CHANGED",
+                severity="CRITICAL" if real_money else "WARNING",
+                message=(
+                    f"Rede de {ex} → {net.upper()} via dashboard"
+                    + (" — ⚠️ DINHEIRO REAL (live)" if real_money else " — paper/simulado")
+                ),
+                payload={"exchange": ex, "network": net, "real_money": real_money},
+            )
+        except Exception:
+            pass  # audit best-effort
+
+        logger.warning("Network for '%s' changed to '%s' via dashboard (real_money=%s)",
+                       ex, net, real_money)
+        return web.json_response({
+            "ok": True,
+            "exchange": ex,
+            "network": net,
+            "real_money": real_money,
+            "paper_trading": settings.paper_trading,
+            **summary(),
+        })
 
     async def _handle_mainnet_readiness(self, _: web.Request) -> web.Response:
         """GET /api/mainnet-readiness — run the mainnet preflight and return its

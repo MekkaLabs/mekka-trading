@@ -143,14 +143,77 @@ def apply_to_settings() -> None:
         settings.active_exchange = ex  # type: ignore[assignment]
         _log.info(f"[RuntimeExchange] applied persisted override → {ex} ({network_for(ex)})")
 
+    # Aplica overrides de rede persistidos (testnet/mainnet por corretora).
+    networks = (data or {}).get("networks") or {}
+    for _ex, _net in networks.items():
+        if _ex in EXCHANGES and str(_net).lower() in ("testnet", "mainnet"):
+            try:
+                set_network(_ex, str(_net).lower())
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(f"[RuntimeExchange] could not apply network {_ex}={_net}: {exc}")
 
-def _persist(ex: str) -> None:
-    """Write the active exchange to disk (called inside _lock)."""
+
+def _read_state() -> dict[str, Any]:
+    """Lê o estado persistido (active_exchange + networks). Fail-silent → {}."""
+    try:
+        return json.loads(_FILE.read_text()) if _FILE.exists() else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _write_state(state: dict[str, Any]) -> None:
     try:
         _DATA_DIR.mkdir(parents=True, exist_ok=True)
-        _FILE.write_text(json.dumps({"active_exchange": ex}, indent=2))
+        _FILE.write_text(json.dumps(state, indent=2))
     except Exception as exc:  # noqa: BLE001
-        _log.error(f"[RuntimeExchange] could not persist exchange: {exc}")
+        _log.error(f"[RuntimeExchange] could not persist state: {exc}")
+
+
+def _persist(ex: str) -> None:
+    """Persiste a corretora ativa, preservando overrides de rede (called in _lock)."""
+    state = _read_state()
+    state["active_exchange"] = ex
+    _write_state(state)
+
+
+# ---------------------------------------------------------------------------
+# Network toggle (testnet ↔ mainnet) — SENSÍVEL.
+# A rede só muda dados/roteamento; o double-gate (paper_trading/
+# live_trading_confirmed) continua sendo o gate REAL de dinheiro. Logo:
+#   mainnet + paper_trading=True  → simulado em dados reais (SEGURO)
+#   mainnet + paper=False + live_confirmed=True → DINHEIRO REAL
+# ---------------------------------------------------------------------------
+
+def set_network(exchange: str, network: str) -> dict[str, Any]:
+    """Troca a rede de uma corretora em runtime (testnet/mainnet) e persiste.
+    Muta o settings em memória (próximo client CCXT do IronMan usa a nova rede,
+    pois o cache_key inclui a rede). NÃO toca no double-gate.
+
+    Raises ValueError para corretora/rede inválida.
+    """
+    if exchange not in EXCHANGES:
+        raise ValueError(f"Corretora desconhecida '{exchange}'. Válidas: {EXCHANGES}")
+    network = str(network).strip().lower()
+    if network not in ("testnet", "mainnet"):
+        raise ValueError(f"Rede inválida '{network}'. Use 'testnet' ou 'mainnet'.")
+
+    from src.config.settings import settings
+
+    with _lock:
+        if exchange == "binance":
+            settings.binance_testnet = (network == "testnet")  # type: ignore[assignment]
+        elif exchange == "bybit":
+            settings.bybit_testnet = (network == "testnet")  # type: ignore[assignment]
+        elif exchange == "hyperliquid":
+            settings.hyperliquid_network = network  # type: ignore[assignment]
+            # is_mainnet é @cached_property — invalida o cache para refletir já.
+            settings.__dict__.pop("is_mainnet", None)
+        state = _read_state()
+        state.setdefault("networks", {})[exchange] = network
+        _write_state(state)
+
+    _log.warning(f"[RuntimeExchange] NETWORK {exchange} → {network.upper()}")
+    return {"exchange": exchange, "network": network}
 
 
 def summary() -> dict[str, Any]:

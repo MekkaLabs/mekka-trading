@@ -3785,8 +3785,86 @@ async function _mkLoadExchangeSelector() {
       sel.appendChild(opt);
     }
     sel.dataset.current = res.active || '';
+    // Renderiza o botão de rede da corretora ATIVA.
+    const activeEx = list.find(e => e.active) || list[0];
+    _mkRenderNetworkToggle(activeEx);
   } catch (_e) {
     // Leave the placeholder; selector is non-critical.
+  }
+}
+
+function _mkRenderNetworkToggle(activeEx) {
+  const btn = document.getElementById('network-toggle');
+  if (!btn || !activeEx) return;
+  const net = String(activeEx.network || '').toLowerCase();
+  btn.dataset.exchange = activeEx.id || '';
+  btn.dataset.network = net;
+  btn.classList.remove('network-testnet', 'network-mainnet', 'network-unknown');
+  if (net === 'mainnet') {
+    btn.textContent = '🟢 MAINNET';
+    btn.classList.add('network-mainnet');
+    btn.title = 'Mainnet (dados reais). Clique para voltar à testnet. Execução real ainda depende do double-gate.';
+  } else if (net === 'testnet') {
+    btn.textContent = '🧪 TESTNET';
+    btn.classList.add('network-testnet');
+    btn.title = 'Testnet (dinheiro fake). Clique para ir à MAINNET (dados reais).';
+  } else {
+    btn.textContent = 'REDE ???';
+    btn.classList.add('network-unknown');
+  }
+  btn.disabled = !activeEx.credentials_present || !net;
+  if (btn.dataset.wired !== '1') {
+    btn.addEventListener('click', _mkOnNetworkToggle);
+    btn.dataset.wired = '1';
+  }
+}
+
+async function _mkOnNetworkToggle() {
+  const btn = document.getElementById('network-toggle');
+  if (!btn) return;
+  const ex = btn.dataset.exchange;
+  const cur = btn.dataset.network;
+  const target = cur === 'mainnet' ? 'testnet' : 'mainnet';
+  if (!ex) return;
+
+  let body = { exchange: ex, network: target };
+  if (target === 'mainnet') {
+    const typed = window.prompt(
+      '⚠️ TROCAR PARA MAINNET (dados reais)\n\n' +
+      `Corretora: ${ex}\n\n` +
+      'A rede muda para MAINNET. ATENÇÃO: se o sistema estiver em modo LIVE ' +
+      '(PAPER_TRADING=false + LIVE_TRADING_CONFIRMED=true), as ordens vão para ' +
+      'a corretora com DINHEIRO REAL. Se estiver em paper, é simulado em dados reais.\n\n' +
+      'Lembre: a MAINNET da Binance usa CHAVES DIFERENTES da testnet.\n\n' +
+      'Digite MAINNET para confirmar:'
+    );
+    if (String(typed || '').toUpperCase() !== 'MAINNET') return;
+    body.confirm = 'MAINNET';
+  } else {
+    if (!window.confirm(`Voltar a rede de ${ex} para TESTNET (dinheiro fake)?`)) return;
+  }
+
+  btn.disabled = true;
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = (typeof getDashboardToken === 'function') ? getDashboardToken() : '';
+    if (token) headers['X-Mekka-Token'] = token;
+    const res = await fetch('/api/exchange/network', {
+      method: 'POST', credentials: 'include', headers, body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      window.alert(`Não foi possível trocar a rede:\n${data.error || res.status}`);
+    } else if (data.real_money) {
+      window.alert('🔴 ATENÇÃO: MAINNET + LIVE ativo — as próximas ordens usam DINHEIRO REAL.');
+    } else if (target === 'mainnet') {
+      window.alert('🟢 Mainnet ativa. Como o sistema está em PAPER, é simulado em dados reais (seguro).');
+    }
+  } catch (e) {
+    window.alert(`Erro ao trocar a rede: ${e}`);
+  } finally {
+    _mkLoadExchangeSelector();
+    _mkLoadEnvBadge();
   }
 }
 
