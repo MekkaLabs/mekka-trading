@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mekka Trading Command Center</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260602b" />
+    <link rel="stylesheet" href="/static/style.css?v=20260602d" />
     <link rel="stylesheet" href="/static/office-v2/office-v2.css" />
     <!-- Vendored copies first (no SRI needed — same-origin), CDN fallback
          on error with SRI matching the vendored bytes. If the CDN serves
@@ -1044,6 +1044,16 @@
         </div>
       </section>
 
+      <!-- Qualidade de execução: slippage de entrada realizado por símbolo.
+           Fonte: /api/execution-quality (IronMan grava entry_slippage_bps). -->
+      <section class="panel" id="sec-exec-quality" data-page="performance">
+        <h2>🎯 Qualidade de Execução</h2>
+        <p class="muted-line">Slippage de entrada realizado (preço do fill vs entrada planejada). Verde = bom, vermelho = acima do limite de alerta.</p>
+        <div id="exec-quality-body" class="exec-quality-body">
+          <div class="muted-line">Carregando…</div>
+        </div>
+      </section>
+
       <section class="panel replay-panel" id="sec-trades-timeline" data-page="performance">
         <h2>Trades Execution Timeline</h2>
         <div class="positions-toolbar">
@@ -2033,7 +2043,7 @@
          the Pixel Office uses (P0.6, HANDOFF 2026-05-20). MUST load
          before app.js (which calls renderAgentsRoster() during boot). -->
     <script src="/static/agents-sprites.js" defer></script>
-    <script src="/static/app.js?v=20260602c" defer></script>
+    <script src="/static/app.js?v=20260602d" defer></script>
     <!-- second_brain_activity.js (carregado no head com defer) auto-monta
          em #second-brain-activity quando ele existe no DOM. Sem script
          inline aqui — bootstrap está dentro do próprio módulo. -->

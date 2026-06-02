@@ -535,6 +535,7 @@ class MekkaDashboardServer:
         r.add_get("/api/opmode", self._handle_opmode_get)
         r.add_post("/api/opmode", self._handle_opmode_set)
         r.add_get("/api/learnings", self._handle_learnings_get)
+        r.add_get("/api/execution-quality", self._handle_execution_quality)
         r.add_get("/api/exchange", self._handle_exchange_get)
         r.add_post("/api/exchange", self._handle_exchange_set)
         r.add_post("/api/exchange/network", self._handle_exchange_network_set)
@@ -3825,6 +3826,53 @@ class MekkaDashboardServer:
                 "learnings": recall(agent, limit=limit),
             })
         return web.json_response(stats())
+
+    async def _handle_execution_quality(self, request: web.Request) -> web.Response:
+        """GET /api/execution-quality[?limit=200]
+
+        Agrega o slippage de entrada realizado (IronMan grava entry_slippage_bps
+        em raw.metadata) por símbolo: média, máximo e contagem. Read-only,
+        fail-silent. Alimenta o painel de qualidade de execução do dashboard.
+        """
+        try:
+            limit = max(10, min(1000, int(request.query.get("limit", "200"))))
+        except (TypeError, ValueError):
+            limit = 200
+        try:
+            trades = await MekkaRepository.list_recent_trades(limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"available": False, "error": str(exc), "by_symbol": []})
+
+        agg: dict[str, dict[str, Any]] = {}
+        for t in trades or []:
+            try:
+                meta = (getattr(t, "raw", None) or {}).get("metadata") or {}
+                if "entry_slippage_bps" not in meta:
+                    continue
+                bps = float(meta["entry_slippage_bps"])
+                sym = getattr(t, "symbol", "?")
+                a = agg.setdefault(sym, {"symbol": sym, "n": 0, "sum": 0.0, "max": None})
+                a["n"] += 1
+                a["sum"] += bps
+                a["max"] = bps if a["max"] is None else max(a["max"], bps)
+            except Exception:  # noqa: BLE001
+                continue
+
+        rows = []
+        for sym, a in agg.items():
+            n = a["n"] or 1
+            rows.append({
+                "symbol": sym,
+                "trades": a["n"],
+                "avg_slippage_bps": round(a["sum"] / n, 1),
+                "max_slippage_bps": round(a["max"], 1) if a["max"] is not None else None,
+            })
+        rows.sort(key=lambda r: r["avg_slippage_bps"], reverse=True)
+        return web.json_response({
+            "available": True,
+            "alert_bps": float(getattr(settings, "execution_slippage_alert_bps", 30.0)),
+            "by_symbol": rows,
+        })
 
     # ------------------------------------------------------------------
     # Active Exchange — GET /api/exchange  POST /api/exchange

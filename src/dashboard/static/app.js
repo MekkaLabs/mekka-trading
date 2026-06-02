@@ -6251,6 +6251,44 @@ function _bootOpMode() {
   _opModeTimer = _registerInterval(setInterval(_opModeFetch, 10000));
 }
 
+// ── Painel de Qualidade de Execução (slippage por símbolo) ──────────────────
+let _execQualityTimer = null;
+
+async function _loadExecQuality() {
+  const body = document.getElementById('exec-quality-body');
+  if (!body) return;
+  try {
+    const data = await fetch('/api/execution-quality', { cache: 'no-store' }).then(r => r.json());
+    const rows = (data && data.by_symbol) || [];
+    const alertBps = (data && data.alert_bps) || 30;
+    if (!rows.length) {
+      body.innerHTML = '<div class="muted-line">Sem trades com slippage medido ainda. Aparece conforme o IronMan executa entradas.</div>';
+      return;
+    }
+    let html = '<table class="exec-quality-table"><thead><tr>' +
+      '<th>Símbolo</th><th>Trades</th><th>Slippage médio</th><th>Pior</th></tr></thead><tbody>';
+    for (const r of rows) {
+      const avg = Number(r.avg_slippage_bps);
+      const cls = avg > alertBps ? 'eq-bad' : (avg > alertBps / 2 ? 'eq-warn' : 'eq-good');
+      const max = (r.max_slippage_bps == null) ? '—' : `${r.max_slippage_bps} bps`;
+      html += `<tr><td>${r.symbol}</td><td>${r.trades}</td>` +
+        `<td class="${cls}">${avg} bps</td><td>${max}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    html += `<div class="muted-line" style="margin-top:6px">Limite de alerta: ${alertBps} bps. Slippage positivo = fill pior que o planejado.</div>`;
+    body.innerHTML = html;
+  } catch (_e) {
+    body.innerHTML = '<div class="muted-line">Painel indisponível no momento.</div>';
+  }
+}
+
+function _bootExecQuality() {
+  if (!document.getElementById('exec-quality-body')) return;
+  _loadExecQuality();
+  if (_execQualityTimer) clearInterval(_execQualityTimer);
+  _execQualityTimer = _registerInterval(setInterval(_loadExecQuality, 30000));
+}
+
 // ── Boot all v2 features ─────────────────────────────────────
 function _mkBootDashboardV2() {
   // Sync prefs from server first (async, non-blocking — nav still works immediately)
@@ -6277,6 +6315,8 @@ function _mkBootDashboardV2() {
   try { _bootSystemPower(); } catch (e) { console.error('[v2] _bootSystemPower failed:', e); }
   // Modo de Operação (manual/automatic) — switch raiz no menu de cima
   try { _bootOpMode(); } catch (e) { console.error('[v2] _bootOpMode failed:', e); }
+  // Painel de qualidade de execução (slippage por símbolo)
+  try { _bootExecQuality(); } catch (e) { console.error('[v2] _bootExecQuality failed:', e); }
   // Global WS — real-time topbar + positions across all pages
   try { _bootGlobalWs(); } catch (e) { console.error('[v2] _bootGlobalWs failed:', e); }
   // Office iframe auto-resize (no internal scrollbar)
