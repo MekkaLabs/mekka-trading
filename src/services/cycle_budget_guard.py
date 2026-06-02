@@ -228,10 +228,15 @@ class CycleBudgetGuard:
         return count
 
     def summary(self) -> dict:
+        _gspent = self._global_session.total_cost_usd
+        _gcap = self._max_cost_usd_global
         return {
             "total_symbols": len(self._sessions),
             "total_skipped": self._total_skipped,
             "max_cost_usd": self._max_cost_usd,
+            "max_cost_usd_global": _gcap,
+            "global_spent_usd": round(_gspent, 6),
+            "global_pct": round(_gspent / _gcap * 100, 1) if _gcap > 0 else 0.0,
             "max_calls": self._max_calls,
             "auto_reset_hours": self._auto_reset_hours,
             "global": self._global_session.to_dict(),

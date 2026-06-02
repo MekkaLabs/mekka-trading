@@ -6447,6 +6447,18 @@ async function _loadLlmCost() {
       }
       html += '</tbody></table>';
     }
+    // Orçamento global: barra de gasto vs cap (quão perto da pausa de Vision)
+    const bg = d.cost.budget_guard;
+    if (bg && bg.max_cost_usd_global > 0) {
+      const pct = Math.min(100, Number(bg.global_pct || 0));
+      const barCls = pct > 90 ? 'gl-nogo' : (pct > 70 ? 'gl-warn' : 'gl-go');
+      html += `<div style="margin-top:10px"><strong>Orçamento global:</strong> ` +
+        `$${Number(bg.global_spent_usd).toFixed(4)} / $${Number(bg.max_cost_usd_global).toFixed(2)} (${pct}%)`;
+      html += `<div class="llm-budget-bar"><div class="llm-budget-fill ${barCls}" style="width:${pct}%"></div></div>`;
+      if ((bg.total_skipped || 0) > 0)
+        html += `<span class="muted-line">${bg.total_skipped} ciclo(s) pulado(s) por orçamento</span>`;
+      html += '</div>';
+    }
     body.innerHTML = html;
   } catch (_e) {
     body.innerHTML = '<div class="muted-line">Painel de custo indisponível.</div>';

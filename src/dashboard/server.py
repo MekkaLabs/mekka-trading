@@ -4528,6 +4528,18 @@ class MekkaDashboardServer:
             from src.services.llm_cost_tracker import get_llm_cost_tracker
             tracker = get_llm_cost_tracker(auto_register=True)
             data = tracker.summary()
+            # Estado do guard de orçamento (gasto global vs cap → pausa de Vision)
+            try:
+                from src.services.cycle_budget_guard import get_cycle_budget_guard
+                bg = get_cycle_budget_guard().summary()
+                data["budget_guard"] = {
+                    "global_spent_usd": bg.get("global_spent_usd", 0.0),
+                    "max_cost_usd_global": bg.get("max_cost_usd_global", 0.0),
+                    "global_pct": bg.get("global_pct", 0.0),
+                    "total_skipped": bg.get("total_skipped", 0),
+                }
+            except Exception:  # noqa: BLE001
+                pass
             return web.Response(
                 content_type="application/json",
                 text=_json.dumps({"ok": True, "cost": data}),
