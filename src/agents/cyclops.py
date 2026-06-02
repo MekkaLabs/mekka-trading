@@ -776,6 +776,39 @@ class Cyclops:
                     })
                 except Exception as exc_vault:  # noqa: BLE001
                     logger.debug(f"[Cyclops] vault writer no-op: {exc_vault}")
+                # Outcome → aprendizado (2026-06-02): registra uma lição estável
+                # por (símbolo, lado, tipo de saída) no diário do Cyclops. Dedup
+                # reforça em recorrência — se um símbolo/lado vive batendo no
+                # stop, a lição acumula reforço e vira sinal. Só consultiva.
+                try:
+                    _tr = (trigger_reason or "").upper()
+                    if "TIME" in _tr:
+                        _lesson = (
+                            f"{symbol} {side}: posições fecham por TEMPO sem atingir "
+                            f"alvo nem stop — alvo pode estar longe / momentum fraco."
+                        )
+                        _cat = "outcome-time"
+                    elif pnl_usd >= 0 or "TP" in _tr or "TAKE" in _tr or "LADDER" in _tr:
+                        _lesson = (
+                            f"{symbol} {side}: posições atingiram o alvo (TP) — "
+                            f"setup tende a funcionar nesse ativo/lado."
+                        )
+                        _cat = "outcome-win"
+                    else:
+                        _lesson = (
+                            f"{symbol} {side}: posições fecham no STOP — revisar "
+                            f"qualidade da entrada/timing nesse ativo/lado."
+                        )
+                        _cat = "outcome-loss"
+                    from src.services.agent_learning_journal import record as _rec  # noqa: WPS433
+                    import asyncio as _aio  # noqa: WPS433
+                    await _aio.to_thread(
+                        _rec, "Cyclops", _lesson,
+                        category=_cat, evidence=f"último pnl={pnl_usd:+.2f} ({trigger_reason})",
+                        confidence=0.5, tags=["outcome", symbol, side],
+                    )
+                except Exception as exc_learn:  # noqa: BLE001
+                    logger.debug(f"[Cyclops] outcome learning no-op: {exc_learn}")
                 # Stories 063/183/186 — resolve all memory stores via central helper.
                 # AgentMemory (063), RoleWorkingMemory (183), SignalOutcomeMemory (186)
                 # are all written from the same place so closes via SL/TP, manual or
