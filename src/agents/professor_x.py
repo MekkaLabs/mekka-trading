@@ -129,20 +129,37 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
                 onchain_data=onchain,
             )
         except Exception as exc:  # noqa: BLE001
-            self._log.warning(f"[ProfessorX] SpiderMan skipped: {exc}")
-            anomaly = None
+            # Review-fix (2026-06-01): FAIL-SAFE. Antes, falha do Spider-Man
+            # virava anomaly=None → is_safe_to_trade=True (fail-OPEN: o detector
+            # de anomalia, cujo trabalho é PAUSAR, quando quebra LIBERAVA o trade).
+            # Agora sintetiza um relatório com should_pause=True: sem o detector
+            # de anomalia funcionando, não operamos com dinheiro real.
+            self._log.error(f"[ProfessorX] SpiderMan FALHOU — pausando por segurança: {exc}")
+            from src.models.market_data import AnomalyReport, AnomalySeverity  # noqa: WPS433
+            anomaly = AnomalyReport(
+                symbol=symbol,
+                anomalies_detected=[f"SpiderMan unavailable: {exc}"],
+                severity=AnomalySeverity.HIGH,
+                should_pause=True,
+            )
 
         # Fase 2.4 — Qualidade mínima da análise.
         # Mapeia quantas fontes Layer 1 efetivamente respondem (chart é hard-required).
         # Se chegamos com poucas fontes além de chart, marcamos `degraded=True`
         # para que Vision/Batman sejam mais conservadores.
+        # Review-fix (2026-06-01): uma fonte PRESENTE mas SEM DADOS (sentiment
+        # score=0 de falha, onchain NEUTRAL de fetch vazio, liquidity de book
+        # indisponível) não deve contar como fonte saudável. Checa data_available.
+        def _has(x) -> bool:
+            return x is not None and bool(getattr(x, "data_available", True))
+
         _sources_present: dict[str, bool] = {
             "chart": chart is not None,
             "confirmation_chart": confirmation_chart is not None,
-            "sentiment": sentiment is not None,
-            "onchain": onchain is not None,
+            "sentiment": _has(sentiment),
+            "onchain": _has(onchain),
             "volatility": volatility is not None,
-            "liquidity": liquidity is not None,
+            "liquidity": _has(liquidity),
             "anomaly": anomaly is not None,
             "momentum": momentum is not None,
         }
@@ -183,6 +200,40 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
         debate_verdict = await self._maybe_run_debate(analysis, symbol)
         if debate_verdict is not None:
             analysis = analysis.model_copy(update={"debate_verdict": debate_verdict})
+
+        # ── Cable Regime Adapter (2026-05-29 REV-4) ─────────────────────────
+        # Cable agent já fetcha funding rate 8h rolling. Adapter injeta no
+        # analysis.onchain.funding_rate quando Black Panther não preencheu.
+        # Fail-silent + preserve Black Panther values.
+        try:
+            from src.services.cable_regime_adapter import (
+                is_enabled as _cable_enabled,
+                enrich_analysis_with_cable,
+            )
+            if _cable_enabled():
+                cable_result = await enrich_analysis_with_cable(analysis, symbol)
+                if cable_result.get("applied"):
+                    self._log.info(
+                        f"[ProfessorX] Cable adapter injected funding "
+                        f"{cable_result['funding_rate']:.6f} for {symbol}"
+                    )
+        except Exception as _cable_exc:  # noqa: BLE001
+            self._log.debug(f"[ProfessorX] cable adapter no-op: {_cable_exc}")
+
+        # ── Be Water Framework — regime detection (2026-05-28) ──────────────
+        # Optional: enrich analysis.metadata with detected regime + selected
+        # strategies. Gated por BE_WATER_FRAMEWORK_ENABLED. Read-only —
+        # Vision pode usar como contexto, mas o flow Vision/Batman/IronMan
+        # original NÃO é alterado.
+        try:
+            from src.services.be_water_mekka_bridge import (
+                is_enabled as _bw_enabled,
+                detect_and_log_regime_change as _bw_log,
+            )
+            if _bw_enabled():
+                await _bw_log(symbol, analysis)
+        except Exception as _bw_exc:  # noqa: BLE001
+            self._log.debug(f"[ProfessorX] be_water bridge no-op: {_bw_exc}")
 
         self._log.info(
             f"[ProfessorX] {symbol} analysis assembled — "
@@ -225,10 +276,15 @@ class ProfessorX(BaseAgent[MarketAnalysis]):
             }
             verdict = await moderator.run(context=context, symbol=symbol)
 
-            # Log assíncrono (fire-and-forget)
-            asyncio.create_task(
-                DebateVerdictLogger().log(verdict, symbol=symbol)
-            )
+            # Log assíncrono — Review-fix (2026-06-01): reter a referência (set
+            # de instância) + discard no done. Sem isso, o GC podia coletar a task
+            # antes de completar ("Task was destroyed but it is pending") e o log
+            # do veredito se perdia silenciosamente.
+            if not hasattr(self, "_bg_tasks"):
+                self._bg_tasks = set()
+            _t = asyncio.create_task(DebateVerdictLogger().log(verdict, symbol=symbol))
+            self._bg_tasks.add(_t)
+            _t.add_done_callback(self._bg_tasks.discard)
             return verdict
         except Exception as exc:
             self._log.warning(f"[ProfessorX] debate skipped: {exc}")

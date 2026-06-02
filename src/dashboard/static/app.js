@@ -1464,17 +1464,76 @@ function renderHeroSla(rows) {
   }).join('');
 }
 
+// Banners dispensados pelo operador (persistido por sessão do browser).
+// Chave = code + '|' + message (mesma combinação não volta enquanto durar).
+const _DISMISSED_ALERTS_KEY = 'mekka.dismissedAlerts.v1';
+function _loadDismissedAlerts() {
+  try {
+    return new Set(JSON.parse(sessionStorage.getItem(_DISMISSED_ALERTS_KEY) || '[]'));
+  } catch (e) { return new Set(); }
+}
+function _saveDismissedAlerts(set) {
+  try {
+    sessionStorage.setItem(_DISMISSED_ALERTS_KEY, JSON.stringify([...set]));
+  } catch (e) { /* quota cheia, ignora */ }
+}
+
+window.dismissAlertBanner = function (key) {
+  const set = _loadDismissedAlerts();
+  set.add(key);
+  _saveDismissedAlerts(set);
+  // Remove o DOM correspondente sem aguardar próximo poll
+  const els = document.querySelectorAll(`.alert-banner[data-alert-key="${CSS.escape(key)}"]`);
+  els.forEach((el) => {
+    el.style.opacity = '0';
+    el.style.maxHeight = '0';
+    setTimeout(() => el.remove(), 240);
+  });
+};
+
 function renderGlobalAlerts(rows) {
   hasGlobalCriticalAlert = false;
+  const dismissed = _loadDismissedAlerts();
   if (!rows || rows.length === 0) {
     globalAlerts.innerHTML = '';
     return;
   }
-  globalAlerts.innerHTML = rows.map((r) => {
-    if (String(r.severity || '').toUpperCase() === 'CRITICAL') hasGlobalCriticalAlert = true;
-    const cls = String(r.severity || '').toUpperCase() === 'WARNING' ? 'warning' : '';
-    return `<div class="alert-banner ${cls}">${escapeHtml(r.code)}: ${escapeHtml(r.message)}</div>`;
-  }).join('');
+  const visible = rows.filter((r) => {
+    const key = `${r.code || ''}|${r.message || ''}`;
+    return !dismissed.has(key);
+  });
+
+  // Render DOM diretamente (sem onclick inline frágil — escape de string
+  // dentro de atributo HTML quebra em mensagens com aspas/back-slashes).
+  globalAlerts.innerHTML = '';
+  visible.forEach((r) => {
+    const sev = String(r.severity || '').toUpperCase();
+    if (sev === 'CRITICAL') hasGlobalCriticalAlert = true;
+
+    const banner = document.createElement('div');
+    banner.className = 'alert-banner' + (sev === 'WARNING' ? ' warning' : '');
+    const key = `${r.code || ''}|${r.message || ''}`;
+    banner.dataset.alertKey = key;
+
+    const body = document.createElement('span');
+    body.className = 'alert-banner-body';
+    body.textContent = `${r.code || ''}: ${r.message || ''}`;
+    banner.appendChild(body);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'alert-banner-close';
+    btn.title = 'Fechar este alerta nesta sessão';
+    btn.setAttribute('aria-label', 'Fechar alerta');
+    btn.textContent = '×';
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      window.dismissAlertBanner(key);
+    });
+    banner.appendChild(btn);
+
+    globalAlerts.appendChild(banner);
+  });
 }
 
 function openRiskDrilldown(symbol) {
@@ -3726,8 +3785,86 @@ async function _mkLoadExchangeSelector() {
       sel.appendChild(opt);
     }
     sel.dataset.current = res.active || '';
+    // Renderiza o botão de rede da corretora ATIVA.
+    const activeEx = list.find(e => e.active) || list[0];
+    _mkRenderNetworkToggle(activeEx);
   } catch (_e) {
     // Leave the placeholder; selector is non-critical.
+  }
+}
+
+function _mkRenderNetworkToggle(activeEx) {
+  const btn = document.getElementById('network-toggle');
+  if (!btn || !activeEx) return;
+  const net = String(activeEx.network || '').toLowerCase();
+  btn.dataset.exchange = activeEx.id || '';
+  btn.dataset.network = net;
+  btn.classList.remove('network-testnet', 'network-mainnet', 'network-unknown');
+  if (net === 'mainnet') {
+    btn.textContent = '🟢 MAINNET';
+    btn.classList.add('network-mainnet');
+    btn.title = 'Mainnet (dados reais). Clique para voltar à testnet. Execução real ainda depende do double-gate.';
+  } else if (net === 'testnet') {
+    btn.textContent = '🧪 TESTNET';
+    btn.classList.add('network-testnet');
+    btn.title = 'Testnet (dinheiro fake). Clique para ir à MAINNET (dados reais).';
+  } else {
+    btn.textContent = 'REDE ???';
+    btn.classList.add('network-unknown');
+  }
+  btn.disabled = !activeEx.credentials_present || !net;
+  if (btn.dataset.wired !== '1') {
+    btn.addEventListener('click', _mkOnNetworkToggle);
+    btn.dataset.wired = '1';
+  }
+}
+
+async function _mkOnNetworkToggle() {
+  const btn = document.getElementById('network-toggle');
+  if (!btn) return;
+  const ex = btn.dataset.exchange;
+  const cur = btn.dataset.network;
+  const target = cur === 'mainnet' ? 'testnet' : 'mainnet';
+  if (!ex) return;
+
+  let body = { exchange: ex, network: target };
+  if (target === 'mainnet') {
+    const typed = window.prompt(
+      '⚠️ TROCAR PARA MAINNET (dados reais)\n\n' +
+      `Corretora: ${ex}\n\n` +
+      'A rede muda para MAINNET. ATENÇÃO: se o sistema estiver em modo LIVE ' +
+      '(PAPER_TRADING=false + LIVE_TRADING_CONFIRMED=true), as ordens vão para ' +
+      'a corretora com DINHEIRO REAL. Se estiver em paper, é simulado em dados reais.\n\n' +
+      'Lembre: a MAINNET da Binance usa CHAVES DIFERENTES da testnet.\n\n' +
+      'Digite MAINNET para confirmar:'
+    );
+    if (String(typed || '').toUpperCase() !== 'MAINNET') return;
+    body.confirm = 'MAINNET';
+  } else {
+    if (!window.confirm(`Voltar a rede de ${ex} para TESTNET (dinheiro fake)?`)) return;
+  }
+
+  btn.disabled = true;
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = (typeof getDashboardToken === 'function') ? getDashboardToken() : '';
+    if (token) headers['X-Mekka-Token'] = token;
+    const res = await fetch('/api/exchange/network', {
+      method: 'POST', credentials: 'include', headers, body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      window.alert(`Não foi possível trocar a rede:\n${data.error || res.status}`);
+    } else if (data.real_money) {
+      window.alert('🔴 ATENÇÃO: MAINNET + LIVE ativo — as próximas ordens usam DINHEIRO REAL.');
+    } else if (target === 'mainnet') {
+      window.alert('🟢 Mainnet ativa. Como o sistema está em PAPER, é simulado em dados reais (seguro).');
+    }
+  } catch (e) {
+    window.alert(`Erro ao trocar a rede: ${e}`);
+  } finally {
+    _mkLoadExchangeSelector();
+    _mkLoadEnvBadge();
   }
 }
 
@@ -3786,15 +3923,22 @@ async function _mkLoadEnvBadge() {
     const ex = String(res.exchange).toUpperCase();
     const net = String(res.network || 'unknown').toUpperCase();
     const mode = String(res.mode || 'unknown');
+    // F8 (2026-05-28): Binance pode estar em USDT-M (linear) ou COIN-M (inverse).
+    // Mostrar no badge pra operador não confundir mercado settled-em-USDT
+    // vs settled-em-BTC. Outras exchanges não têm essa distinção.
+    let marketSuffix = '';
+    if (ex === 'BINANCE' && res.binance_market_type) {
+      marketSuffix = res.binance_market_type === 'inverse' ? ' · COIN-M' : ' · USDT-M';
+    }
     // Label content: include both exchange and network so an operator
     // never has to remember which one is "current". Paper override is
     // shown explicitly so the operator knows the mainnet colour does
     // NOT mean live orders.
     let label;
-    if (mode === 'paper') label = `${ex} · PAPER`;
-    else                  label = `${ex} · ${net}`;
+    if (mode === 'paper') label = `${ex}${marketSuffix} · PAPER`;
+    else                  label = `${ex}${marketSuffix} · ${net}`;
     el.textContent = label;
-    el.title = `Exchange: ${ex}\nNetwork: ${net}\nPaper trading: ${res.paper_trading}\nLive confirmed: ${res.live_confirmed}`;
+    el.title = `Exchange: ${ex}\nNetwork: ${net}\nMarket type: ${res.binance_market_type || 'n/a'}\nPaper trading: ${res.paper_trading}\nLive confirmed: ${res.live_confirmed}\nScalp mainnet enabled: ${res.scalp_mainnet_enabled}`;
     // Reset class list before reapplying — order doesn't matter, only
     // exactly one of the four states should be present.
     el.classList.remove(
@@ -5923,18 +6067,85 @@ async function _sysPowerToggle() {
 
 async function _sysPowerReboot() {
   if (_sysPowerBusy) return;
-  const ok = confirm('⚠️ Reiniciar todo o sistema?\n\nO loop de trading será parado e iniciado novamente.');
-  if (!ok) return;
+  // 2 modos: soft (só runtime) ou hard (todo o processo Python)
+  const choice = prompt(
+    '⚠️ Como reiniciar?\n\n' +
+    '  • Digite SOFT — só o loop de trading (rápido, ~2s)\n' +
+    '  • Digite HARD — todo o processo Python (substitui via os.execv,\n' +
+    '    dashboard cai por ~15s e volta com tudo zerado em memória)\n\n' +
+    'Cancele para abortar.',
+    'SOFT',
+  );
+  if (choice === null) return;
+  const mode = String(choice).trim().toUpperCase();
+  if (mode !== 'SOFT' && mode !== 'HARD') {
+    alert('❌ Modo inválido. Digite SOFT ou HARD.');
+    return;
+  }
   _sysPowerBusy = true;
   _sysPowerRender({ state: 'stopping' });
   try {
-    await _sysPowerPost('/api/system/reboot', { confirm: 'REBOOT' });
+    const result = await _sysPowerPost('/api/system/reboot', {
+      confirm: 'REBOOT',
+      mode: mode.toLowerCase(),
+    });
+    if (mode === 'HARD') {
+      // Dashboard vai cair. Mostra banner + auto-reconnect.
+      _showHardRebootBanner();
+      return;  // não chama _sysPowerFetchStatus (vai dar 503)
+    }
+    console.log('[reboot] soft result:', result);
   } catch (e) {
+    if (mode === 'HARD') {
+      // Esperado: fetch falha porque processo morreu mid-flight
+      _showHardRebootBanner();
+      return;
+    }
     alert('❌ Falha ao reiniciar o sistema: ' + e.message);
   } finally {
     _sysPowerBusy = false;
-    _sysPowerFetchStatus();
+    if (mode === 'SOFT') _sysPowerFetchStatus();
   }
+}
+
+function _showHardRebootBanner() {
+  // Banner full-screen + auto-reload quando server voltar
+  let banner = document.getElementById('hard-reboot-banner');
+  if (banner) banner.remove();
+  banner = document.createElement('div');
+  banner.id = 'hard-reboot-banner';
+  banner.style.cssText = (
+    'position:fixed;inset:0;z-index:999999;background:rgba(0,0,0,0.92);' +
+    'color:#5be8f5;font-family:monospace;display:flex;align-items:center;' +
+    'justify-content:center;flex-direction:column;gap:20px;font-size:1.2rem;' +
+    'text-align:center;padding:40px'
+  );
+  banner.innerHTML = (
+    '<div style="font-size:3rem">🔄</div>' +
+    '<div><b>Hard reboot em progresso</b></div>' +
+    '<div style="color:#aaa;font-size:0.95rem">Processo Python sendo substituído via os.execv.<br>Dashboard volta em ~15s automaticamente.</div>' +
+    '<div id="hard-reboot-spinner" style="margin-top:18px">⏳ Aguardando server voltar…</div>'
+  );
+  document.body.appendChild(banner);
+
+  // Polling do server
+  let attempts = 0;
+  const tick = async () => {
+    attempts++;
+    try {
+      const r = await fetch('/api/system/status', { cache: 'no-store' });
+      if (r.ok) {
+        document.getElementById('hard-reboot-spinner').textContent = '✅ Server voltou! Recarregando…';
+        setTimeout(() => window.location.reload(), 800);
+        return;
+      }
+    } catch (_) { /* ignora — server ainda subindo */ }
+    const sp = document.getElementById('hard-reboot-spinner');
+    if (sp) sp.textContent = `⏳ Aguardando server voltar… (tentativa ${attempts})`;
+    if (attempts < 60) setTimeout(tick, 1000);  // tenta 60s
+    else if (sp) sp.textContent = '❌ Server não voltou em 60s. Refresh manualmente.';
+  };
+  setTimeout(tick, 3000);  // dá 3s antes de começar a checar
 }
 
 function _bootSystemPower() {
@@ -5946,6 +6157,319 @@ function _bootSystemPower() {
   _sysPowerFetchStatus();
   if (_sysPowerTimer) clearInterval(_sysPowerTimer);
   _sysPowerTimer = _registerInterval(setInterval(_sysPowerFetchStatus, 5000));
+}
+
+// ── Modo de Operação (manual/automatic) — switch RAIZ de aprovação ──────────
+//   GET  /api/opmode -> {mode, requires_trade_approval, improvements_auto_apply}
+//   POST /api/opmode  {"mode": "manual"|"automatic"}
+// Troca instantânea; o próximo ciclo respeita. Botão no menu de cima.
+let _opModeTimer = null;
+let _opModeBusy = false;
+let _opModeState = 'unknown';
+
+function _opModeRender(snap) {
+  const pill = document.getElementById('opmode-pill');
+  const toggle = document.getElementById('opmode-toggle');
+  if (!pill || !toggle) return;
+
+  const mode = (snap && snap.mode) || 'unknown';
+  _opModeState = mode;
+
+  pill.classList.remove('opmode-manual', 'opmode-automatic', 'opmode-unknown');
+  if (mode === 'manual') {
+    pill.textContent = '🙋 MANUAL';
+    pill.classList.add('opmode-manual');
+    pill.title = 'Você aprova cada TRADE. Melhorias sempre exigem aprovação.';
+    toggle.textContent = '→ Automático';
+  } else if (mode === 'automatic') {
+    pill.textContent = '🤖 AUTOMÁTICO';
+    pill.classList.add('opmode-automatic');
+    pill.title = 'TRADES executam sozinhos (gates de risco ativos). Melhorias ainda exigem aprovação.';
+    toggle.textContent = '→ Manual';
+  } else {
+    pill.textContent = 'MODO ???';
+    pill.classList.add('opmode-unknown');
+    pill.title = 'Modo de operação indisponível.';
+    toggle.textContent = '—';
+  }
+  toggle.disabled = _opModeBusy || mode === 'unknown';
+}
+
+async function _opModeFetch() {
+  try {
+    const res = await fetch('/api/opmode', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    _opModeRender(await res.json());
+  } catch (_e) {
+    if (_opModeState === 'unknown') _opModeRender(null);
+  }
+}
+
+async function _opModeToggle() {
+  if (_opModeBusy || _opModeState === 'unknown') return;
+  const target = _opModeState === 'manual' ? 'automatic' : 'manual';
+  if (target === 'automatic') {
+    const ok = confirm(
+      '🤖 ATIVAR MODO AUTOMÁTICO (só TRADES)?\n\n' +
+      'O sistema vai EXECUTAR trades sozinho, sem pedir sua confirmação.\n\n' +
+      'As travas de risco (Batman, kill-switch, limite de perda diária) ' +
+      'continuam ativas.\n\n' +
+      'As MELHORIAS continuam exigindo sua aprovação — o modo não muda isso.\n\n' +
+      'Confirmar?'
+    );
+    if (!ok) return;
+  }
+  _opModeBusy = true;
+  const toggle = document.getElementById('opmode-toggle');
+  if (toggle) toggle.disabled = true;
+  try {
+    const res = await fetch('/api/opmode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: target }),
+    });
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.json()).error || ''; } catch (_) {}
+      throw new Error(detail || ('HTTP ' + res.status));
+    }
+    _opModeRender(await res.json());
+  } catch (e) {
+    alert('❌ Falha ao trocar o modo de operação: ' + e.message);
+  } finally {
+    _opModeBusy = false;
+    _opModeFetch();
+  }
+}
+
+function _bootOpMode() {
+  const toggle = document.getElementById('opmode-toggle');
+  if (!toggle) return;
+  toggle.addEventListener('click', _opModeToggle);
+  _opModeFetch();
+  if (_opModeTimer) clearInterval(_opModeTimer);
+  _opModeTimer = _registerInterval(setInterval(_opModeFetch, 10000));
+}
+
+// ── Painel de Qualidade de Execução (slippage por símbolo) ──────────────────
+let _execQualityTimer = null;
+
+async function _loadExecQuality() {
+  const body = document.getElementById('exec-quality-body');
+  if (!body) return;
+  try {
+    const data = await fetch('/api/execution-quality', { cache: 'no-store' }).then(r => r.json());
+    const rows = (data && data.by_symbol) || [];
+    const alertBps = (data && data.alert_bps) || 30;
+    if (!rows.length) {
+      body.innerHTML = '<div class="muted-line">Sem trades com slippage medido ainda. Aparece conforme o IronMan executa entradas.</div>';
+      return;
+    }
+    let html = '<table class="exec-quality-table"><thead><tr>' +
+      '<th>Símbolo</th><th>Trades</th><th>Slippage médio</th><th>Pior</th>' +
+      '<th>Maker/Taker</th><th>Taxas</th></tr></thead><tbody>';
+    let totalFees = 0;
+    for (const r of rows) {
+      const avg = Number(r.avg_slippage_bps);
+      const cls = avg > alertBps ? 'eq-bad' : (avg > alertBps / 2 ? 'eq-warn' : 'eq-good');
+      const max = (r.max_slippage_bps == null) ? '—' : `${r.max_slippage_bps} bps`;
+      const mk = r.maker || 0, tk = r.taker || 0;
+      const fees = Number(r.fees_usd || 0);
+      totalFees += fees;
+      html += `<tr><td>${r.symbol}</td><td>${r.trades}</td>` +
+        `<td class="${cls}">${avg} bps</td><td>${max}</td>` +
+        `<td><span class="eq-good">${mk}M</span> / ${tk}T</td>` +
+        `<td>$${fees.toFixed(4)}</td></tr>`;
+    }
+    html += '</tbody></table>';
+    html += `<div class="muted-line" style="margin-top:6px">Limite de alerta: ${alertBps} bps · ` +
+      `Total de taxas: $${totalFees.toFixed(4)} · M=maker (taxa menor), T=taker. ` +
+      `Slippage positivo = fill pior que o planejado.</div>`;
+    body.innerHTML = html;
+  } catch (_e) {
+    body.innerHTML = '<div class="muted-line">Painel indisponível no momento.</div>';
+  }
+}
+
+function _bootExecQuality() {
+  if (!document.getElementById('exec-quality-body')) return;
+  _loadExecQuality();
+  if (_execQualityTimer) clearInterval(_execQualityTimer);
+  _execQualityTimer = _registerInterval(setInterval(_loadExecQuality, 30000));
+}
+
+// ── Diário de Aprendizado por agente ────────────────────────────────────────
+function _learnEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function _loadLearningDetail(agent) {
+  const box = document.getElementById('learnings-detail');
+  if (!box) return;
+  box.innerHTML = `<div class="muted-line">Carregando lições de ${_learnEsc(agent)}…</div>`;
+  try {
+    const data = await fetch(`/api/learnings?agent=${encodeURIComponent(agent)}&limit=12`,
+      { cache: 'no-store' }).then(r => r.json());
+    const items = (data && data.learnings) || [];
+    if (!items.length) { box.innerHTML = `<div class="muted-line">Sem lições para ${_learnEsc(agent)}.</div>`; return; }
+    let html = `<h3>📌 ${_learnEsc(agent)} — ${items.length} lição(ões)</h3><ul class="learnings-list">`;
+    for (const it of items) {
+      const conf = Math.round((Number(it.confidence) || 0) * 100);
+      const rc = it.reinforced_count || 1;
+      const cat = _learnEsc(it.category || 'general');
+      html += `<li><span class="learn-cat">${cat}</span> ${_learnEsc(it.lesson)}` +
+        `<span class="learn-meta">conf ${conf}% · reforço ${rc}×</span></li>`;
+    }
+    html += '</ul>';
+    box.innerHTML = html;
+  } catch (_e) {
+    box.innerHTML = '<div class="muted-line">Detalhe indisponível.</div>';
+  }
+}
+
+async function _loadLearnings() {
+  const agentsBox = document.getElementById('learnings-agents');
+  if (!agentsBox) return;
+  try {
+    const data = await fetch('/api/learnings', { cache: 'no-store' }).then(r => r.json());
+    const byAgent = (data && data.by_agent) || {};
+    const names = Object.keys(byAgent);
+    if (!names.length) {
+      agentsBox.innerHTML = '<div class="muted-line">Nenhuma lição registrada ainda. Aparecem conforme os agentes aprendem (ex.: Cyclops ao fechar posições).</div>';
+      return;
+    }
+    names.sort((a, b) => (byAgent[b].lessons || 0) - (byAgent[a].lessons || 0));
+    let html = '';
+    for (const n of names) {
+      const m = byAgent[n];
+      html += `<button class="learn-chip" data-agent="${n}">${n} <span>${m.lessons}</span></button>`;
+    }
+    agentsBox.innerHTML = html;
+    agentsBox.querySelectorAll('.learn-chip').forEach(btn => {
+      btn.addEventListener('click', () => {
+        agentsBox.querySelectorAll('.learn-chip').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        _loadLearningDetail(btn.getAttribute('data-agent'));
+      });
+    });
+  } catch (_e) {
+    agentsBox.innerHTML = '<div class="muted-line">Painel indisponível.</div>';
+  }
+}
+
+function _bootLearnings() {
+  if (!document.getElementById('learnings-agents')) return;
+  _loadLearnings();
+}
+
+// ── Painel de prontidão mainnet (GO / GO_WITH_CONDITIONS / NO_GO) ────────────
+async function _loadGoLiveStatus() {
+  const verdict = document.getElementById('go-live-verdict');
+  const detail  = document.getElementById('go-live-detail');
+  if (!verdict) return;
+  verdict.innerHTML = '<span class="muted-line">Verificando…</span>';
+  detail.innerHTML  = '';
+  try {
+    const d = await fetch('/api/go-live-status', { cache: 'no-store' }).then(r => r.json());
+    const v = d.verdict || 'NO_GO';
+    const cls = { GO: 'gl-go', GO_WITH_CONDITIONS: 'gl-warn', NO_GO: 'gl-nogo' }[v] || 'gl-nogo';
+    const lbl = { GO: '✅ GO — pronto para mainnet',
+                  GO_WITH_CONDITIONS: '⚠️ GO COM CONDIÇÕES — revisar itens abaixo',
+                  NO_GO: '🔴 NO-GO — bloqueadores ativos' }[v] || '🔴 NO-GO';
+    verdict.innerHTML = `<div class="go-live-banner ${cls}">${lbl}</div>`;
+
+    let html = '';
+    if ((d.blockers || []).length) {
+      html += '<div class="gl-section"><strong>🔴 Bloqueadores</strong><ul>';
+      for (const b of d.blockers) html += `<li>${_learnEsc(b)}</li>`;
+      html += '</ul></div>';
+    }
+    if ((d.conditions || []).length) {
+      html += '<div class="gl-section"><strong>⚠️ Condições / WARNs</strong><ul>';
+      for (const c of d.conditions) html += `<li>${_learnEsc(c)}</li>`;
+      html += '</ul></div>';
+    }
+    const op = d.operation_mode || {};
+    const rt = d.runtime || {};
+    html += `<div class="gl-section gl-meta">` +
+      `<span>Modo: <strong>${_learnEsc(op.mode || '?')}</strong></span> · ` +
+      `<span>Loop: <strong>${rt.running ? '🟢 rodando' : '⬛ parado'}</strong></span> · ` +
+      `<span>Ciclos: ${rt.cycles || 0}</span>` +
+      `</div>`;
+    const lrn = d.learning || {};
+    if (lrn.recurring_loss_patterns > 0) {
+      html += `<div class="gl-section"><strong>📓 Padrões de perda recorrente no diário</strong><ul>`;
+      for (const p of (lrn.patterns || []))
+        html += `<li>${_learnEsc(p.agent)}: ${_learnEsc(p.lesson)} <em>(${p.count}×)</em></li>`;
+      html += '</ul></div>';
+    }
+    detail.innerHTML = html;
+  } catch (_e) {
+    verdict.innerHTML = '<span class="muted-line">Falha ao carregar status (servidor pode estar reiniciando).</span>';
+  }
+}
+
+function _bootGoLive() {
+  const btn = document.getElementById('go-live-refresh');
+  if (!btn) return;
+  btn.addEventListener('click', _loadGoLiveStatus);
+}
+
+// ── Painel de custo de LLM (créditos) ───────────────────────────────────────
+let _llmCostTimer = null;
+
+async function _loadLlmCost() {
+  const body = document.getElementById('llm-cost-body');
+  if (!body) return;
+  try {
+    const d = await fetch('/api/cost', { cache: 'no-store' }).then(r => r.json());
+    if (!d || !d.ok || !d.cost) {
+      body.innerHTML = '<div class="muted-line">Sem dados de custo ainda (loop parado ou nenhuma chamada).</div>';
+      return;
+    }
+    const s = d.cost.session || {};
+    const provs = d.cost.by_provider || [];
+    const total = Number(s.total_cost_usd || 0);
+    const perHr = Number(s.cost_per_hour_usd || 0);
+    let html = '<div class="llm-cost-kpis">';
+    html += `<div class="llm-kpi"><span class="llm-kpi-val">$${total.toFixed(4)}</span><span class="llm-kpi-lbl">total sessão</span></div>`;
+    html += `<div class="llm-kpi"><span class="llm-kpi-val">$${perHr.toFixed(4)}</span><span class="llm-kpi-lbl">por hora</span></div>`;
+    html += `<div class="llm-kpi"><span class="llm-kpi-val">${s.total_calls || 0}</span><span class="llm-kpi-lbl">chamadas</span></div>`;
+    html += `<div class="llm-kpi"><span class="llm-kpi-val">${((s.total_tokens || 0) / 1000).toFixed(1)}k</span><span class="llm-kpi-lbl">tokens</span></div>`;
+    html += '</div>';
+    if (provs.length) {
+      html += '<table class="exec-quality-table" style="margin-top:8px"><thead><tr>' +
+        '<th>Provider</th><th>Chamadas</th><th>Custo</th></tr></thead><tbody>';
+      for (const p of provs) {
+        html += `<tr><td>${_learnEsc(p.provider)}</td><td>${p.calls || 0}</td>` +
+          `<td>$${Number(p.cost_usd || 0).toFixed(4)}</td></tr>`;
+      }
+      html += '</tbody></table>';
+    }
+    // Orçamento global: barra de gasto vs cap (quão perto da pausa de Vision)
+    const bg = d.cost.budget_guard;
+    if (bg && bg.max_cost_usd_global > 0) {
+      const pct = Math.min(100, Number(bg.global_pct || 0));
+      const barCls = pct > 90 ? 'gl-nogo' : (pct > 70 ? 'gl-warn' : 'gl-go');
+      html += `<div style="margin-top:10px"><strong>Orçamento global:</strong> ` +
+        `$${Number(bg.global_spent_usd).toFixed(4)} / $${Number(bg.max_cost_usd_global).toFixed(2)} (${pct}%)`;
+      html += `<div class="llm-budget-bar"><div class="llm-budget-fill ${barCls}" style="width:${pct}%"></div></div>`;
+      if ((bg.total_skipped || 0) > 0)
+        html += `<span class="muted-line">${bg.total_skipped} ciclo(s) pulado(s) por orçamento</span>`;
+      html += '</div>';
+    }
+    body.innerHTML = html;
+  } catch (_e) {
+    body.innerHTML = '<div class="muted-line">Painel de custo indisponível.</div>';
+  }
+}
+
+function _bootLlmCost() {
+  if (!document.getElementById('llm-cost-body')) return;
+  _loadLlmCost();
+  if (_llmCostTimer) clearInterval(_llmCostTimer);
+  _llmCostTimer = _registerInterval(setInterval(_loadLlmCost, 30000));
 }
 
 // ── Boot all v2 features ─────────────────────────────────────
@@ -5972,6 +6496,16 @@ function _mkBootDashboardV2() {
   try { _bootCommandCenter(); } catch (e) { console.error('[v2] _bootCommandCenter failed:', e); }
   // Feature C — top bar power control (system on/off/reboot)
   try { _bootSystemPower(); } catch (e) { console.error('[v2] _bootSystemPower failed:', e); }
+  // Modo de Operação (manual/automatic) — switch raiz no menu de cima
+  try { _bootOpMode(); } catch (e) { console.error('[v2] _bootOpMode failed:', e); }
+  // Painel de qualidade de execução (slippage por símbolo)
+  try { _bootExecQuality(); } catch (e) { console.error('[v2] _bootExecQuality failed:', e); }
+  // Painel do diário de aprendizado por agente
+  try { _bootLearnings(); } catch (e) { console.error('[v2] _bootLearnings failed:', e); }
+  // Painel de prontidão mainnet (GO/NO-GO)
+  try { _bootGoLive(); } catch (e) { console.error('[v2] _bootGoLive failed:', e); }
+  // Painel de custo de LLM (créditos)
+  try { _bootLlmCost(); } catch (e) { console.error('[v2] _bootLlmCost failed:', e); }
   // Global WS — real-time topbar + positions across all pages
   try { _bootGlobalWs(); } catch (e) { console.error('[v2] _bootGlobalWs failed:', e); }
   // Office iframe auto-resize (no internal scrollbar)
@@ -7813,11 +8347,16 @@ function _tsColorClass(val) {
 }
 
 async function loadTodaySummary() {
+  console.log('[TodaySummary] fetching /api/today-summary…');
   try {
-    const res = await fetch('/api/today-summary');
+    const res = await fetch('/api/today-summary', { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const d = await res.json();
     if (!d.ok) throw new Error(d.error || 'API error');
+    console.log('[TodaySummary] data:', {
+      open_count: d.open_count, today_trades: (d.today_trades||[]).length,
+      daily_pnl: d.daily_pnl_usd, has_prices: d.has_prices,
+    });
 
     const hasPrices   = !!d.has_prices;
     const showQuoteWarn = !!d.show_quote_warning;

@@ -274,23 +274,23 @@ class DebateModerator:
                 return "SHORT", 0.65, f"Funding elevado ({funding:.4f}) — longs sobrepagando"
             return "HOLD", 0.50, f"Funding neutro ({funding:.4f})"
 
-        # Thor — volatilidade / regime
+        # Thor — volatilidade / regime. Review-fix (2026-06-01): volatilidade é
+        # NÃO-DIRECIONAL (diz QUANTO operar, não QUAL direção). Antes votava LONG
+        # por vol baixa → viés long sistemático injetado no consenso. Agora ABSTÉM
+        # (HOLD); a confiança só sinaliza se o regime é favorável a operar.
         if "thor" in name:
             atr_pct = float(data.get("atr_pct") or data.get("volatility_pct") or 2.0)
-            if atr_pct < 1.5:
-                return "LONG",  0.60, f"Volatilidade baixa ({atr_pct:.2f}%) — regime favorável a tendência"
             if atr_pct > 4.0:
-                return "HOLD",  0.55, f"Alta volatilidade ({atr_pct:.2f}%) — risco elevado"
-            return "LONG", 0.55, f"Volatilidade moderada ({atr_pct:.2f}%)"
+                return "HOLD", 0.55, f"Alta volatilidade ({atr_pct:.2f}%) — risco elevado (não-direcional)"
+            return "HOLD", 0.50, f"Volatilidade {atr_pct:.2f}% — regime (não-direcional)"
 
-        # Aquaman — liquidez
+        # Aquaman — liquidez. Review-fix (2026-06-01): liquidez é NÃO-DIRECIONAL.
+        # Antes votava LONG por liquidez boa → viés long. Agora ABSTÉM (HOLD).
         if "aqua" in name:
             spread_pct = float(data.get("spread_pct") or data.get("slippage_pct") or 0.05)
-            if spread_pct < 0.02:
-                return "LONG",  0.65, f"Liquidez excelente (spread={spread_pct:.3f}%)"
             if spread_pct > 0.10:
-                return "HOLD",  0.50, f"Liquidez baixa (spread={spread_pct:.3f}%) — slippage elevado"
-            return "LONG", 0.55, f"Liquidez adequada (spread={spread_pct:.3f}%)"
+                return "HOLD", 0.50, f"Liquidez baixa (spread={spread_pct:.3f}%) — slippage (não-direcional)"
+            return "HOLD", 0.50, f"Liquidez {spread_pct:.3f}% (não-direcional)"
 
         # Fallback genérico
         return "HOLD", 0.40, f"{agent_name} sem dados suficientes para votar"

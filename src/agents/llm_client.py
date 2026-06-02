@@ -64,7 +64,9 @@ except ImportError:
 
 class LLMClient:
     """
-    Async LLM client with OpenAI → Claude fallback.
+    Async LLM client com fallback automático entre providers.
+    Ordem por default (2026-06-02): Anthropic Claude → OpenAI
+    (configurável via settings.llm_prefer_anthropic).
 
     Usage
     -----
@@ -92,7 +94,11 @@ class LLMClient:
         synthesis_model_openai: str = "gpt-4o-mini",
         synthesis_model_anthropic: str = "claude-haiku-4-5-20251001",
         synthesis_agents: Optional[list[str]] = None,
+        prefer_anthropic: bool = True,
     ) -> None:
+        # Preferência de provider (2026-06-02): Anthropic primeiro, OpenAI
+        # fallback. Ver settings.llm_prefer_anthropic.
+        self._prefer_anthropic = bool(prefer_anthropic)
         self._openai_key = openai_key.strip()
         self._openai_model = openai_model
         self._anthropic_key = anthropic_key.strip()
@@ -122,10 +128,16 @@ class LLMClient:
             and self._anthropic_key != ""
         )
 
-        if self._has_openai:
-            logger.debug(f"[LLMClient] Primary: OpenAI ({self._openai_model})")
-        if self._has_anthropic:
-            logger.debug(f"[LLMClient] Fallback: Anthropic Claude ({self._anthropic_model})")
+        _order = self._provider_order()
+        if _order:
+            _labels = {
+                "openai": f"OpenAI ({self._openai_model})",
+                "anthropic": f"Anthropic Claude ({self._anthropic_model})",
+            }
+            logger.debug(
+                f"[LLMClient] Ordem de providers: "
+                f"{' → '.join(_labels[p] for p in _order)}"
+            )
         if not self._has_openai and not self._has_anthropic:
             # Loud, structured diagnostic so the operator immediately knows WHY.
             # Without this, Vision silently HOLDs every cycle and the kill
@@ -147,14 +159,26 @@ class LLMClient:
                 f"Fix in .env or `pip install -r requirements.txt`."
             )
 
+    def _provider_order(self) -> list[str]:
+        """Ordem de tentativa de providers conforme a preferência configurada,
+        pulando os não configurados. Anthropic-first por default (2026-06-02)."""
+        pref = (
+            ["anthropic", "openai"]
+            if self._prefer_anthropic
+            else ["openai", "anthropic"]
+        )
+        avail = {"openai": self._has_openai, "anthropic": self._has_anthropic}
+        return [p for p in pref if avail[p]]
+
     @property
     def active_provider(self) -> str:
-        """Which provider will be used first."""
-        if self._has_openai:
-            return f"openai/{self._openai_model}"
-        if self._has_anthropic:
-            return f"anthropic/{self._anthropic_model}"
-        return "none"
+        """Which provider will be used first (respeita a preferência)."""
+        order = self._provider_order()
+        if not order:
+            return "none"
+        first = order[0]
+        model = self._anthropic_model if first == "anthropic" else self._openai_model
+        return f"{first}/{model}"
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -218,42 +242,36 @@ class LLMClient:
         _anthropic_model_eff = self._pick_anthropic_model(agent_id)
 
         try:
-            # Try OpenAI first
-            if self._has_openai:
+            # Tenta os providers na ordem de preferência (Anthropic-first por
+            # default). Cai para o próximo em qualquer erro; só falha se todos
+            # falharem. Ver _provider_order().
+            _order = self._provider_order()
+            _last_exc: Optional[Exception] = None
+            for _prov in _order:
                 try:
-                    _content, _tokens_in, _tokens_out = await self._call_openai(
-                        system_prompt, user_prompt, model_override=_openai_model_eff
-                    )
-                    _provider = "openai"
-                    _model = _openai_model_eff
-                except (OpenAIAPIError, OpenAITimeoutError, OpenAIRateLimitError) as exc:
-                    logger.warning(
-                        f"[LLMClient] OpenAI failed ({type(exc).__name__}: {exc}) "
-                        f"— falling back to Claude"
-                    )
-                    if not self._has_anthropic:
-                        raise RuntimeError(f"OpenAI error and no Claude fallback: {exc}") from exc
-                    _content, _tokens_in, _tokens_out = await self._call_anthropic(
-                        system_prompt, user_prompt, model_override=_anthropic_model_eff
-                    )
-                    _provider = "anthropic"
-                    _model = _anthropic_model_eff
+                    if _prov == "anthropic":
+                        _content, _tokens_in, _tokens_out = await self._call_anthropic(
+                            system_prompt, user_prompt, model_override=_anthropic_model_eff
+                        )
+                        _model = _anthropic_model_eff
+                    else:
+                        _content, _tokens_in, _tokens_out = await self._call_openai(
+                            system_prompt, user_prompt, model_override=_openai_model_eff
+                        )
+                        _model = _openai_model_eff
+                    _provider = _prov
+                    break
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning(f"[LLMClient] OpenAI unexpected error: {exc} — trying Claude")
-                    if not self._has_anthropic:
-                        raise
-                    _content, _tokens_in, _tokens_out = await self._call_anthropic(
-                        system_prompt, user_prompt, model_override=_anthropic_model_eff
+                    _last_exc = exc
+                    logger.warning(
+                        f"[LLMClient] {_prov} failed ({type(exc).__name__}: {exc}) "
+                        f"— tentando próximo provider"
                     )
-                    _provider = "anthropic"
-                    _model = _anthropic_model_eff
+                    continue
             else:
-                # OpenAI not configured — use Anthropic directly
-                _content, _tokens_in, _tokens_out = await self._call_anthropic(
-                    system_prompt, user_prompt, model_override=_anthropic_model_eff
-                )
-                _provider = "anthropic"
-                _model = _anthropic_model_eff
+                raise RuntimeError(
+                    f"Todos os providers LLM falharam: {_last_exc}"
+                ) from _last_exc
 
             return _content
 
@@ -299,11 +317,15 @@ class LLMClient:
         """
         async def _do_call() -> Tuple[str, int, int]:
             client = self._get_openai()
+            # Review-fix (2026-06-01): seed fixo p/ reprodutibilidade/auditabilidade
+            # das decisões de trade (best-effort — OpenAI honra seed quando possível).
+            _seed = int(getattr(settings, "openai_seed", 42) or 42)
             response = await client.chat.completions.create(
                 model=model_override or self._openai_model,
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
                 response_format={"type": "json_object"},
+                seed=_seed,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -484,42 +506,31 @@ class LLMClient:
         _tokens_out = 0
 
         try:
-            if self._has_openai:
+            # Mesma ordem de preferência do chat() (Anthropic-first por default).
+            _order = self._provider_order()
+            parsed = None
+            for _prov in _order:
                 try:
-                    parsed, _tokens_in, _tokens_out = await self._call_openai_structured(
-                        system_prompt, user_prompt, response_model
-                    )
-                    _provider = "openai"
-                    _model = self._openai_model
-                except (OpenAIAPIError, OpenAITimeoutError, OpenAIRateLimitError) as exc:
-                    logger.warning(
-                        f"[LLMClient] OpenAI structured failed ({type(exc).__name__}: {exc})"
-                        " — falling back to Claude"
-                    )
-                    if not self._has_anthropic:
-                        return None
-                    parsed, _tokens_in, _tokens_out = await self._call_anthropic_structured(
-                        system_prompt, user_prompt, response_model
-                    )
-                    _provider = "anthropic"
-                    _model = self._anthropic_model
+                    if _prov == "anthropic":
+                        parsed, _tokens_in, _tokens_out = await self._call_anthropic_structured(
+                            system_prompt, user_prompt, response_model
+                        )
+                        _model = self._anthropic_model
+                    else:
+                        parsed, _tokens_in, _tokens_out = await self._call_openai_structured(
+                            system_prompt, user_prompt, response_model
+                        )
+                        _model = self._openai_model
+                    _provider = _prov
+                    break
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
-                        f"[LLMClient] OpenAI structured unexpected: {exc} — trying Claude"
+                        f"[LLMClient] {_prov} structured failed "
+                        f"({type(exc).__name__}: {exc}) — tentando próximo provider"
                     )
-                    if not self._has_anthropic:
-                        return None
-                    parsed, _tokens_in, _tokens_out = await self._call_anthropic_structured(
-                        system_prompt, user_prompt, response_model
-                    )
-                    _provider = "anthropic"
-                    _model = self._anthropic_model
+                    continue
             else:
-                parsed, _tokens_in, _tokens_out = await self._call_anthropic_structured(
-                    system_prompt, user_prompt, response_model
-                )
-                _provider = "anthropic"
-                _model = self._anthropic_model
+                return None  # todos falharam — caller cai para o path JSON cru
 
             return parsed
 
@@ -618,4 +629,5 @@ def make_llm_client() -> LLMClient:
             settings, "llm_synthesis_model_anthropic", "claude-haiku-4-5-20251001"
         ),
         synthesis_agents=getattr(settings, "llm_synthesis_agents", None),
+        prefer_anthropic=getattr(settings, "llm_prefer_anthropic", True),
     )

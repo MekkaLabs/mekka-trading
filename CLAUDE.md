@@ -58,7 +58,7 @@ Controlado por `DEBATE_MODE_ENABLED` nas settings.
 
 | Agente | Arquivo | Responsabilidade | Modelo |
 |--------|---------|-----------------|--------|
-| **Vision** | `vision.py` | Decisão principal de trading (BUY/SELL/HOLD + size) | GPT-4o (fallback: Claude Sonnet-4-6) |
+| **Vision** | `vision.py` | Decisão principal de trading (BUY/SELL/HOLD + size) | Claude Sonnet-4-6 (fallback: GPT-4o) |
 | **VisionCritic** | `vision_critic.py` | Revisão crítica da decisão do Vision | GPT-4o |
 
 Vision recebe `MarketAnalysis` consolidado com todos os dados de Layer 1.
@@ -72,7 +72,7 @@ Vision recebe `MarketAnalysis` consolidado com todos os dados de Layer 1.
 | **IronMan** | `ironman.py` | Executor — envia ordens para Hyperliquid |
 | **Cyclops** | `cyclops.py` | Monitor de posições abertas — stop loss, take profit |
 
-Fluxo obrigatório: `Batman.approve()` → (Telegram approval se habilitado) → `IronMan.execute()`
+Fluxo obrigatório: `Batman.approve()` → (Telegram approval se `OPERATION_MODE=manual`) → `IronMan.execute()`
 
 ### Orquestração
 
@@ -102,8 +102,9 @@ Fluxo obrigatório: `Batman.approve()` → (Telegram approval se habilitado) →
 - **SQLite** em `data/mekka_trading.db` — histórico de trades, performance, logs
 
 ### LLMs
-- **OpenAI GPT-4o** — modelo principal para Vision
-- **Anthropic Claude Sonnet-4-6** — fallback para Vision
+- **Anthropic Claude Sonnet-4-6** — modelo principal para Vision (preferencial)
+- **OpenAI GPT-4o** — fallback quando Claude falha/ausente
+- Ordem configurável via `LLM_PREFER_ANTHROPIC` (default `true`)
 
 ---
 
@@ -182,9 +183,26 @@ ANTHROPIC_MODEL=claude-sonnet-4-6
 ```env
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
-TELEGRAM_TRADE_APPROVAL_ENABLED=true  # Batman-approved trades precisam de confirmação
+TELEGRAM_TRADE_APPROVAL_ENABLED=true  # SUPERSEDED por OPERATION_MODE (compat .env)
 TELEGRAM_INBOUND_ENABLED=false        # comandos via Telegram (desabilitado por default)
 ```
+
+### Modo de Operação (switch raiz — governa SÓ trades)
+```env
+OPERATION_MODE=manual   # manual | automatic — default: manual (seguro)
+```
+
+| Modo | Trades | Melhorias | Gates de risco |
+|------|--------|-----------|----------------|
+| **manual** (default) | operador aprova via Telegram | **sempre exigem aprovação** | ✅ ativos |
+| **automatic** | auto-executam | **sempre exigem aprovação** | ✅ ativos |
+
+- **Melhorias são DESACOPLADAS do modo** (2026-06-02): o switch governa apenas TRADES. Melhorias nunca auto-aplicam por causa do modo — evita que um clique no botão faça o worker escrever/commitar código. O único auto-apply é o opt-in EXPLÍCITO via env (`MENTOR_AUTO_APPLY_ENABLED` / `IMPLEMENTER_WORKER_ENABLED` / `IMPLEMENTER_WORKER_AUTO_APPLY`, default OFF).
+- **Fonte da verdade:** `src/config/operation_mode.py`. Default vem de `OPERATION_MODE` no `.env`; override em runtime persistido em `data/operation_mode.json`.
+- **Troca em runtime sem reiniciar:** Telegram `/opmode`, `/manual`, `/auto` (entra em vigor no próximo ciclo).
+- **Invariante de segurança:** `automatic` remove apenas o gate HUMANO dos TRADES. O double-gate, os gates do Batman, o kill-switch e o daily-loss continuam valendo — `automatic` **NUNCA** afrouxa risco.
+- **Consumidores:** gate de trade em `nick_fury.py` (`requires_trade_approval()`), `mentor_applier.is_enabled()`, `implementer/worker` (`worker_is_enabled`/`worker_should_apply`).
+- **Preflight:** `automatic` + mainnet+live emite WARN bem visível (auto-trade com dinheiro real é decisão deliberada).
 
 ---
 

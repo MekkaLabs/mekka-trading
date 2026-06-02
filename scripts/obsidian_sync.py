@@ -74,6 +74,31 @@ HARD_EXCLUDED_DIRS: set[str] = {
     ".trash",
 }
 
+# No modo reverso (vault → repo), o "source" é o vault canônico. Aí precisamos
+# proteger o repo de receber lixo local-only do Obsidian (workspace state, caches,
+# notas operacionais que pertencem só ao operador). Atributos da política
+# "Fontes de Verdade" do vault:
+#   - 60 - Daily/ é vault-only (não volta ao repo)
+#   - 00 - Inbox/ é vault-only (rascunhos)
+#   - .obsidian/{workspace*,appearance,graph,cache} são local-only
+HARD_EXCLUDED_PATHS_REVERSE: set[str] = {
+    "Bem-vindo.md",        # gerado pelo Obsidian no boot do vault
+    "LLM-CONNECT.md",      # config local
+    "VAULT-START.md",      # config local
+}
+HARD_EXCLUDED_DIRS_REVERSE: set[str] = {
+    "60 - Daily",
+    "00 - Inbox",
+    ".obsidian/workspace.json",
+    ".obsidian/workspace-mobile.json",
+    ".obsidian/workspaces.json",
+    ".obsidian/cache",
+    ".obsidian/appearance.json",
+    ".obsidian/graph.json",
+    ".obsidian/app.json.bak-",   # backups locais
+    ".trash",
+}
+
 # Configs do .obsidian que só são tocadas com --include-config.
 SOFT_EXCLUDED_CONFIGS: set[str] = {
     ".obsidian/community-plugins.json",
@@ -146,11 +171,13 @@ def relpath(p: Path, base: Path) -> str:
     return str(p.relative_to(base))
 
 
-def is_hard_excluded(rel: str) -> bool:
-    if rel in HARD_EXCLUDED_PATHS:
+def is_hard_excluded(rel: str, reverse: bool = False) -> bool:
+    paths = HARD_EXCLUDED_PATHS_REVERSE if reverse else HARD_EXCLUDED_PATHS
+    dirs = HARD_EXCLUDED_DIRS_REVERSE if reverse else HARD_EXCLUDED_DIRS
+    if rel in paths:
         return True
-    for prefix in HARD_EXCLUDED_DIRS:
-        if rel == prefix or rel.startswith(prefix + "/"):
+    for prefix in dirs:
+        if rel == prefix or rel.startswith(prefix + "/") or rel.startswith(prefix):
             return True
     return False
 
@@ -170,10 +197,11 @@ def evaluate(
     vault_root: Path,
     include_config: bool,
     forced: set[str],
+    reverse: bool = False,
 ) -> FileVerdict:
     rel = relpath(source_file, source_root)
 
-    if is_hard_excluded(rel):
+    if is_hard_excluded(rel, reverse=reverse):
         return FileVerdict(rel, "EXCLUDED", reason="hard-coded exclusion")
 
     if is_soft_excluded(rel) and not include_config and rel not in forced:
@@ -237,6 +265,7 @@ def run(
     update: bool,
     include_config: bool,
     forced: set[str],
+    reverse: bool = False,
 ) -> SyncReport:
     report = SyncReport()
 
@@ -248,7 +277,7 @@ def run(
         return report
 
     for sf in iter_source_files(source):
-        v = evaluate(sf, source, vault, include_config, forced)
+        v = evaluate(sf, source, vault, include_config, forced, reverse=reverse)
         report.add(v)
 
         if not apply:
@@ -352,18 +381,33 @@ def main() -> int:
                     help="também avalia .obsidian/{community-plugins,daily-notes,templates,app,core-plugins}.json")
     ap.add_argument("--force", action="append", default=[],
                     help="path relativo a forçar overwrite (pode repetir)")
+    ap.add_argument("--reverse", action="store_true",
+                    help="modo INVERSO: vault → docs/obsidian (versionar notas novas do vault canônico)")
     args = ap.parse_args()
 
     forced = set(args.force)
+    # No modo reverso, source vira o vault canônico e o destino vira docs/obsidian.
+    # Mantemos os argumentos --source/--vault como referência declarada do usuário:
+    # se ele explicitar, respeitamos; senão usamos os defaults invertidos.
+    if args.reverse:
+        source = args.vault if args.vault != DEFAULT_VAULT else DEFAULT_VAULT
+        vault_dest = args.source if args.source != SOURCE else SOURCE
+        print(f"[REVERSE] source (canonical vault): {source}")
+        print(f"[REVERSE] destination (repo): {vault_dest}")
+    else:
+        source = args.source
+        vault_dest = args.vault
+
     report = run(
-        source=args.source,
-        vault=args.vault,
+        source=source,
+        vault=vault_dest,
         apply=args.apply,
         update=args.update,
         include_config=args.include_config,
         forced=forced,
+        reverse=args.reverse,
     )
-    return print_report(report, args.apply, args.update, args.vault)
+    return print_report(report, args.apply, args.update, vault_dest)
 
 
 if __name__ == "__main__":

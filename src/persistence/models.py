@@ -78,6 +78,13 @@ class TradeRecord(Base):
     tp_order_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     raw: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # COIN-M Futures support (2026-05-28) — quote_currency identifica em
+    # qual moeda o trade foi settled (USDT para linear, BTC/ETH para
+    # inverse). pnl_quote guarda o PnL no quote nativo; pnl_usd é
+    # conversão via mark price (preservado para retrocompat).
+    # Default "USDT" para registros antigos que não tinham distinção.
+    quote_currency: Mapped[str] = mapped_column(String(8), default="USDT")
+    pnl_quote: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 
 class DailyPnLRecord(Base):

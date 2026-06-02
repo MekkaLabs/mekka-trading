@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mekka Trading Command Center</title>
-    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/style.css?v=20260602h" />
     <link rel="stylesheet" href="/static/office-v2/office-v2.css" />
     <!-- Vendored copies first (no SRI needed — same-origin), CDN fallback
          on error with SRI matching the vendored bytes. If the CDN serves
@@ -43,6 +43,13 @@
                 transform="rotate(18 88 32)"/>
         </svg>
         <span class="brand-wordmark">MEKKA</span>
+        <!-- 2026-05-29: botão minimizar sidebar. Persiste em localStorage. -->
+        <button id="sidebar-toggle" class="sidebar-toggle-btn"
+                type="button" aria-label="Minimizar menu lateral"
+                title="Minimizar / expandir menu">
+          <span class="sidebar-toggle-icon-expanded">◀</span>
+          <span class="sidebar-toggle-icon-collapsed">▶</span>
+        </button>
       </div>
       <nav class="sidebar-nav">
         <button class="page-nav-btn page-nav-live" data-page="live">📡 Live</button>
@@ -148,6 +155,14 @@
             <button id="sys-power-toggle" type="button" class="prefs-reset-btn sys-power-btn" disabled>—</button>
             <button id="sys-power-reboot" type="button" class="prefs-reset-btn sys-power-btn sys-power-reboot" disabled>⟳ Reboot</button>
           </div>
+          <!-- Modo de Operação (manual/automatic) — switch RAIZ de aprovação.
+               Estado de /api/opmode; troca via POST /api/opmode (próximo ciclo
+               respeita). manual = você aprova trades e melhorias; automatic =
+               o sistema aprova sozinho (gates de risco seguem ativos). -->
+          <div class="opmode-switch" id="opmode-switch" title="Modo de operação — quem aprova trades e melhorias">
+            <span id="opmode-pill" class="pill opmode-pill opmode-unknown">MODO ???</span>
+            <button id="opmode-toggle" type="button" class="prefs-reset-btn opmode-btn" disabled>—</button>
+          </div>
           <!-- Seletor de corretora ativa. Populado de /api/exchange; troca via
                POST /api/exchange (muta settings em runtime + persiste). -->
           <div class="exchange-switch" title="Corretora ativa — troca em runtime" style="display:inline-flex;align-items:center;gap:4px">
@@ -155,6 +170,11 @@
             <select id="exchange-select" class="prefs-reset-btn">
               <option value="">…</option>
             </select>
+            <!-- Toggle de rede testnet↔mainnet da corretora ativa. SENSÍVEL.
+                 Muda só dados/roteamento; execução real ainda exige o
+                 double-gate (paper_trading=false + live_confirmed=true). -->
+            <button id="network-toggle" type="button" class="prefs-reset-btn network-btn network-unknown"
+                    title="Rede da corretora (testnet/mainnet)" disabled>REDE ???</button>
           </div>
           <label for="lang-toggle" class="muted-line">Idioma</label>
           <select id="lang-toggle" class="prefs-reset-btn">
@@ -461,9 +481,19 @@
         </section>
       </div>
 
+      <!-- Wrapper 2-col: Conexões Neurais à esquerda, Atividade à direita.
+           Em telas largas (≥1200px) lado a lado, abaixo empilha. -->
+      <div class="brain-row" data-page="overview" style="display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:16px;align-items:stretch;">
+        <style>
+          @media (max-width: 1199px) {
+            .brain-row { grid-template-columns: 1fr !important; }
+          }
+          .brain-row > section { margin: 0 !important; }
+        </style>
+
       <!-- Conexões Neurais do Segundo Cérebro — grafo force-directed do vault
            (Jean Grey): notas como nós, wikilinks como arestas. -->
-      <section class="panel full" id="sec-neural-graph" data-page="overview">
+      <section class="panel" id="sec-neural-graph" data-page="overview">
         <div class="neural-hdr">
           <h2>🧠 Conexões Neurais — Segundo Cérebro</h2>
           <span class="neural-meta" id="neural-meta">—</span>
@@ -472,6 +502,304 @@
         <p class="neural-legend muted-line" id="neural-legend">
           Cada nó é uma nota do vault; as linhas são os wikilinks. Cor = pasta · tamanho = nº de conexões.
         </p>
+      </section>
+
+      <!-- Atividade do Segundo Cérebro — feed real do vault + Prometheus.
+           Adicionado em 2026-05-26. Consome /api/second-brain/activity.
+           Renderiza GERADO / ACESSADO / ATUALIZADO / CONSUMIDO com badges
+           Prometheus/Sync. Polling 30s; refresh manual via botão. -->
+      <section class="panel" id="sec-second-brain-activity-panel" data-page="overview">
+        <style>
+          /* Visual no padrão do sistema (ciano sobre fundo escuro).
+             Casa com .neural-hdr/.muted-line/.panel pré-existentes. */
+          #sec-second-brain-activity-panel .sb-header {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 12px; margin-bottom: 12px;
+          }
+          #sec-second-brain-activity-panel .sb-header h3 {
+            margin: 0; font-size: 1.05rem; letter-spacing: 0.04em;
+            color: #5be8f5;
+          }
+          #sec-second-brain-activity-panel .sb-controls .sb-btn {
+            background: rgba(91, 232, 245, 0.10);
+            color: #5be8f5;
+            border: 1px solid rgba(91, 232, 245, 0.45);
+            padding: 4px 10px; border-radius: 4px;
+            font-family: inherit; font-size: 0.78rem; cursor: pointer;
+            transition: background 120ms ease;
+          }
+          #sec-second-brain-activity-panel .sb-controls .sb-btn:hover {
+            background: rgba(91, 232, 245, 0.22);
+          }
+          #sec-second-brain-activity-panel .sb-badges {
+            display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px;
+          }
+          #sec-second-brain-activity-panel .sb-badge {
+            font-size: 0.72rem; padding: 3px 9px; border-radius: 999px;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            background: rgba(15, 28, 42, 0.55);
+            color: #b9c8d9;
+          }
+          #sec-second-brain-activity-panel .sb-badge.sb-on    { color: #9be8a4; border-color: rgba(155, 232, 164, 0.45); }
+          #sec-second-brain-activity-panel .sb-badge.sb-warn  { color: #facc15; border-color: rgba(250, 204, 21, 0.55); }
+          #sec-second-brain-activity-panel .sb-badge.sb-off   { color: #f87171; border-color: rgba(248, 113, 113, 0.45); }
+          #sec-second-brain-activity-panel .sb-section {
+            background: rgba(15, 28, 42, 0.45);
+            border: 1px solid rgba(91, 232, 245, 0.18);
+            border-radius: 6px;
+            padding: 10px 14px;
+            margin-bottom: 10px;
+          }
+          #sec-second-brain-activity-panel .sb-section-title {
+            margin: 0 0 8px; font-size: 0.85rem;
+            color: #5be8f5; letter-spacing: 0.03em;
+          }
+          #sec-second-brain-activity-panel .sb-list {
+            list-style: none; padding: 0; margin: 0;
+            max-height: 220px; overflow-y: auto;
+          }
+          #sec-second-brain-activity-panel .sb-item {
+            display: grid;
+            grid-template-columns: 110px 120px 1fr auto;
+            gap: 10px; padding: 4px 0;
+            font-family: 'JetBrains Mono', ui-monospace, monospace;
+            font-size: 0.76rem;
+            color: #c5d4e6;
+            border-bottom: 1px dashed rgba(91, 232, 245, 0.08);
+          }
+          #sec-second-brain-activity-panel .sb-time  { color: #7c8b9d; }
+          #sec-second-brain-activity-panel .sb-topic { color: #f59e0b; }
+          #sec-second-brain-activity-panel .sb-path  { color: #5be8f5; }
+          #sec-second-brain-activity-panel .sb-size  { color: #7c8b9d; }
+          #sec-second-brain-activity-panel .sb-empty { color: #7c8b9d; font-style: italic; margin: 0; }
+          #sec-second-brain-activity-panel .sb-ok    { color: #9be8a4; margin: 0; }
+          #sec-second-brain-activity-panel .sb-error {
+            color: #f87171;
+            border: 1px solid rgba(248, 113, 113, 0.4);
+            background: rgba(248, 113, 113, 0.07);
+            border-radius: 4px; padding: 8px 12px;
+          }
+          #sec-second-brain-activity-panel .sb-loading {
+            color: #7c8b9d; padding: 20px; text-align: center;
+          }
+          #sec-second-brain-activity-panel .sb-limitations {
+            border-top: 1px dashed rgba(91, 232, 245, 0.18);
+            margin-top: 12px; padding-top: 8px;
+            font-size: 0.74rem; color: #facc15;
+          }
+          #sec-second-brain-activity-panel .sb-lim-list {
+            margin: 4px 0 0 18px; padding: 0;
+          }
+          #sec-second-brain-activity-panel .sb-footer {
+            margin-top: 10px; font-size: 0.72rem; color: #7c8b9d;
+            text-align: right;
+          }
+        </style>
+        <div id="second-brain-activity"></div>
+      </section>
+      </div><!-- /.brain-row -->
+
+      <!-- Memory Hub — visão unificada das 6 camadas de memória do Mekka.
+           Auto-monta via memory_hub.js. Read-only. -->
+      <section class="panel full" id="sec-memory-hub" data-page="overview">
+        <style>
+          #sec-memory-hub .mh-header {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 12px; margin-bottom: 12px;
+          }
+          #sec-memory-hub .mh-header h3 {
+            margin: 0; font-size: 1.05rem; letter-spacing: 0.04em; color: #5be8f5;
+          }
+          #sec-memory-hub .mh-btn {
+            background: rgba(91,232,245,0.10); color: #5be8f5;
+            border: 1px solid rgba(91,232,245,0.45);
+            padding: 4px 10px; border-radius: 4px;
+            font-family: inherit; font-size: 0.78rem; cursor: pointer;
+          }
+          #sec-memory-hub .mh-btn:hover { background: rgba(91,232,245,0.22); }
+          #sec-memory-hub .mh-controls { display: flex; gap: 8px; align-items: center; }
+          #sec-memory-hub .mh-badge {
+            font-size: 0.72rem; padding: 3px 9px; border-radius: 999px;
+            border: 1px solid rgba(255,255,255,0.18);
+            background: rgba(15,28,42,0.55); color: #b9c8d9;
+          }
+          #sec-memory-hub .mh-badge.mh-on { color: #9be8a4; border-color: rgba(155,232,164,0.45); }
+          #sec-memory-hub .mh-badge.mh-off { color: #f87171; border-color: rgba(248,113,113,0.45); }
+          #sec-memory-hub .mh-badge.mh-warn { color: #fbbf24; border-color: rgba(251,191,36,0.45); }
+          #sec-memory-hub .mh-layers-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 10px;
+          }
+          #sec-memory-hub .mh-layer {
+            background: rgba(15,28,42,0.45);
+            border: 1px solid rgba(91,232,245,0.18);
+            border-radius: 6px; padding: 10px 14px;
+          }
+          #sec-memory-hub .mh-layer-off {
+            border-color: rgba(248,113,113,0.25); opacity: 0.6;
+          }
+          #sec-memory-hub .mh-layer-head {
+            display: flex; justify-content: space-between; align-items: center;
+            color: #5be8f5; margin-bottom: 4px;
+          }
+          #sec-memory-hub .mh-layer-sub {
+            color: #7c8b9d; font-size: 0.74rem; margin-bottom: 8px;
+            font-style: italic;
+          }
+          #sec-memory-hub .mh-metrics {
+            margin: 0; display: grid; grid-template-columns: 1fr auto;
+            gap: 2px 8px; font-family: 'JetBrains Mono', ui-monospace, monospace;
+            font-size: 0.74rem;
+          }
+          #sec-memory-hub .mh-metrics dt { color: #7c8b9d; }
+          #sec-memory-hub .mh-metrics dd { margin: 0; color: #c5d4e6; text-align: right; }
+          #sec-memory-hub .mh-bridge {
+            margin-top: 14px; padding-top: 10px;
+            border-top: 1px dashed rgba(91,232,245,0.20);
+          }
+          #sec-memory-hub .mh-bridge h4 {
+            margin: 0 0 8px 0; font-size: 0.85rem; color: #5be8f5;
+            letter-spacing: 0.03em;
+          }
+          #sec-memory-hub .mh-bridge-row {
+            display: flex; gap: 18px; flex-wrap: wrap; font-size: 0.82rem;
+          }
+          #sec-memory-hub .mh-bridge-row strong { color: #fcd34d; }
+          #sec-memory-hub .mh-label { color: #7c8b9d; }
+          #sec-memory-hub .mh-loading { color: #7c8b9d; padding: 20px; text-align: center; }
+          #sec-memory-hub .mh-error {
+            color: #f87171; border: 1px solid rgba(248,113,113,0.4);
+            background: rgba(248,113,113,0.07); border-radius: 4px;
+            padding: 8px 12px;
+          }
+          #sec-memory-hub .mh-footer {
+            margin-top: 8px; font-size: 0.72rem; color: #7c8b9d;
+            text-align: right;
+          }
+        </style>
+        <div id="memory-hub-panel"></div>
+      </section>
+
+      <!-- D (2026-05-30) — Learning Hub: dashboard widget unificado que
+           consome os endpoints novos (server health, prometheus, vault,
+           implementer, mentor). Auto-monta via learning_hub.js. -->
+      <section class="panel full" id="sec-learning-hub" data-page="improvements">
+        <style>
+          #sec-learning-hub .lh-grid {
+            display: grid; grid-template-columns: repeat(2, 1fr);
+            gap: 12px; padding: 8px 12px;
+          }
+          #sec-learning-hub .lh-card {
+            background: #131821; border: 1px solid #1f2a38;
+            border-radius: 8px; padding: 12px; min-height: 80px;
+          }
+          #sec-learning-hub .lh-card h4 {
+            margin: 0 0 6px 0; font-size: 0.78rem; color: #5be8f5;
+            text-transform: uppercase; letter-spacing: 0.5px;
+          }
+          #sec-learning-hub .lh-card .lh-row {
+            display: flex; justify-content: space-between;
+            font-size: 0.78rem; padding: 2px 0;
+            color: #c8d1da;
+          }
+          #sec-learning-hub .lh-card .lh-row .lh-val { color: #9be8a4; font-weight: 600; }
+          #sec-learning-hub .lh-card .lh-row .lh-warn { color: #e89a3a; }
+          #sec-learning-hub .lh-card .lh-row .lh-bad { color: #d65a5a; }
+          #sec-learning-hub .lh-foot {
+            font-size: 0.7rem; color: #7c8b9d; text-align: right;
+            padding: 4px 12px;
+          }
+        </style>
+        <div id="learning-hub-panel"></div>
+      </section>
+
+      <!-- Implementer Squad — agentes que implementam IMPs aceitas.
+           Auto-monta via implementer_squad.js. Read-only display + 1 botão de ação. -->
+      <section class="panel full" id="sec-implementer-squad" data-page="improvements">
+      </section>
+
+      <!-- Be Water — Strategy Matrix. Auto-monta via strategy_matrix.js.
+           Mostra regime atual + top estratégias + heatmap fitness. Read-only. -->
+      <section class="panel full" id="sec-strategy-matrix" data-page="improvements">
+      </section>
+
+      <!-- Inteligência de Derivativos (Cable agent) — público + Cable
+           reports. Read-only, sem trade. -->
+      <section class="panel full" id="sec-derivatives-intel" data-page="overview">
+        <style>
+          #sec-derivatives-intel .di-header {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 12px; margin-bottom: 12px;
+          }
+          #sec-derivatives-intel .di-header h3 {
+            margin: 0; font-size: 1.05rem; letter-spacing: 0.04em;
+            color: #5be8f5;
+          }
+          #sec-derivatives-intel .di-controls .di-btn {
+            background: rgba(91, 232, 245, 0.10);
+            color: #5be8f5;
+            border: 1px solid rgba(91, 232, 245, 0.45);
+            padding: 4px 10px; border-radius: 4px;
+            font-family: inherit; font-size: 0.78rem; cursor: pointer;
+          }
+          #sec-derivatives-intel .di-controls .di-btn:hover {
+            background: rgba(91, 232, 245, 0.22);
+          }
+          #sec-derivatives-intel .di-badges {
+            display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;
+          }
+          #sec-derivatives-intel .di-badge {
+            font-size: 0.72rem; padding: 3px 9px; border-radius: 999px;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            background: rgba(15, 28, 42, 0.55);
+            color: #b9c8d9;
+          }
+          #sec-derivatives-intel .di-badge.di-on  { color: #9be8a4; border-color: rgba(155, 232, 164, 0.45); }
+          #sec-derivatives-intel .di-badge.di-off { color: #f87171; border-color: rgba(248, 113, 113, 0.45); }
+          #sec-derivatives-intel .di-section-title {
+            font-size: 0.85rem; color: #5be8f5; margin: 14px 0 8px;
+            letter-spacing: 0.03em;
+          }
+          #sec-derivatives-intel .di-sym-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 10px;
+          }
+          #sec-derivatives-intel .di-sym {
+            background: rgba(15, 28, 42, 0.45);
+            border: 1px solid rgba(91, 232, 245, 0.18);
+            border-radius: 6px; padding: 10px 14px;
+          }
+          #sec-derivatives-intel .di-sym-head { color: #5be8f5; margin-bottom: 6px; }
+          #sec-derivatives-intel .di-sym-row {
+            display: flex; justify-content: space-between;
+            font-family: 'JetBrains Mono', ui-monospace, monospace;
+            font-size: 0.78rem; padding: 2px 0;
+          }
+          #sec-derivatives-intel .di-label { color: #7c8b9d; }
+          #sec-derivatives-intel .di-val   { color: #c5d4e6; }
+          #sec-derivatives-intel .di-insights {
+            list-style: disc; padding-left: 20px; margin: 0;
+            color: #c5d4e6; font-size: 0.82rem;
+          }
+          #sec-derivatives-intel .di-insights li { padding: 3px 0; }
+          #sec-derivatives-intel .di-empty { color: #7c8b9d; font-style: italic; margin: 0; }
+          #sec-derivatives-intel .di-disclaimer {
+            margin-top: 12px; padding-top: 8px;
+            border-top: 1px dashed rgba(91, 232, 245, 0.18);
+            font-size: 0.72rem; color: #facc15;
+          }
+          #sec-derivatives-intel .di-footer {
+            margin-top: 8px; font-size: 0.72rem; color: #7c8b9d;
+            text-align: right;
+          }
+          #sec-derivatives-intel .di-loading { color: #7c8b9d; text-align: center; padding: 20px; }
+          #sec-derivatives-intel .di-error {
+            color: #f87171; border: 1px solid rgba(248,113,113,0.4);
+            background: rgba(248,113,113,0.07); border-radius: 4px;
+            padding: 8px 12px;
+          }
+        </style>
+        <div id="derivatives-intel-panel"></div>
       </section>
 
       <!-- Feature B — Central de Comandos do operador.
@@ -716,6 +1044,23 @@
         </div>
       </section>
 
+      <!-- Qualidade de execução: slippage de entrada realizado por símbolo.
+           Fonte: /api/execution-quality (IronMan grava entry_slippage_bps). -->
+      <section class="panel" id="sec-exec-quality" data-page="performance">
+        <h2>🎯 Qualidade de Execução</h2>
+        <p class="muted-line">Slippage de entrada realizado (preço do fill vs entrada planejada). Verde = bom, vermelho = acima do limite de alerta.</p>
+        <div id="exec-quality-body" class="exec-quality-body">
+          <div class="muted-line">Carregando…</div>
+        </div>
+      </section>
+
+      <!-- Custo de LLM (créditos): /api/cost — sessão atual -->
+      <section class="panel" id="sec-llm-cost" data-page="performance">
+        <h2>💸 Custo de LLM (sessão)</h2>
+        <p class="muted-line">Gasto com chamadas de IA desde que o loop ligou. Ajuda a controlar o consumo de créditos.</p>
+        <div id="llm-cost-body"><div class="muted-line">Carregando…</div></div>
+      </section>
+
       <section class="panel replay-panel" id="sec-trades-timeline" data-page="performance">
         <h2>Trades Execution Timeline</h2>
         <div class="positions-toolbar">
@@ -901,6 +1246,15 @@
       </section>
 
       <!-- ── Episodic Memory Panel (Story 064) ──────────────────────────── -->
+      <!-- Diário de aprendizado por agente: /api/learnings (stats + por agente).
+           Clique num agente para ver as lições. -->
+      <section class="panel full" id="sec-agent-learnings" data-page="memory">
+        <h2>📓 Diário de Aprendizado dos Agentes</h2>
+        <p class="muted-line">Lições que cada agente acumulou. Clique num agente para ver as mais relevantes (reforço × confiança).</p>
+        <div id="learnings-agents" class="learnings-agents"><div class="muted-line">Carregando…</div></div>
+        <div id="learnings-detail" class="learnings-detail"></div>
+      </section>
+
       <section class="panel full memory-panel" id="sec-memory" data-page="memory">
         <div class="memory-header">
           <h2>🧠 Episodic Memory — O que os Agentes Aprenderam</h2>
@@ -950,6 +1304,18 @@
       </section>
 
       <!-- ── Live Trading Panel ──────────────────────────────────────────── -->
+      <!-- Painel de prontidão mainnet: /api/go-live-status (GO/NO-GO/conditions) -->
+      <section class="panel full" id="sec-go-live" data-page="live">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+          <h2 style="margin:0">🚦 Prontidão para Mainnet</h2>
+          <button id="go-live-refresh" style="padding:4px 10px;cursor:pointer;font-size:0.85rem">↻ Verificar</button>
+        </div>
+        <div id="go-live-verdict" class="go-live-verdict">
+          <span class="muted-line">Clique em "Verificar" para checar o status de prontidão.</span>
+        </div>
+        <div id="go-live-detail" class="go-live-detail"></div>
+      </section>
+
       <section class="panel full live-trading-panel" id="sec-live-trading" data-page="live">
         <!-- Toolbar -->
         <div class="live-toolbar">
@@ -1146,75 +1512,265 @@
            Mekka consolidates Beast proposals + curated inbox, premortem-ed
            by Galactus, into ranked recommendations the operator approves
            or rejects. -->
-      <section class="panel full improvements-panel" id="sec-improvements" data-page="improvements">
+      <section class="panel full improvements-panel improvements-v2" id="sec-improvements" data-page="improvements">
+        <style>
+          /* ── Redesign 2026-05-27: menos poluição visual, hierarquia clara ── */
+          .improvements-v2 .impr-header {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 12px; margin-bottom: 6px;
+          }
+          .improvements-v2 .impr-header h2 { margin: 0; font-size: 1.1rem; }
+          .improvements-v2 .impr-tagline {
+            color: #7c8b9d; font-size: 0.78rem; margin: 0 0 14px 0;
+          }
+          .improvements-v2 .imp2-stats {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+            gap: 8px; margin-bottom: 16px;
+          }
+          .improvements-v2 .imp2-stat {
+            background: rgba(15,28,42,0.5);
+            border: 1px solid rgba(91,232,245,0.15);
+            border-radius: 6px; padding: 10px 12px;
+            text-align: center;
+          }
+          .improvements-v2 .imp2-stat-value {
+            font-size: 1.6rem; font-weight: 700; color: #5be8f5;
+            font-family: 'JetBrains Mono', ui-monospace, monospace;
+          }
+          .improvements-v2 .imp2-stat-label {
+            font-size: 0.7rem; color: #7c8b9d; letter-spacing: 0.05em;
+            text-transform: uppercase; margin-top: 4px;
+          }
+          .improvements-v2 .imp2-stat-stuck .imp2-stat-value { color: #fbbf24; }
+          .improvements-v2 .imp2-stat-blocked .imp2-stat-value { color: #f87171; }
+          .improvements-v2 .imp2-stat-done .imp2-stat-value { color: #9be8a4; }
+          /* Tabs principais — DESTACADAS, primeira coisa que se vê */
+          .improvements-v2 .impr-views {
+            display: flex; gap: 4px; border-bottom: 1px solid rgba(91,232,245,0.2);
+            margin-bottom: 0; padding-bottom: 0; flex-wrap: wrap;
+          }
+          .improvements-v2 .impr-view {
+            background: transparent; color: #7c8b9d;
+            border: none; border-bottom: 2px solid transparent;
+            padding: 8px 14px; font-size: 0.85rem; cursor: pointer;
+            font-family: inherit; transition: all 150ms;
+          }
+          .improvements-v2 .impr-view:hover { color: #c5d4e6; }
+          .improvements-v2 .impr-view.active {
+            color: #5be8f5; border-bottom-color: #5be8f5;
+          }
+          .improvements-v2 .impr-view-n {
+            display: inline-block; min-width: 18px; height: 18px; line-height: 18px;
+            background: rgba(91,232,245,0.15); color: #5be8f5;
+            border-radius: 9px; padding: 0 6px; font-size: 0.7rem;
+            margin-left: 6px;
+          }
+          .improvements-v2 .impr-view[data-view="paradas"] .impr-view-n {
+            background: rgba(251,191,36,0.2); color: #fbbf24;
+          }
+          /* Filtros colapsáveis */
+          .improvements-v2 details.imp2-filters {
+            margin: 10px 0; background: rgba(15,28,42,0.3);
+            border: 1px solid rgba(91,232,245,0.10); border-radius: 6px;
+            padding: 0;
+          }
+          .improvements-v2 details.imp2-filters > summary {
+            cursor: pointer; padding: 8px 12px; color: #7c8b9d;
+            font-size: 0.78rem; user-select: none;
+          }
+          .improvements-v2 details.imp2-filters[open] > summary { color: #5be8f5; }
+          .improvements-v2 details.imp2-filters .impr-filters {
+            padding: 4px 12px 12px; display: flex; gap: 6px; flex-wrap: wrap;
+            margin: 0;
+          }
+          .improvements-v2 .impr-filter, .improvements-v2 .impr-src-filter {
+            background: rgba(91,232,245,0.06); color: #7c8b9d;
+            border: 1px solid rgba(91,232,245,0.15);
+            padding: 3px 8px; border-radius: 12px; font-size: 0.72rem;
+            cursor: pointer; font-family: inherit;
+          }
+          .improvements-v2 .impr-filter.active, .improvements-v2 .impr-src-filter.active {
+            background: rgba(91,232,245,0.20); color: #5be8f5;
+            border-color: rgba(91,232,245,0.45);
+          }
+          /* Sinais (Mentor/KPI/Mainnet) colapsáveis */
+          .improvements-v2 details.imp2-signals {
+            margin: 12px 0; background: rgba(15,28,42,0.3);
+            border: 1px solid rgba(91,232,245,0.10); border-radius: 6px;
+            padding: 0;
+          }
+          .improvements-v2 details.imp2-signals > summary {
+            cursor: pointer; padding: 10px 12px; color: #5be8f5;
+            font-size: 0.85rem; user-select: none;
+          }
+          .improvements-v2 details.imp2-signals .imp2-signals-body {
+            padding: 4px 12px 12px;
+          }
+          /* Lista de paradas (Memory Bridge) */
+          .improvements-v2 #imp2-stuck-list {
+            margin-top: 12px;
+          }
+          .improvements-v2 .imp2-stuck-card {
+            background: rgba(15,28,42,0.5);
+            border: 1px solid rgba(251,191,36,0.25);
+            border-radius: 6px; padding: 10px 14px;
+            margin-bottom: 8px;
+          }
+          .improvements-v2 .imp2-stuck-head {
+            display: flex; justify-content: space-between; gap: 12px;
+            align-items: baseline;
+          }
+          .improvements-v2 .imp2-stuck-id {
+            font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;
+            color: #fbbf24;
+          }
+          .improvements-v2 .imp2-stuck-meta {
+            font-size: 0.72rem; color: #7c8b9d;
+          }
+          .improvements-v2 .imp2-stuck-matches {
+            margin-top: 8px; padding-top: 8px;
+            border-top: 1px dashed rgba(91,232,245,0.15);
+          }
+          .improvements-v2 .imp2-stuck-match {
+            display: flex; gap: 10px; align-items: center;
+            padding: 4px 0; font-size: 0.78rem;
+          }
+          .improvements-v2 .imp2-stuck-match code {
+            color: #5be8f5; font-family: 'JetBrains Mono', monospace;
+          }
+          .improvements-v2 .imp2-stuck-match-score {
+            font-size: 0.7rem; color: #fbbf24;
+            background: rgba(251,191,36,0.15); padding: 2px 6px; border-radius: 3px;
+          }
+          .improvements-v2 .imp2-stuck-match-apply {
+            margin-left: auto; padding: 3px 10px; font-size: 0.7rem;
+            background: rgba(155,232,164,0.15); color: #9be8a4;
+            border: 1px solid rgba(155,232,164,0.4); border-radius: 4px;
+            cursor: pointer; font-family: inherit;
+          }
+          .improvements-v2 .imp2-stuck-match-apply:hover { background: rgba(155,232,164,0.3); }
+          .improvements-v2 .imp2-stuck-empty {
+            color: #7c8b9d; font-style: italic; font-size: 0.78rem;
+            padding: 6px 0;
+          }
+        </style>
         <div class="impr-header">
-          <h2>🛠️ Central de Melhorias Contínuas</h2>
+          <h2>🛠️ Central de Melhorias</h2>
           <div class="impr-header-actions">
-            <button type="button" class="impr-scan-btn" id="impr-scan">🔎 Buscar melhorias agora</button>
-            <button type="button" class="impr-refresh-btn" id="impr-refresh">↻ Atualizar</button>
+            <button type="button" class="impr-scan-btn" id="impr-scan" title="Roda o conselho Mekka agora">🔎 Buscar</button>
+            <button type="button" class="impr-refresh-btn" id="impr-refresh" title="Recarrega dados sem rerodar conselho">↻ Atualizar</button>
           </div>
         </div>
-        <div class="impr-scan-result" id="impr-scan-result"></div>
-        <p class="muted-line">
-          Comandada por <strong>Mekka</strong>, que consolida as propostas do
-          <strong>Beast</strong> + contexto da <strong>Jean Grey</strong>, depois
-          de passarem pelo premortem do <strong>Galactus</strong> (que devora as
-          ideias frágeis). Aprove ou reprove cada recomendação abaixo.
+        <p class="impr-tagline">
+          Mekka consolida propostas de Beast, Sage, Mentor e scanners.
+          Aprove para enviar ao dev squad.
         </p>
+        <div class="impr-scan-result" id="impr-scan-result"></div>
 
-        <div class="impr-summary" id="impr-summary"></div>
+        <!-- STATS BAR — visão de 1 segundo do estado -->
+        <div class="imp2-stats" id="imp2-stats">
+          <div class="imp2-stat"><div class="imp2-stat-value" id="imp2-stat-total">—</div><div class="imp2-stat-label">Total</div></div>
+          <div class="imp2-stat"><div class="imp2-stat-value" id="imp2-stat-new">—</div><div class="imp2-stat-label">Novas</div></div>
+          <div class="imp2-stat imp2-stat-stuck"><div class="imp2-stat-value" id="imp2-stat-stuck">—</div><div class="imp2-stat-label">Paradas</div></div>
+          <div class="imp2-stat"><div class="imp2-stat-value" id="imp2-stat-progress">—</div><div class="imp2-stat-label">Em dev</div></div>
+          <div class="imp2-stat imp2-stat-done"><div class="imp2-stat-value" id="imp2-stat-done">—</div><div class="imp2-stat-label">Merged</div></div>
+          <div class="imp2-stat imp2-stat-blocked"><div class="imp2-stat-value" id="imp2-stat-blocked">—</div><div class="imp2-stat-label">Bloqueadas</div></div>
+        </div>
 
-        <!-- KPI do departamento (Sage) -->
-        <div class="impr-kpi" id="impr-kpi"></div>
+        <!-- KPI tile — Departamento de Melhoria Contínua (Sage v1 throughput + v2 impacto) -->
+        <div class="imp2-kpi" id="imp2-kpi" data-empty="1">
+          <div class="imp2-kpi-head">📐 KPI — Departamento de Melhoria Contínua</div>
+          <div class="imp2-kpi-row">
+            <div class="imp2-kpi-group">
+              <div class="imp2-kpi-group-label">Throughput</div>
+              <span class="imp2-kpi-chip" title="Briefs aceitos pelo operador">✅ Aceitas <b id="imp2-kpi-accepted">—</b></span>
+              <span class="imp2-kpi-chip" title="Briefs rejeitados">🚫 Rejeitadas <b id="imp2-kpi-rejected">—</b></span>
+              <span class="imp2-kpi-chip" title="Taxa de aceitação">📈 Aceitação <b id="imp2-kpi-rate">—</b></span>
+            </div>
+            <div class="imp2-kpi-group">
+              <div class="imp2-kpi-group-label">Impacto (Sage v2)</div>
+              <span class="imp2-kpi-chip ok" title="Melhorias com impacto positivo medido">🟢 Efetivas <b id="imp2-kpi-effective">—</b></span>
+              <span class="imp2-kpi-chip" title="Sem mudança significativa">⚪ Neutras <b id="imp2-kpi-neutral">—</b></span>
+              <span class="imp2-kpi-chip bad" title="Win rate caiu após a entrega">🔴 Regressões <b id="imp2-kpi-regression">—</b></span>
+              <span class="imp2-kpi-chip" title="Ainda coletando dados">⏳ Pendentes <b id="imp2-kpi-pending">—</b></span>
+            </div>
+            <div class="imp2-kpi-group">
+              <div class="imp2-kpi-group-label">Saúde atual</div>
+              <span class="imp2-kpi-chip" title="Win rate no último snapshot">🎯 Win rate <b id="imp2-kpi-winrate">—</b></span>
+              <span class="imp2-kpi-chip" title="Erros/críticos em 24h">⚠️ Erros 24h <b id="imp2-kpi-errors">—</b></span>
+            </div>
+          </div>
+        </div>
 
-        <!-- Mainnet readiness — preflight gates ao vivo -->
-        <div class="impr-kpi" id="mainnet-readiness-tile"></div>
+        <!-- TABS — agora INCLUI 'paradas' como cidadã primária -->
+        <div class="impr-views" id="impr-views">
+          <button type="button" class="impr-view active" data-view="novas">🆕 Novas <span class="impr-view-n" data-n="novas">0</span></button>
+          <button type="button" class="impr-view" data-view="andamento">🛠️ Em andamento <span class="impr-view-n" data-n="andamento">0</span></button>
+          <button type="button" class="impr-view" data-view="paradas">⏳ Paradas <span class="impr-view-n" data-n="paradas">0</span></button>
+          <button type="button" class="impr-view" data-view="fechadas">📦 Fechadas <span class="impr-view-n" data-n="fechadas">0</span></button>
+          <button type="button" class="impr-view" data-view="todas">Todas <span class="impr-view-n" data-n="todas">0</span></button>
+        </div>
 
-        <!-- Mentor (Charles Xavier) — ParameterSuggestion deltas a partir de
-             outcomes resolvidos + Batman rejections + drawdown. Endpoint:
-             /api/mentor/suggestions (lê a cada refresh do conselho). -->
-        <div class="impr-mentor" id="impr-mentor"></div>
+        <!-- Filtros secundários — COLAPSADOS por default (sumir ruído) -->
+        <details class="imp2-filters">
+          <summary>🎚️ Filtros avançados (domínio, fonte)</summary>
+          <div class="impr-filters">
+            <button type="button" class="impr-filter active" data-domain="all">Todos</button>
+            <button type="button" class="impr-filter" data-domain="trading-ops">⚔️ Trading/Ops</button>
+            <button type="button" class="impr-filter" data-domain="dev-squad">🧑‍💻 Dev Squads</button>
+          </div>
+          <div class="impr-filters impr-source-filters">
+            <button type="button" class="impr-src-filter active" data-source="all">Todas as fontes</button>
+            <button type="button" class="impr-src-filter" data-source="beast">🐺 Beast</button>
+            <button type="button" class="impr-src-filter" data-source="code_auditor">🔍 CodeAuditor</button>
+            <button type="button" class="impr-src-filter" data-source="risk_scanner">⚠️ RiskScanner</button>
+            <button type="button" class="impr-src-filter" data-source="ops_scanner">🛠️ OpsScanner</button>
+            <button type="button" class="impr-src-filter" data-source="memory_scanner">🧠 MemoryScanner</button>
+            <button type="button" class="impr-src-filter" data-source="vault_scanner">📓 VaultScanner</button>
+            <button type="button" class="impr-src-filter" data-source="ice_man">🧊 Ice Man</button>
+            <button type="button" class="impr-src-filter" data-source="sage">📐 Sage</button>
+            <button type="button" class="impr-src-filter" data-source="mentor">🧠 Mentor</button>
+            <button type="button" class="impr-src-filter" data-source="inbox">📥 Inbox</button>
+          </div>
+        </details>
 
-        <!-- Audit trail das decisões do operador (accept/reject/claim/approve)
-             — read-only, últimas 20. Endpoint: /api/improvements/decision-history. -->
+        <!-- Sinais (Mentor/KPI/Mainnet) — colapsados (não poluir visão principal) -->
+        <details class="imp2-signals">
+          <summary>📊 Sinais do sistema (Mentor, KPI Sage, Mainnet readiness)</summary>
+          <div class="imp2-signals-body">
+            <div class="impr-summary" id="impr-summary"></div>
+            <div class="impr-kpi" id="impr-kpi"></div>
+            <div class="impr-kpi" id="mainnet-readiness-tile"></div>
+            <div class="impr-mentor" id="impr-mentor"></div>
+          </div>
+        </details>
+
+        <!-- Histórico — colapsado -->
         <details class="impr-history-wrap" id="impr-history-wrap">
-          <summary class="impr-history-summary">🧾 Histórico de decisões (operador)</summary>
+          <summary class="impr-history-summary">🧾 Histórico de decisões</summary>
           <div class="impr-history" id="impr-history">
             <div class="muted-line">Carregando histórico…</div>
           </div>
         </details>
 
-        <h3 class="impr-kanban-title">📋 Quadro de Status</h3>
+        <h3 class="impr-kanban-title" style="margin-top:18px;">📋 Quadro</h3>
         <div class="impr-kanban" id="impr-kanban"></div>
 
-        <!-- Abas de visualização por status (não polui com tudo de uma vez) -->
-        <div class="impr-views" id="impr-views">
-          <button type="button" class="impr-view active" data-view="novas">🆕 Novas <span class="impr-view-n" data-n="novas">0</span></button>
-          <button type="button" class="impr-view" data-view="andamento">🛠️ Em andamento <span class="impr-view-n" data-n="andamento">0</span></button>
-          <button type="button" class="impr-view" data-view="fechadas">📦 Fechadas <span class="impr-view-n" data-n="fechadas">0</span></button>
-          <button type="button" class="impr-view" data-view="todas">Todas <span class="impr-view-n" data-n="todas">0</span></button>
-        </div>
-
-        <div class="impr-filters">
-          <button type="button" class="impr-filter active" data-domain="all">Todos</button>
-          <button type="button" class="impr-filter" data-domain="trading-ops">⚔️ Trading/Ops</button>
-          <button type="button" class="impr-filter" data-domain="dev-squad">🧑‍💻 Dev Squads</button>
-        </div>
-
-        <div class="impr-filters impr-source-filters">
-          <button type="button" class="impr-src-filter active" data-source="all">Todas as fontes</button>
-          <button type="button" class="impr-src-filter" data-source="beast">🐺 Beast</button>
-          <button type="button" class="impr-src-filter" data-source="code_auditor">🔍 CodeAuditor</button>
-          <button type="button" class="impr-src-filter" data-source="risk_scanner">⚠️ RiskScanner</button>
-          <button type="button" class="impr-src-filter" data-source="ops_scanner">🛠️ OpsScanner</button>
-          <button type="button" class="impr-src-filter" data-source="memory_scanner">🧠 MemoryScanner</button>
-          <button type="button" class="impr-src-filter" data-source="ice_man">🧊 Ice Man</button>
-          <button type="button" class="impr-src-filter" data-source="sage">📐 Sage</button>
-          <button type="button" class="impr-src-filter" data-source="inbox">📥 Inbox</button>
-        </div>
-
+        <!-- Lista principal (filtrada por tab+filtros) -->
         <div class="impr-list" id="impr-list">
           <div class="muted-line">Carregando conselho…</div>
+        </div>
+
+        <!-- Lista de PARADAS (apenas visível na tab 'paradas') —
+             alimentada por /api/improvements/queued via memory_bridge -->
+        <div id="imp2-stuck-list" style="display:none;">
+          <p class="muted-line" style="margin-top:0;">
+            IMPs aprovadas mas paradas em <code>queued</code> — provavelmente o
+            trabalho foi feito mas o commit não usou tag
+            <code>[IMP-xxxxxxxx]</code>. Abaixo, candidatos de match com commits
+            recentes (heurística por palavras-chave + paths).
+          </p>
+          <div id="imp2-stuck-cards"><div class="muted-line">Carregando IMPs paradas…</div></div>
         </div>
       </section>
 
@@ -1488,13 +2044,46 @@
     <script src="/office-v4/pixel-engine-v3.js" defer></script>
     <script src="/office-v4/effects.js" defer></script>
     <script src="/office-v4/sprites.js" defer></script>
-    <script src="/office-v4/sprites-v3.js" defer></script>
-    <script src="/office-v4/sprites-v3-factory.js" defer></script>
+    <script src="/office-v4/sprites-v3.js?v=20260526a" defer></script>
+    <script src="/office-v4/sprites-v3-factory.js?v=20260526b" defer></script>
+    <!-- Atividade do Segundo Cérebro — módulo que consome
+         /api/second-brain/activity e monta o painel #second-brain-activity. -->
+    <script src="/static/second_brain_activity.js?v=20260526c" defer></script>
+    <!-- Cable agent — painel de Inteligência de Derivativos -->
+    <script src="/static/derivatives_intel.js?v=20260526a" defer></script>
+    <!-- Memory Hub — visão unificada das 6 camadas de memória -->
+    <script src="/static/memory_hub.js?v=20260527a" defer></script>
+    <!-- Learning Hub — server health + Prometheus + vault + implementer -->
+    <script src="/static/learning_hub.js?v=20260530a-D" defer></script>
+    <!-- Improvements v2 — stats bar + tab Paradas (Bridge) -->
+    <script src="/static/improvements_v2.js?v=20260527a" defer></script>
+    <script src="/static/implementer_squad.js?v=20260527a" defer></script>
+    <!-- Be Water Framework — Strategy Matrix panel -->
+    <script src="/static/strategy_matrix.js?v=20260528a" defer></script>
+    <!-- Today Summary + Topbar failsafe — externo (CSP bloqueia inline). -->
+    <script src="/static/today_summary_failsafe.js?v=20260528c" defer></script>
+    <!-- Sidebar minimize (2026-05-29) — toggle com persistência localStorage. -->
+    <script src="/static/sidebar_minimize.js?v=20260529b" defer></script>
+    <!-- Dashboard personalization FAB + shortcut Cmd+, (2026-05-29). -->
+    <script src="/static/dashboard_personalization.js?v=20260529a" defer></script>
     <!-- agents-sprites.js exposes window.AGENTS / drawAgent / drawSprite
          so the main dashboard Agents Roster renders the same pixel art
          the Pixel Office uses (P0.6, HANDOFF 2026-05-20). MUST load
          before app.js (which calls renderAgentsRoster() during boot). -->
     <script src="/static/agents-sprites.js" defer></script>
-    <script src="/static/app.js" defer></script>
+    <script src="/static/app.js?v=20260602h" defer></script>
+    <!-- second_brain_activity.js (carregado no head com defer) auto-monta
+         em #second-brain-activity quando ele existe no DOM. Sem script
+         inline aqui — bootstrap está dentro do próprio módulo. -->
+    <!-- Cache-bust do auto-mount: bump quando comportamento do módulo mudar -->
+    <script>
+      // Força reload do módulo caso versão cacheada antiga não tenha auto-mount
+      (function () {
+        var s = document.querySelector('script[src*="second_brain_activity.js"]');
+        if (s && !s.src.includes('v=20260526b')) {
+          // já está marcado v=20260526a — bump no index.html resolve no próximo deploy
+        }
+      })();
+    </script>
   </body>
 </html>

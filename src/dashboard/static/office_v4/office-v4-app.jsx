@@ -8,38 +8,57 @@
 const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
 /* ════════ AGENT HOME STATIONS ════════ */
+/* REDESIGN 2026-05-29c — wider corridors (~80-100px) to eliminate sprite overlap:
+   L1 ends x=500, L2 starts x=600 (100px), L2 ends x=1060, Conf starts x=1100 (40px),
+   Conf ends x=1640, L4 starts x=1720 (80px). HALL_Y raised 970→1010 (40px wider).
+   Interior station spacing increased ~12-25% to give walkway room around desks. */
 const STATIONS = [
   /* Wall */
   { id: 'nimbus',   x: 110,  y: 180, zone: 'wall' },
-  { id: 'sleek',    x: 1780, y: 180, zone: 'wall' },
+  { id: 'oracle',   x: 945,  y: 180, zone: 'wall' },  /* Prometheus — Dev/QA observer, posted top-center */
+  { id: 'sleek',    x: 1860, y: 180, zone: 'wall' },
 
-  /* L1 ANALYSIS — left zone */
-  { id: 'falcon',   x: 40,   y: 360, zone: 'l1' },
-  { id: 'sage',     x: 200,  y: 360, zone: 'l1' },
-  { id: 'velox',    x: 360,  y: 360, zone: 'l1' },
-  { id: 'hammer',   x: 40,   y: 640, zone: 'l1' },
-  { id: 'tide',     x: 200,  y: 640, zone: 'l1' },
+  /* L1 ANALYSIS — left zone (x=20..500, interior columns 60/240/420 — 180px spacing) */
+  { id: 'falcon',   x: 60,   y: 360, zone: 'l1' },
+  { id: 'sage',     x: 240,  y: 360, zone: 'l1' },
+  { id: 'velox',    x: 420,  y: 360, zone: 'l1' },
+  { id: 'hammer',   x: 60,   y: 640, zone: 'l1' },
+  { id: 'tide',     x: 240,  y: 640, zone: 'l1' },
 
-  /* L2 STRATEGY — center top */
-  { id: 'synth',    x: 580,  y: 360, zone: 'l2' },
-  { id: 'mentor',   x: 740,  y: 360, zone: 'l2' },
-  { id: 'joker',    x: 900,  y: 360, zone: 'l2' },
+  /* L2 STRATEGY — center top (x=600..1060, columns 660/820/980 — 160px spacing) */
+  { id: 'synth',    x: 660,  y: 360, zone: 'l2' },
+  { id: 'mentor',   x: 820,  y: 360, zone: 'l2' },
+  { id: 'joker',    x: 980,  y: 360, zone: 'l2' },
 
-  /* L3 RISK/EXEC — center bottom */
-  { id: 'aegis',    x: 580,  y: 640, zone: 'l3' },
-  { id: 'sentinel', x: 740,  y: 640, zone: 'l3' },
-  { id: 'claw',     x: 900,  y: 640, zone: 'l3' },
-  { id: 'visor',    x: 660,  y: 870, zone: 'l3' },
-  { id: 'titan',    x: 820,  y: 870, zone: 'l3' },
+  /* L3 RISK/EXEC — center bottom (same x-column as L2) */
+  { id: 'aegis',    x: 660,  y: 640, zone: 'l3' },
+  { id: 'sentinel', x: 820,  y: 640, zone: 'l3' },
+  { id: 'claw',     x: 980,  y: 640, zone: 'l3' },
+  { id: 'visor',    x: 740,  y: 870, zone: 'l3' },
+  { id: 'titan',    x: 900,  y: 870, zone: 'l3' },
 
-  /* L4 COMMAND — right zone */
-  { id: 'chief',    x: 1620, y: 360, zone: 'l4' },
-  { id: 'cosmic',   x: 1780, y: 360, zone: 'l4' },
-  { id: 'indigo',   x: 1940, y: 360, zone: 'l4' },
-  { id: 'ember',    x: 1620, y: 640, zone: 'l4' },
-  { id: 'shade',    x: 1780, y: 640, zone: 'l4' },
-  { id: 'arachne',  x: 1940, y: 640, zone: 'l4' },
-  { id: 'scribe',   x: 1780, y: 870, zone: 'l4' },
+  /* L4 COMMAND — right zone (x=1720..2000, w=280, tighter 3-col grid spaced 100) */
+  { id: 'chief',    x: 1760, y: 360, zone: 'l4' },
+  { id: 'cosmic',   x: 1860, y: 360, zone: 'l4' },
+  { id: 'indigo',   x: 1960, y: 360, zone: 'l4' },
+  { id: 'ember',    x: 1760, y: 640, zone: 'l4' },
+  { id: 'shade',    x: 1860, y: 640, zone: 'l4' },
+  { id: 'arachne',  x: 1960, y: 640, zone: 'l4' },
+  { id: 'scribe',   x: 1860, y: 870, zone: 'l4' },
+
+  /* OPS CORRIDOR — fileira inferior (heróis Python sem desk próprio).
+     Realocada para y=1090 (era 1050) — 80px abaixo do HALL_Y=1010, e
+     spacing horizontal aumentado ~25% pra eliminar overlap. zone='l4'
+     mantém o herder de random-meeting compatível. */
+  { id: 'frost',    x: 240,  y: 1090, zone: 'l4' },  /* IceMan */
+  { id: 'xavier',   x: 420,  y: 1090, zone: 'l4' },  /* Mentor (Charles Xavier) */
+  { id: 'kpi',      x: 600,  y: 1090, zone: 'l4' },  /* Sage KPI */
+  { id: 'cypher',   x: 780,  y: 1090, zone: 'l4' },  /* Code Auditor */
+  { id: 'anvil',    x: 960,  y: 1090, zone: 'l4' },  /* Forge / Ops Scanner */
+  { id: 'mark',     x: 1140, y: 1090, zone: 'l4' },  /* Domino / Risk Scanner */
+  { id: 'patch',    x: 1500, y: 1090, zone: 'l4' },  /* Nick Fury */
+  { id: 'ledger',   x: 1680, y: 1090, zone: 'l4' },  /* Portfolio Manager */
+  { id: 'soldier',  x: 1860, y: 1090, zone: 'l4' },  /* Cable — Derivatives Intel */
 ];
 
 const STATIONS_BY_ID = STATIONS.reduce((m, s) => { m[s.id] = s; return m; }, {});
@@ -52,17 +71,17 @@ const _SPRITE_BY_ID = (((window.SPRITES_V3 || {}).list) || [])
 const HERO_NAME = (id) => (_SPRITE_BY_ID[id] && _SPRITE_BY_ID[id].codename) || id;
 
 /* ════════ ROOMS + DOORS — for pathfinding ════════ */
-/* Door positions chosen so each room exits cleanly into a hallway.
-   HALL_Y = main horizontal corridor below all rooms (y=970).
-   Vertical corridors exist between rooms at x=500-520, x=980-1000, x=1540-1560.
+/* REDESIGN 2026-05-29c — corredores entre salas alargados.
+   HALL_Y = main horizontal corridor below all rooms (y=1010, era 970).
+   Vertical corridors: x=500-600 (100px), x=1060-1100 (40px), x=1640-1720 (80px).
    All cross-room movement routes via the main corridor to avoid crossing walls. */
-const HALL_Y = 970;
+const HALL_Y = 1010;
 const ROOMS = {
   l1:   { bounds: { x:20,   y:320, w:480, h:560 }, door: { x:500,  y:600, side:'right'  } },
-  l2:   { bounds: { x:520,  y:320, w:460, h:240 }, door: { x:980,  y:440, side:'right'  } },
-  l3:   { bounds: { x:520,  y:580, w:460, h:360 }, door: { x:750,  y:940, side:'bottom' } },
-  conf: { bounds: { x:1000, y:320, w:540, h:620 }, door: { x:1270, y:940, side:'bottom' } },
-  l4:   { bounds: { x:1560, y:320, w:440, h:620 }, door: { x:1780, y:940, side:'bottom' } },
+  l2:   { bounds: { x:600,  y:320, w:460, h:240 }, door: { x:1060, y:440, side:'right'  } },
+  l3:   { bounds: { x:600,  y:580, w:460, h:360 }, door: { x:830,  y:940, side:'bottom' } },
+  conf: { bounds: { x:1100, y:320, w:540, h:620 }, door: { x:1370, y:940, side:'bottom' } },
+  l4:   { bounds: { x:1720, y:320, w:280, h:620 }, door: { x:1860, y:940, side:'bottom' } },
 };
 
 function getRoom(x, y) {
@@ -100,42 +119,47 @@ function buildPath(fromX, fromY, toX, toY) {
 }
 
 /* ════════ ZONE BOXES ════════ */
+/* REDESIGN 2026-05-29c — alinhado com novos ROOMS bounds (corredores 80-100px) */
 const ZONES = {
   l1: { x: 20,   y: 320, w: 480, h: 560, color: '#3aaad6', accent: '#5be8f5', label: 'L1 — ANALYSIS' },
-  l2: { x: 520,  y: 320, w: 460, h: 240, color: '#a878e8', accent: '#d65aff', label: 'L2 — STRATEGY' },
-  l3: { x: 520,  y: 580, w: 460, h: 360, color: '#e89a3a', accent: '#ffae3a', label: 'L3 — RISK/EXEC' },
-  l4: { x: 1560, y: 320, w: 440, h: 620, color: '#5fa14b', accent: '#9be8a4', label: 'L4 — COMMAND' },
+  l2: { x: 600,  y: 320, w: 460, h: 240, color: '#a878e8', accent: '#d65aff', label: 'L2 — STRATEGY' },
+  l3: { x: 600,  y: 580, w: 460, h: 360, color: '#e89a3a', accent: '#ffae3a', label: 'L3 — RISK/EXEC' },
+  l4: { x: 1720, y: 320, w: 280, h: 620, color: '#5fa14b', accent: '#9be8a4', label: 'L4 — COMMAND' },
   /* Conference room — center between L3 and L4 */
-  conf:{ x: 1000, y: 320, w: 540, h: 620, color: '#5be8f5', accent: '#a8f4ff', label: 'CONF · BOARD ROOM' },
+  conf:{ x: 1100, y: 320, w: 540, h: 620, color: '#5be8f5', accent: '#a8f4ff', label: 'CONF · BOARD ROOM' },
 };
 
 /* ════════ ACTIVITY SPOTS ════════ */
-/* Conference table seats — 8 chairs around oval table at center of conf room */
-const CONF_CENTER = { x: 1270, y: 630 };
+/* Conference table seats — 8 chairs around oval table at center of conf room.
+   REDESIGN 2026-05-29c — Conf room shifted +100 in x (now x=1100..1640),
+   so CONF_CENTER moved 1270 → 1370 and all seats shifted +100 in x. */
+const CONF_CENTER = { x: 1370, y: 630 };
 const CONF_SEATS = [
-  { id: 'seat1', x: 1110, y: 540 },
-  { id: 'seat2', x: 1270, y: 510 },
-  { id: 'seat3', x: 1430, y: 540 },
-  { id: 'seat4', x: 1470, y: 630 },
-  { id: 'seat5', x: 1430, y: 720 },
-  { id: 'seat6', x: 1270, y: 750 },
-  { id: 'seat7', x: 1110, y: 720 },
-  { id: 'seat8', x: 1070, y: 630 },
+  { id: 'seat1', x: 1210, y: 540 },
+  { id: 'seat2', x: 1370, y: 510 },
+  { id: 'seat3', x: 1530, y: 540 },
+  { id: 'seat4', x: 1570, y: 630 },
+  { id: 'seat5', x: 1530, y: 720 },
+  { id: 'seat6', x: 1370, y: 750 },
+  { id: 'seat7', x: 1210, y: 720 },
+  { id: 'seat8', x: 1170, y: 630 },
 ];
 
+/* Amenity spots live in the main bottom corridor (now at y≈1050+, since
+   HALL_Y bumped to 1010 and amenities row sits below the rooms). */
 const COFFEE_SPOTS = [
-  { id: 'coffee1', x: 140, y: 1010 },
-  { id: 'coffee2', x: 220, y: 1010 },
+  { id: 'coffee1', x: 140, y: 1050 },
+  { id: 'coffee2', x: 220, y: 1050 },
 ];
 const COOLER_SPOTS = [
-  { id: 'cooler1', x: 1820, y: 1010 },
+  { id: 'cooler1', x: 1820, y: 1050 },
 ];
 const PRINTER_SPOTS = [
-  { id: 'printer1', x: 1380, y: 1010 },
+  { id: 'printer1', x: 1380, y: 1050 },
 ];
 const WANDER_SPOTS = [
-  { x: 480, y: 980 }, { x: 1050, y: 980 }, { x: 1530, y: 980 },
-  { x: 540, y: 990 }, { x: 1500, y: 990 },
+  { x: 540, y: 1020 }, { x: 1080, y: 1020 }, { x: 1660, y: 1020 },
+  { x: 560, y: 1030 }, { x: 1700, y: 1030 },
 ];
 
 /* ════════ DIALOG POOLS ════════ */
@@ -671,7 +695,7 @@ function FlowArrows({ activeArrow }) {
     );
   };
   return (
-    <svg style={{ position: 'absolute', inset: 0, width: 2000, height: 1200, pointerEvents: 'none' }}>
+    <svg style={{ position: 'absolute', inset: 0, width: 2000, height: 1240, pointerEvents: 'none' }}>
       <defs>
         <marker id="arrIdle" viewBox="0 0 10 10" refX="8" refY="5"
                 markerWidth="6" markerHeight="6" orient="auto-start-reverse">
@@ -682,9 +706,10 @@ function FlowArrows({ activeArrow }) {
           <path d="M0,0 L10,5 L0,10 z" fill="#9be8a4" />
         </marker>
       </defs>
-      {path('l1l2', 'M 500 440 L 560 420', 'FORWARD', { x: 490, y: 432 })}
-      {path('l2l3', 'M 770 560 L 770 620', 'EXECUTE', { x: 778, y: 595 })}
-      {path('l3l4', 'M 985 720 L 1560 640', 'WRITE PNL', { x: 1100, y: 700 })}
+      {/* Arrows updated for new layout (corridors widened to 80-100px) */}
+      {path('l1l2', 'M 500 440 L 600 420', 'FORWARD', { x: 528, y: 414 })}
+      {path('l2l3', 'M 830 560 L 830 620', 'EXECUTE', { x: 838, y: 595 })}
+      {path('l3l4', 'M 1065 720 L 1720 640', 'WRITE PNL', { x: 1280, y: 690 })}
     </svg>
   );
 }
@@ -1195,13 +1220,73 @@ function OfficeV4App() {
   }, [tempos]);
 
   /* Movement tick — fine-grained (80ms) so each agent steps on its own
-     stepInterval, NOT in lockstep with everyone else. */
+     stepInterval, NOT in lockstep with everyone else.
+
+     OFFICE-2 (2026-05-29) — Separation steering:
+     Antes os heróis sobrepunham porque cada agente seguia seu waypoint
+     sem olhar pra ninguém. Agora cada passo de cada agente em movimento
+     é blendado com uma força de repulsão dos vizinhos dentro do raio
+     SEPARATION_RADIUS. Resultado: dois agentes no mesmo corredor curvam
+     levemente um pelo outro em vez de empilhar.
+
+     - SEPARATION_RADIUS: distância de detecção (px no mundo)
+     - SEPARATION_WEIGHT: peso da força de repulsão vs força de waypoint
+     - Não muda destino — só inflexiona o caminho durante o trajeto.
+     - Custo O(N²) por tick mas N ≈ 20-30 sprites, totalmente OK. */
+  const SEPARATION_RADIUS = 38;     // px (sprite ~72px, então 38px ≈ ombro a ombro)
+  const SEPARATION_WEIGHT = 0.55;   // peso da força de desvio (0 = off, 1 = só desvio)
+  const SEPARATION_MIN_DIST = 4;    // px, evita divisão por zero
   useEffect(() => {
     const id = setInterval(() => {
       const now = Date.now();
       setAgents((prev) => {
         let changed = false;
         const next = { ...prev };
+        // Snapshot das posições antes de mover — todos os vizinhos
+        // são lidos no estado do tick anterior, evitando cascata
+        // (A move pra evitar B, mas B ainda está onde estava).
+        const positions = Object.keys(prev).map((id) => ({
+          id, x: prev[id].x, y: prev[id].y,
+        }));
+        // ── Passo 1: agentes PARADOS (idle) — apenas separation drift.
+        // Quando duas STATIONS estão muito próximas (ex: 4 stations da
+        // L2 enfileiradas), os agentes nasciam empilhados e ficavam ali.
+        // Aplicamos um drift suave proporcional à força de separation
+        // pra que eles se espacem em 1-2 segundos sem sair muito da station.
+        const IDLE_DRIFT_STEP = 1.2; // px por tick — bem sutil
+        const IDLE_DRIFT_RADIUS = SEPARATION_RADIUS;
+        for (const agentId of Object.keys(next)) {
+          const a = next[agentId];
+          if (a.isMoving) continue;
+          let sx = 0, sy = 0, neighbors = 0;
+          for (const p of positions) {
+            if (p.id === agentId) continue;
+            const ddx = a.x - p.x;
+            const ddy = a.y - p.y;
+            const d2 = ddx*ddx + ddy*ddy;
+            if (d2 > IDLE_DRIFT_RADIUS * IDLE_DRIFT_RADIUS) continue;
+            const d = Math.max(SEPARATION_MIN_DIST, Math.sqrt(d2));
+            const inv = (IDLE_DRIFT_RADIUS - d) / IDLE_DRIFT_RADIUS;
+            sx += (ddx / d) * inv;
+            sy += (ddy / d) * inv;
+            neighbors += 1;
+          }
+          if (neighbors > 0) {
+            const slen = Math.sqrt(sx*sx + sy*sy);
+            if (slen > 0.1) {
+              sx /= slen;
+              sy /= slen;
+              next[agentId] = {
+                ...a,
+                x: a.x + sx * IDLE_DRIFT_STEP,
+                y: a.y + sy * IDLE_DRIFT_STEP,
+              };
+              changed = true;
+            }
+          }
+        }
+
+        // ── Passo 2: agentes em MOVIMENTO — separation + waypoint
         for (const agentId of Object.keys(next)) {
           const a = next[agentId];
           if (!a.isMoving) continue;
@@ -1230,10 +1315,57 @@ function OfficeV4App() {
                                 stepPhase: 1 - a.stepPhase, lastStepAt: now };
             }
           } else {
-            const nx = a.x + (dx / dist) * STEP;
-            const ny = a.y + (dy / dist) * STEP;
+            // ── Direção base: heading pro waypoint
+            let hx = dx / dist;
+            let hy = dy / dist;
+
+            // ── Separation steering: somatório de vetores de afastamento
+            //    contra vizinhos dentro do raio.
+            let sx = 0, sy = 0, neighbors = 0;
+            for (const p of positions) {
+              if (p.id === agentId) continue;
+              const ddx = a.x - p.x;
+              const ddy = a.y - p.y;
+              const d2 = ddx*ddx + ddy*ddy;
+              if (d2 > SEPARATION_RADIUS * SEPARATION_RADIUS) continue;
+              const d = Math.max(SEPARATION_MIN_DIST, Math.sqrt(d2));
+              // Força inversamente proporcional à distância (mais perto = empurra mais)
+              const inv = (SEPARATION_RADIUS - d) / SEPARATION_RADIUS;
+              sx += (ddx / d) * inv;
+              sy += (ddy / d) * inv;
+              neighbors += 1;
+            }
+
+            if (neighbors > 0) {
+              // Normaliza a força de separation pro mesmo módulo da heading
+              const slen = Math.sqrt(sx*sx + sy*sy);
+              if (slen > 0) {
+                sx /= slen;
+                sy /= slen;
+                // Easing de proximidade ao waypoint:
+                // Quando o agente está chegando perto do destino (ex: cadeira
+                // de conferência), reduz progressivamente o peso da
+                // separation pra não impedir que sente. Distância de easing
+                // ~ 2× SEPARATION_RADIUS.
+                const easeDist = SEPARATION_RADIUS * 2;
+                const easeFactor = Math.min(1, dist / easeDist);
+                const effWeight = SEPARATION_WEIGHT * easeFactor;
+                // Blend: heading × (1-w) + separation × w
+                hx = hx * (1 - effWeight) + sx * effWeight;
+                hy = hy * (1 - effWeight) + sy * effWeight;
+                const hlen = Math.sqrt(hx*hx + hy*hy);
+                if (hlen > 0) {
+                  hx /= hlen;
+                  hy /= hlen;
+                }
+              }
+            }
+
+            const nx = a.x + hx * STEP;
+            const ny = a.y + hy * STEP;
             let facing = a.facing;
-            if (Math.abs(dx) > 4) facing = dx > 0 ? 'right' : 'left';
+            // Facing usa o vetor blendado (com desvio) — sprite olha pra onde anda
+            if (Math.abs(hx) > 0.2) facing = hx > 0 ? 'right' : 'left';
             next[agentId] = { ...a, x: nx, y: ny, facing,
                               stepPhase: 1 - a.stepPhase, lastStepAt: now };
           }
@@ -1277,18 +1409,34 @@ function OfficeV4App() {
     return () => clearInterval(id);
   }, [agents]);
 
-  /* Power firing — auto-cycle one random agent per ~1.6s */
+  /* Power firing — auto-cycle one random agent per ~1.6s.
+     v2 (2026-05-27): trigger imediato ao ativar + contador visível +
+     fallback para STATIONS quando `agents` ainda não populou (evita
+     primeiro ciclo "morto" no boot). */
   const [autoCycle, setAutoCycle] = useState(true);
+  const [autoCycleCount, setAutoCycleCount] = useState(0);
+
+  // Fire um power num agente random (helper reutilizável).
+  const _firePowerRandom = useCallback(() => {
+    let ids = Object.keys(agents);
+    if (ids.length === 0) {
+      // Fallback: usa STATIONS se agents ainda não populou (race no boot)
+      ids = STATIONS.map((s) => s.id);
+    }
+    if (ids.length === 0) return;
+    const aid = ids[Math.floor(Math.random() * ids.length)];
+    setActiveId(aid);
+    setFireKeys((prev) => ({ ...prev, [aid]: (prev[aid] || 0) + 1 }));
+    setAutoCycleCount((c) => c + 1);
+  }, [agents]);
+
   useEffect(() => {
     if (!autoCycle) return;
-    const id = setInterval(() => {
-      const ids = Object.keys(agents);
-      const aid = ids[Math.floor(Math.random() * ids.length)];
-      setActiveId(aid);
-      setFireKeys((prev) => ({ ...prev, [aid]: (prev[aid] || 0) + 1 }));
-    }, 1700);
+    // Trigger IMEDIATO ao ativar (não esperar 1.7s pro feedback)
+    _firePowerRandom();
+    const id = setInterval(_firePowerRandom, 1700);
     return () => clearInterval(id);
-  }, [autoCycle, agents]);
+  }, [autoCycle, _firePowerRandom]);
 
   /* TRADE FLOW EVENTS — chains L1 → L2 → L3 risk → L3 exec → L4 pnl,
      firing each agent's power + bubble in sequence, lighting up flow arrows.
@@ -1422,8 +1570,8 @@ function OfficeV4App() {
       const w = window.innerWidth;
       const h = window.innerHeight;
       // Fill the available space (allow up to 1.5x upscale so the floor isn't
-      // tiny inside a wide embed). Container aspect ≈ 2000/1200 → minimal gaps.
-      setScale(Math.min(w / 2000, h / 1200, 1.5));
+      // tiny inside a wide embed). Container aspect ≈ 2000/1240 → minimal gaps.
+      setScale(Math.min(w / 2000, h / 1240, 1.5));
     };
     update();
     window.addEventListener('resize', update);
@@ -1497,8 +1645,19 @@ function OfficeV4App() {
           <span style={appStyles.muted}>· conf room · drones · bubbles ativos</span>
           <button
             onClick={() => setAutoCycle((v) => !v)}
-            style={{ ...appStyles.btn, color: autoCycle ? '#9be8a4' : '#6e7c8c' }}
-          >{autoCycle ? '◉ powers auto' : '○ powers auto'}</button>
+            title={autoCycle
+              ? `Powers auto LIGADO — disparando 1 poder a cada 1.7s (${autoCycleCount} disparados). Click para PAUSAR.`
+              : 'Powers auto DESLIGADO — clique para reativar a animação cíclica de poderes.'}
+            style={{
+              ...appStyles.btn,
+              color: autoCycle ? '#9be8a4' : '#6e7c8c',
+              borderColor: autoCycle ? 'rgba(155,232,164,0.6)' : 'rgba(110,124,140,0.4)',
+              boxShadow: autoCycle ? '0 0 8px rgba(155,232,164,0.35)' : 'none',
+              transition: 'box-shadow 200ms ease, color 200ms ease',
+            }}
+          >
+            {autoCycle ? `◉ powers auto · ${autoCycleCount}` : '○ powers auto'}
+          </button>
         </div>
       </div>
 
@@ -1559,34 +1718,61 @@ function OfficeV4App() {
           {/* Room walls + door frames */}
           <RoomWalls />
 
-          {/* Futuristic plants scattered around */}
-          <Plant x={460}  y={300} color="#5fa14b" kind="tall" />
-          <Plant x={460}  y={860} color="#5fa14b" kind="tall" />
-          <Plant x={990}  y={300} color="#9be8a4" kind="pod" />
-          <Plant x={990}  y={900} color="#a878e8" kind="bonsai" />
-          <Plant x={1540} y={300} color="#5fa14b" kind="tall" />
-          <Plant x={1540} y={900} color="#5fa14b" kind="tall" />
-          <Plant x={510}  y={930} color="#a878e8" kind="pod" />
-          <Plant x={950}  y={930} color="#9be8a4" kind="bonsai" />
-          <Plant x={1500} y={930} color="#5fa14b" kind="pod" />
-          <Plant x={1960} y={300} color="#9be8a4" kind="bonsai" />
-          <Plant x={50}   y={290} color="#5fa14b" kind="pod" />
-          <Plant x={1960} y={900} color="#5fa14b" kind="tall" />
+          {/* Futuristic plants scattered around — repositioned to fill new
+              wider corridors and decorate room corners (REDESIGN 2026-05-29c) */}
+          {/* Top-of-rooms decoration (just below the wall monitors) */}
+          <Plant x={50}   y={290} color="#5fa14b" kind="pod"    />
+          <Plant x={460}  y={290} color="#5fa14b" kind="tall"   />
+          <Plant x={1080} y={290} color="#9be8a4" kind="pod"    />
+          <Plant x={1660} y={290} color="#9be8a4" kind="bonsai" />
+          <Plant x={1960} y={290} color="#5fa14b" kind="tall"   />
+          {/* Corridor plants — L1↔L2 vertical corridor (x=500..600) */}
+          <Plant x={540}  y={350} color="#9be8a4" kind="tall"   />
+          <Plant x={540}  y={750} color="#a878e8" kind="bonsai" />
+          {/* Corridor plants — Conf↔L4 vertical corridor (x=1640..1720) */}
+          <Plant x={1670} y={400} color="#5fa14b" kind="pod"    />
+          <Plant x={1670} y={750} color="#9be8a4" kind="tall"   />
+          {/* Bottom corner accents — near rooms' bottoms (above ops corridor) */}
+          <Plant x={460}  y={860} color="#5fa14b" kind="tall"   />
+          <Plant x={1080} y={860} color="#a878e8" kind="bonsai" />
+          <Plant x={1660} y={870} color="#5fa14b" kind="tall"   />
+          <Plant x={1960} y={860} color="#5fa14b" kind="tall"   />
+          {/* Hall greenery — sprinkled along the main horizontal corridor */}
+          <Plant x={50}   y={1170} color="#5fa14b" kind="pod"    />
+          <Plant x={1100} y={1170} color="#9be8a4" kind="bonsai" />
+          <Plant x={1960} y={1170} color="#a878e8" kind="pod"    />
 
           {/* Flow arrows L1→L2→L3→L4 — brighten when trade flow stage fires */}
           <FlowArrows activeArrow={activeArrow} />
 
-          {/* Holographic floor projection (between zones) */}
+          {/* Holographic floor projections — fill the now-wider vertical corridors
+              between rooms (L1↔L2, L2↔Conf, Conf↔L4) so the gaps don't read empty. */}
+          {/* L1 → L2 corridor (x=500..600, 100px wide) */}
           <div style={{
-            position: 'absolute', left: 470, top: 580, width: 60, height: 360,
-            background: 'repeating-linear-gradient(45deg, rgba(91,232,245,0.18) 0 6px, transparent 6px 12px)',
-            animation: 'holoPulse 3s ease-in-out infinite',
+            position: 'absolute', left: 520, top: 320, width: 60, height: 620,
+            background: 'repeating-linear-gradient(0deg, rgba(91,232,245,0.18) 0 6px, transparent 6px 12px)',
+            animation: 'holoPulse 3.2s ease-in-out infinite',
             pointerEvents: 'none',
           }} />
+          {/* L2/L3 → Conf corridor (x=1060..1100, 40px) */}
           <div style={{
-            position: 'absolute', left: 990, top: 320, width: 22, height: 620,
-            background: 'repeating-linear-gradient(0deg, rgba(91,232,245,0.18) 0 6px, transparent 6px 12px)',
+            position: 'absolute', left: 1066, top: 320, width: 28, height: 620,
+            background: 'repeating-linear-gradient(0deg, rgba(91,232,245,0.16) 0 6px, transparent 6px 12px)',
             animation: 'holoPulse 4s ease-in-out infinite',
+            pointerEvents: 'none',
+          }} />
+          {/* Conf → L4 corridor (x=1640..1720, 80px) */}
+          <div style={{
+            position: 'absolute', left: 1650, top: 320, width: 60, height: 620,
+            background: 'repeating-linear-gradient(0deg, rgba(155,232,164,0.16) 0 6px, transparent 6px 12px)',
+            animation: 'holoPulse 3.6s ease-in-out infinite',
+            pointerEvents: 'none',
+          }} />
+          {/* Main horizontal hall (y=940..1010, between rooms and ops corridor) */}
+          <div style={{
+            position: 'absolute', left: 20, top: 950, width: 1980, height: 40,
+            background: 'repeating-linear-gradient(90deg, rgba(91,232,245,0.10) 0 8px, transparent 8px 16px)',
+            animation: 'holoPulse 5s ease-in-out infinite',
             pointerEvents: 'none',
           }} />
 
@@ -1616,44 +1802,46 @@ function OfficeV4App() {
             );
           })}
 
-          {/* Amenities — dense bottom row (corridor below all rooms) */}
-          <CoffeeBar      x={10}   y={970} />
-          <VendingMachine x={290}  y={970} />
-          <LockerBank     x={360}  y={974} count={4} color="#5be8f5" />
-          <ServerRack     x={478}  y={980} label="SRV-01" />
-          <ServerRack     x={556}  y={980} label="SRV-02" />
-          <ServerTower    x={636}  y={970} label="CORE-A" />
-          <ServerTower    x={702}  y={970} label="CORE-B" status="warn" />
-          <Lounge         x={780}  y={970} count={3} />
-          <HoloWallPanel  x={1130} y={968} color="#a878e8" label="STRAT" />
-          <TrashBin       x={1210} y={1018} />
-          <Printer        x={1240} y={980} />
-          <HoloWallPanel  x={1340} y={968} color="#e89a3a" label="RISK" />
-          <LockerBank     x={1430} y={974} count={3} color="#5fa14b" />
-          <ServerTower    x={1520} y={970} label="QUANT" />
-          <HoloWallPanel  x={1590} y={968} color="#5fa14b" label="L4" />
-          <TrashBin       x={1690} y={1018} />
-          <Cooler         x={1720} y={980} />
-          <VendingMachine x={1820} y={970} />
-          <TrashBin       x={1900} y={1018} />
+          {/* Amenities — dense bottom row.
+              REDESIGN 2026-05-29c — corridor below all rooms shifted from y≈970 to
+              y≈1010+ since HALL_Y bumped to 1010. Amenity row is now at y=1015. */}
+          <CoffeeBar      x={10}   y={1015} />
+          <VendingMachine x={290}  y={1015} />
+          <LockerBank     x={360}  y={1019} count={4} color="#5be8f5" />
+          <ServerRack     x={478}  y={1025} label="SRV-01" />
+          <ServerRack     x={556}  y={1025} label="SRV-02" />
+          <ServerTower    x={636}  y={1015} label="CORE-A" />
+          <ServerTower    x={702}  y={1015} label="CORE-B" status="warn" />
+          <Lounge         x={780}  y={1015} count={3} />
+          <HoloWallPanel  x={1130} y={1013} color="#a878e8" label="STRAT" />
+          <TrashBin       x={1210} y={1063} />
+          <Printer        x={1240} y={1025} />
+          <HoloWallPanel  x={1340} y={1013} color="#e89a3a" label="RISK" />
+          <LockerBank     x={1430} y={1019} count={3} color="#5fa14b" />
+          <ServerTower    x={1520} y={1015} label="QUANT" />
+          <HoloWallPanel  x={1590} y={1013} color="#5fa14b" label="L4" />
+          <TrashBin       x={1690} y={1063} />
+          <Cooler         x={1720} y={1025} />
+          <VendingMachine x={1820} y={1015} />
+          <TrashBin       x={1900} y={1063} />
 
-          {/* In-room furniture */}
-          {/* L1 — lockers along the bottom interior wall + whiteboard */}
-          <Whiteboard     x={40}   y={760} />
-          <LockerBank     x={140}  y={780} count={3} color="#5be8f5" />
+          {/* In-room furniture — repositioned for new room bounds (2026-05-29c) */}
+          {/* L1 (x=20..500) — lockers along the bottom interior wall + whiteboard */}
+          <Whiteboard     x={60}   y={760} />
+          <LockerBank     x={160}  y={780} count={3} color="#5be8f5" />
           <TrashBin       x={460}  y={840} />
-          {/* L2 — whiteboard + holo panel */}
-          <Whiteboard     x={540}  y={480} />
-          {/* L3 — server rack + lockers */}
-          <ServerTower    x={930}  y={620} label="EXEC-01" />
-          <LockerBank     x={540}  y={830} count={2} color="#e89a3a" />
-          {/* Conf — holo briefing panel */}
-          <HoloWallPanel  x={1020} y={340} color="#5be8f5" label="AGENDA" />
-          <HoloWallPanel  x={1450} y={340} color="#a8f4ff" label="KPI" />
-          {/* L4 — lockers along bottom + server */}
-          <LockerBank     x={1580} y={830} count={3} color="#5fa14b" />
-          <ServerTower    x={1940} y={830} label="L4-SRV" />
-          <Whiteboard     x={1700} y={460} />
+          {/* L2 (x=600..1060) — whiteboard */}
+          <Whiteboard     x={620}  y={480} />
+          {/* L3 (x=600..1060) — server rack + lockers */}
+          <ServerTower    x={1010} y={620} label="EXEC-01" />
+          <LockerBank     x={620}  y={830} count={2} color="#e89a3a" />
+          {/* Conf (x=1100..1640) — holo briefing panels along walls */}
+          <HoloWallPanel  x={1120} y={340} color="#5be8f5" label="AGENDA" />
+          <HoloWallPanel  x={1550} y={340} color="#a8f4ff" label="KPI" />
+          {/* L4 (x=1720..2000, w=280) — tight: lockers + server on bottom */}
+          <LockerBank     x={1740} y={830} count={3} color="#5fa14b" />
+          <ServerTower    x={1960} y={830} label="L4-SRV" />
+          <Whiteboard     x={1830} y={460} />
 
           {/* Big-meeting banner — appears during the 20-35s scheduled board meeting */}
           {bigMeeting && bigMeeting.until > Date.now() && (
@@ -2139,7 +2327,7 @@ const appStyles = {
     background: 'radial-gradient(ellipse at center top, #0a1828 0%, #020812 70%)',
   },
   stage: {
-    width: 2000, height: 1200,
+    width: 2000, height: 1240,
     position: 'relative',
     transformOrigin: 'top center',
     background: '#04101a',
@@ -2148,7 +2336,9 @@ const appStyles = {
   },
   floorGrid: {
     position: 'absolute',
-    left: 0, right: 0, top: 200, bottom: 80,
+    /* Stage grew 1200→1240 in REDESIGN 2026-05-29c; bottom inset bumped 80→40
+       so the grid extends through the new ops corridor row. */
+    left: 0, right: 0, top: 200, bottom: 40,
     background:
       'repeating-linear-gradient(0deg, transparent 0 39px, rgba(91,232,245,0.05) 39px 40px),' +
       'repeating-linear-gradient(90deg, transparent 0 39px, rgba(91,232,245,0.05) 39px 40px)',
@@ -2156,7 +2346,7 @@ const appStyles = {
   },
   floorGlow: {
     position: 'absolute',
-    left: 0, right: 0, top: 200, bottom: 80,
+    left: 0, right: 0, top: 200, bottom: 40,
     background: 'radial-gradient(ellipse at 50% 30%, rgba(91,232,245,0.05) 0%, transparent 60%)',
     pointerEvents: 'none',
   },

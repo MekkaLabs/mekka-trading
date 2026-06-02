@@ -48,6 +48,10 @@ Establish an autonomous, modular, and observable trading operating system founda
 - **TelegramAlerter** (Story 035) — push-only Telegram alerts em eventos críticos. Off por default.
 - **TelegramInboundPoller** (Story 035b + 037) — long-polling de comandos do operador. Comandos: `/status /pnl /pause /resume /positions /perf /gates /help`. `/perf [N]` roda Deadpool (N dias). `/gates` mostra status H1–H6 em tempo real. Requer `TELEGRAM_INBOUND_ENABLED=true`.
 
+## Dev / Quality Agents (NÃO participam do loop de trading)
+
+- **Prometheus** — Prompt Engineering Operator. Determinístico, sem LLM, offline. Audita prompts de `src/agents/` segundo framework P.R.O.M.P.T. (scorecard /40), versiona via SHA-256, cataloga opcionalmente em `data/prompts/catalog.json`. Interface: `scripts/prometheus_cli.py`. Módulo: `src/prompt_engineering/`. **NUNCA importado pelo runtime de trade** — test de isolamento garante invariante.
+
 ## Hard Rules
 
 - Never place real trades unless `paper_trading=False` and Batman approves with no breached limits — even then, Iron Man requires explicit operator awareness.

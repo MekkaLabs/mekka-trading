@@ -465,6 +465,7 @@ class MekkaDashboardServer:
         r.add_get("/api/audit", self._handle_audit)
         r.add_get("/api/env", self._handle_env)
         r.add_get("/api/mainnet-readiness", self._handle_mainnet_readiness)
+        r.add_get("/api/go-live-status", self._handle_go_live_status)
         r.add_get("/api/today-summary", self._handle_today_summary)
         r.add_get("/api/prefs", self._handle_prefs_get)
         r.add_post("/api/prefs", self._handle_prefs_set)
@@ -532,8 +533,13 @@ class MekkaDashboardServer:
         r.add_post("/api/system/reboot", self._handle_system_reboot)
         r.add_get("/api/mode", self._handle_mode_get)
         r.add_post("/api/mode", self._handle_mode_set)
+        r.add_get("/api/opmode", self._handle_opmode_get)
+        r.add_post("/api/opmode", self._handle_opmode_set)
+        r.add_get("/api/learnings", self._handle_learnings_get)
+        r.add_get("/api/execution-quality", self._handle_execution_quality)
         r.add_get("/api/exchange", self._handle_exchange_get)
         r.add_post("/api/exchange", self._handle_exchange_set)
+        r.add_post("/api/exchange/network", self._handle_exchange_network_set)
         r.add_get("/api/report/daily", self._handle_report_daily)
         r.add_get("/api/report/weekly", self._handle_report_weekly)
 
@@ -557,6 +563,11 @@ class MekkaDashboardServer:
     def _register_improvement_routes(self, r) -> None:
         r.add_get("/api/jean/health-report", self._handle_jean_health_report)
         r.add_get("/api/jean/graph", self._handle_jean_graph)
+        r.add_get("/api/second-brain/activity", self._handle_second_brain_activity)
+        r.add_get("/api/cable/snapshot", self._handle_cable_snapshot)
+        r.add_get("/api/memory/snapshot", self._handle_memory_snapshot)
+        r.add_get("/api/improvements/queued", self._handle_improvements_queued)
+        r.add_post("/api/improvements/reconcile-manual", self._handle_improvements_reconcile_manual)
         r.add_get("/api/improvements", self._handle_improvements_get)
         r.add_post("/api/improvements/decision", self._handle_improvements_decision)
         r.add_get("/api/improvements/pr-status", self._handle_improvements_pr_status)
@@ -565,6 +576,27 @@ class MekkaDashboardServer:
         r.add_get("/api/improvements/kpi", self._handle_improvements_kpi)
         r.add_get("/api/improvements/decision-history", self._handle_improvements_history)
         r.add_get("/api/mentor/suggestions", self._handle_mentor_suggestions)
+        # Implementer Squad — status do squad de implementação automática
+        r.add_get("/api/implementer/status", self._handle_implementer_status)
+        r.add_post("/api/implementer/run-once", self._handle_implementer_run_once)
+        # Be Water Framework — multi-estratégia adaptativo (registry + regime + performance)
+        r.add_get("/api/strategies", self._handle_strategies_list)
+        r.add_get("/api/strategies/regime", self._handle_strategies_regime)
+        r.add_get("/api/strategies/performance", self._handle_strategies_performance)
+        # BW-7: decisão completa do Be Water — regime + signals ranqueados
+        r.add_get("/api/be-water/decide", self._handle_be_water_decide)
+        # REV-3 — Auto-learning scheduler
+        r.add_get("/api/auto-learning/status", self._handle_auto_learning_status)
+        r.add_post("/api/auto-learning/run-once", self._handle_auto_learning_run_once)
+        r.add_get("/api/vault/activity", self._handle_vault_activity)
+        r.add_get("/api/vault/audit", self._handle_vault_audit)
+        r.add_get("/api/prometheus/snapshot", self._handle_prometheus_snapshot)
+        r.add_get("/api/server/health", self._handle_server_health)
+        r.add_get("/api/implementer/status", self._handle_implementer_status)
+        # (rota /api/implementer/run-once já registrada acima — duplicata removida no review 2026-06-01)
+        r.add_post("/api/decision-memory/janitor", self._handle_decision_janitor)
+        # P1-3 — pre-flight check pra troca de Binance market_type (linear↔inverse)
+        r.add_get("/api/binance-market-type/check-swap", self._handle_check_swap_safe)
 
     def _register_backtest_debate_routes(self, r) -> None:
         r.add_post("/api/backtest/run", self._handle_backtest_run)
@@ -650,6 +682,150 @@ class MekkaDashboardServer:
             self._backtest_scheduler_task = asyncio.create_task(_scheduler.start())
         except Exception as _exc_sched:
             logger.warning("BacktestScheduler startup skipped: %s", _exc_sched)
+
+        # INV-5 (2026-05-29) — Auto-learning scheduler integrado ao boot.
+        # Antes só rodava via /api/auto-learning/run-once manual; audit log mostrava
+        # apenas 1 AUTO_LEARNING_CYCLE em 7d. Agora liga background loop no boot
+        # quando AUTO_LEARNING_ENABLED=true.
+        try:
+            from src.services.auto_learning_scheduler import start as _al_start, is_enabled as _al_enabled
+            if _al_enabled():
+                self._auto_learning_task = asyncio.create_task(_al_start())  # type: ignore[arg-type]
+                logger.info("[server] auto-learning scheduler started in background")
+            else:
+                logger.info("[server] auto-learning scheduler disabled (set AUTO_LEARNING_ENABLED=true)")
+        except Exception as _exc_al:
+            logger.warning("auto-learning scheduler startup skipped: %s", _exc_al)
+
+        # INV-4 (2026-05-29) — Cable agent startup. Cable subscribe a cycle.end
+        # ficava na responsabilidade de run.py mas em modo dashboard-only não
+        # rodava. Adicionar aqui torna /api/cable/snapshot sempre populado.
+        try:
+            from src.agents.cable import start_cable_agent
+            self._cable_task = asyncio.create_task(start_cable_agent())  # type: ignore[arg-type]
+            logger.info("[server] Cable agent startup scheduled")
+        except Exception as _exc_cable:
+            logger.warning("Cable agent startup skipped: %s", _exc_cable)
+
+        # PROM-A (2026-05-29) — Prometheus agent startup. Diagnóstico anterior:
+        #   - PROMETHEUS_AGENT_ENABLED unset → agent off
+        #   - 0 audit events com agente Prometheus em 7d
+        #   - 0 notas vault prometheus-learnings
+        # NickFury já publica cycle.end/cycle.start/ironman.exec e BaseAgent
+        # publica agent.error em todo falho — os publishers EXISTEM. Faltava
+        # só o subscriber ligado. Idêntico ao padrão Cable.
+        try:
+            from src.agents.prometheus import (
+                start_prometheus_agent, is_agent_enabled as _prom_enabled,
+            )
+            if _prom_enabled():
+                self._prometheus_task = asyncio.create_task(
+                    start_prometheus_agent(),  # type: ignore[arg-type]
+                )
+                logger.info("[server] Prometheus agent startup scheduled")
+            else:
+                logger.debug(
+                    "[server] Prometheus disabled "
+                    "(set PROMETHEUS_AGENT_ENABLED=true to learn from events)"
+                )
+        except Exception as _exc_prom:
+            logger.warning("Prometheus agent startup skipped: %s", _exc_prom)
+
+        # MEM-AUDIT-4 (2026-05-29) — ImplementerWorker background loop.
+        # 101 IMPs queued, 1 IMPLEMENTER_RAN em 7d → worker era CLI-only.
+        # Default OFF; opt-in IMPLEMENTER_WORKER_ENABLED=true.
+        # Dry-run por default; commit real exige _AUTO_APPLY=true (gate duplo).
+        try:
+            from src.services.implementer.worker import (
+                start_background as _impw_start,
+                worker_is_enabled as _impw_enabled,
+            )
+            if _impw_enabled():
+                self._implementer_task = asyncio.create_task(
+                    _impw_start(),  # type: ignore[arg-type]
+                )
+                logger.info("[server] ImplementerWorker background loop scheduled")
+            else:
+                logger.debug(
+                    "[server] ImplementerWorker disabled "
+                    "(set IMPLEMENTER_WORKER_ENABLED=true to drain IMP queue)"
+                )
+        except Exception as _exc_impw:
+            logger.warning("ImplementerWorker startup skipped: %s", _exc_impw)
+
+        # MEM-AUDIT-1 (2026-05-29) — DASHBOARD_BOOT audit event.
+        # Permite o próximo audit detectar "server stale" comparando o
+        # timestamp do último boot com o tempo dos endpoints novos.
+        self._boot_timestamp = datetime.now(timezone.utc).isoformat()
+        try:
+            from src.persistence.repository import MekkaRepository as _MR_boot
+            await _MR_boot.log_event(
+                agent="Dashboard",
+                event="DASHBOARD_BOOT",
+                severity="INFO",
+                message=f"dashboard server booted at {self._boot_timestamp}",
+                payload={
+                    "boot_ts": self._boot_timestamp,
+                    "prometheus_enabled": (
+                        getattr(self, '_prometheus_task', None) is not None
+                    ),
+                    "cable_enabled": (
+                        getattr(self, '_cable_task', None) is not None
+                    ),
+                    "auto_learning_enabled": (
+                        getattr(self, '_auto_learning_task', None) is not None
+                    ),
+                    "implementer_worker_enabled": (
+                        getattr(self, '_implementer_task', None) is not None
+                    ),
+                },
+            )
+        except Exception as _exc_boot:
+            logger.debug("DASHBOARD_BOOT audit skipped: %s", _exc_boot)
+
+        # MEM-FIX-8 (2026-05-30) — Vault writer state audit no boot.
+        # Antes: writers fail-silent quando flag=off — operator não sabia
+        # que tinha 6 writers desligados. Agora emite VAULT_WRITERS_STATE
+        # com a flag de cada writer + warning quando todos off.
+        try:
+            import os as _os
+            from src.persistence.repository import MekkaRepository as _MR_v
+            _writers = {
+                "prometheus":  _os.environ.get("PROMETHEUS_VAULT_WRITER_ENABLED", "false"),
+                "cable":       _os.environ.get("CABLE_VAULT_WRITER_ENABLED", "false"),
+                "mentor":      _os.environ.get("MENTOR_VAULT_WRITER_ENABLED", "false"),
+                "cyclops":     _os.environ.get("CYCLOPS_VAULT_WRITER_ENABLED", "false"),
+                "vision":      _os.environ.get("VISION_VAULT_WRITER_ENABLED", "false"),
+                "strategy":    _os.environ.get("STRATEGY_VAULT_WRITER_ENABLED", "false"),
+                "improvement": _os.environ.get("IMPROVEMENT_VAULT_WRITER_ENABLED", "false"),
+            }
+            _enabled = {
+                k: v.lower() in ("1", "true", "yes", "on")
+                for k, v in _writers.items()
+            }
+            _enabled_count = sum(1 for v in _enabled.values() if v)
+            _total = len(_enabled)
+            severity = "WARNING" if _enabled_count == 0 else "INFO"
+            await _MR_v.log_event(
+                agent="Dashboard",
+                event="VAULT_WRITERS_STATE",
+                severity=severity,
+                message=(
+                    f"vault writers ativos: {_enabled_count}/{_total}"
+                    + (" — segundo cérebro DESLIGADO" if _enabled_count == 0 else "")
+                ),
+                payload={
+                    "enabled_count": _enabled_count,
+                    "total": _total,
+                    "by_writer": _enabled,
+                    "hint": (
+                        "set *_VAULT_WRITER_ENABLED=true em .env e reboot"
+                        if _enabled_count < _total else None
+                    ),
+                },
+            )
+        except Exception as _exc_v:
+            logger.debug("VAULT_WRITERS_STATE audit skipped: %s", _exc_v)
 
     async def _on_shutdown(self, _: web.Application) -> None:
         if self._broadcast_task is not None:
@@ -1683,14 +1859,68 @@ class MekkaDashboardServer:
         return web.json_response(result)
 
     async def _handle_system_reboot(self, request: web.Request) -> web.Response:
-        """Reinicia o runtime (stop seguido de start). Exige
-        body {"confirm":"REBOOT"}."""
+        """Reinicia o sistema inteiro. Exige body {"confirm":"REBOOT"}.
+
+        Modo:
+        - body.mode = "soft" (default) — reinicia só o runtime (NickFury);
+          dashboard fica vivo, conexões CCXT preservadas. Rápido (~2s).
+        - body.mode = "hard" — substitui o processo Python via os.execv
+          após responder. Todo estado em memória é perdido, dashboard cai
+          por ~10-15s e volta. Usa sys.executable + sys.argv.
+        """
+        body = await self._safe_json_body(request) or {}
+        if str(body.get("confirm") or "").upper() != "REBOOT":
+            return web.json_response({"error": "confirm required"}, status=400)
+        mode = str(body.get("mode") or "soft").lower()
+
+        if mode == "hard":
+            # Hard reboot: agenda os.execv após responder o HTTP.
+            # Fechamento gracioso de conexões CCXT acontece no atexit handler.
+            import asyncio as _asyncio
+            import os as _os
+            import sys as _sys
+
+            async def _do_hard_reboot() -> None:
+                # Pequeno delay pra resposta HTTP fechar
+                await _asyncio.sleep(1.5)
+                logger.warning(
+                    "[system.reboot.HARD] Substituindo processo Python via os.execv. "
+                    "Dashboard ficará offline 10-15s."
+                )
+                # Tenta fechar CCXT clients (libera connections aiohttp)
+                try:
+                    from src.agents.iron_man import _CCXT_SHARED  # type: ignore
+                    for client in list(_CCXT_SHARED.values()):
+                        try:
+                            await client.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                except Exception:  # noqa: BLE001
+                    pass
+                # Para o runtime se rodando
+                if self._runtime is not None:
+                    try:
+                        await self._runtime.stop()
+                    except Exception:  # noqa: BLE001
+                        pass
+                # Substitui processo. argv[0] é "python3"; resto é o comando.
+                try:
+                    _os.execv(_sys.executable, [_sys.executable] + _sys.argv)
+                except Exception as _exc:  # noqa: BLE001
+                    logger.error(f"[system.reboot.HARD] os.execv failed: {_exc}")
+
+            _asyncio.create_task(_do_hard_reboot(), name="hard_reboot_task")
+            return web.json_response({
+                "ok": True,
+                "mode": "hard",
+                "message": "Hard reboot scheduled in 1.5s — dashboard will be offline ~15s.",
+            })
+
+        # Soft reboot (comportamento original): só runtime
         if self._runtime is None:
             return web.json_response({"error": "no runtime controller"}, status=503)
-        body = await self._safe_json_body(request)
-        if not isinstance(body, dict) or str(body.get("confirm") or "").upper() != "REBOOT":
-            return web.json_response({"error": "confirm required"}, status=400)
         result = await self._runtime.reboot()
+        result["mode"] = "soft"
         return web.json_response(result)
 
     async def _handle_office_v2_index(self, _: web.Request) -> web.FileResponse:
@@ -3529,6 +3759,134 @@ class MekkaDashboardServer:
         return web.json_response({"mode": mode, "params": get_params()})
 
     # ------------------------------------------------------------------
+    # Operation Mode — GET /api/opmode  POST /api/opmode
+    # Switch RAIZ manual/automatic (quem aprova trades E melhorias).
+    # ------------------------------------------------------------------
+
+    async def _handle_opmode_get(self, _: web.Request) -> web.Response:
+        """Estado atual do modo de operação + decisões derivadas."""
+        from src.config.operation_mode import snapshot
+        return web.json_response(snapshot())
+
+    async def _handle_opmode_set(self, request: web.Request) -> web.Response:
+        """
+        POST /api/opmode  body: {"mode": "manual" | "automatic"}
+
+        Troca o modo de operação imediatamente (próximo ciclo respeita).
+        'automatic' também aceita o alias 'auto'. Emite OPMODE_CHANGED no audit.
+        """
+        from src.config.operation_mode import (
+            VALID_OPERATION_MODES,
+            set_operation_mode,
+            snapshot,
+        )
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+
+        mode = str(body.get("mode", "")).lower()
+        if mode == "auto":
+            mode = "automatic"
+        if mode not in VALID_OPERATION_MODES:
+            return web.json_response(
+                {"error": f"unknown mode '{mode}'. Valid: {list(VALID_OPERATION_MODES)}"},
+                status=400,
+            )
+
+        set_operation_mode(mode)
+
+        try:
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="OPMODE_CHANGED",
+                payload={"mode": mode},
+                severity="INFO",
+            )
+        except Exception:
+            pass  # audit best-effort
+
+        logger.info("Operation mode changed to '%s' via dashboard API", mode)
+        return web.json_response(snapshot())
+
+    # ------------------------------------------------------------------
+    # Agent Learnings — GET /api/learnings[?agent=Superman&limit=10]
+    # Diário de aprendizado por agente (consultivo). Ver agent_learning_journal.
+    # ------------------------------------------------------------------
+
+    async def _handle_learnings_get(self, request: web.Request) -> web.Response:
+        from src.services.agent_learning_journal import recall, stats
+        agent = request.query.get("agent")
+        try:
+            limit = max(1, min(50, int(request.query.get("limit", "10"))))
+        except (TypeError, ValueError):
+            limit = 10
+        if agent:
+            return web.json_response({
+                "agent": agent,
+                "learnings": recall(agent, limit=limit),
+            })
+        return web.json_response(stats())
+
+    async def _handle_execution_quality(self, request: web.Request) -> web.Response:
+        """GET /api/execution-quality[?limit=200]
+
+        Agrega o slippage de entrada realizado (IronMan grava entry_slippage_bps
+        em raw.metadata) por símbolo: média, máximo e contagem. Read-only,
+        fail-silent. Alimenta o painel de qualidade de execução do dashboard.
+        """
+        try:
+            limit = max(10, min(1000, int(request.query.get("limit", "200"))))
+        except (TypeError, ValueError):
+            limit = 200
+        try:
+            trades = await MekkaRepository.list_recent_trades(limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"available": False, "error": str(exc), "by_symbol": []})
+
+        agg: dict[str, dict[str, Any]] = {}
+        for t in trades or []:
+            try:
+                meta = (getattr(t, "raw", None) or {}).get("metadata") or {}
+                if "entry_slippage_bps" not in meta:
+                    continue
+                bps = float(meta["entry_slippage_bps"])
+                sym = getattr(t, "symbol", "?")
+                a = agg.setdefault(sym, {
+                    "symbol": sym, "n": 0, "sum": 0.0, "max": None,
+                    "maker": 0, "taker": 0, "fees": 0.0,
+                })
+                a["n"] += 1
+                a["sum"] += bps
+                a["max"] = bps if a["max"] is None else max(a["max"], bps)
+                if meta.get("entry_liquidity") == "maker":
+                    a["maker"] += 1
+                elif meta.get("entry_liquidity") == "taker":
+                    a["taker"] += 1
+                a["fees"] += float(meta.get("fee_usd") or 0.0)
+            except Exception:  # noqa: BLE001
+                continue
+
+        rows = []
+        for sym, a in agg.items():
+            n = a["n"] or 1
+            rows.append({
+                "symbol": sym,
+                "trades": a["n"],
+                "avg_slippage_bps": round(a["sum"] / n, 1),
+                "max_slippage_bps": round(a["max"], 1) if a["max"] is not None else None,
+                "maker": a["maker"],
+                "taker": a["taker"],
+                "fees_usd": round(a["fees"], 4),
+            })
+        rows.sort(key=lambda r: r["avg_slippage_bps"], reverse=True)
+        return web.json_response({
+            "available": True,
+            "alert_bps": float(getattr(settings, "execution_slippage_alert_bps", 30.0)),
+            "by_symbol": rows,
+        })
+
+    # ------------------------------------------------------------------
     # Active Exchange — GET /api/exchange  POST /api/exchange
     # ------------------------------------------------------------------
 
@@ -3584,6 +3942,65 @@ class MekkaDashboardServer:
         logger.info("Active exchange changed to '%s' via dashboard API", ex)
         return web.json_response({"ok": True, **summary()})
 
+    async def _handle_exchange_network_set(self, request: web.Request) -> web.Response:
+        """
+        POST /api/exchange/network
+            body: {"exchange": "binance", "network": "mainnet", "confirm": "MAINNET"}
+
+        Troca a rede (testnet/mainnet) de uma corretora em runtime. SENSÍVEL:
+        switching para MAINNET exige confirm="MAINNET" no body.
+
+        NÃO toca no double-gate. A rede só muda dados/roteamento; execução de
+        DINHEIRO REAL continua exigindo paper_trading=false + live_confirmed=true.
+        Por isso: mainnet + paper = simulado em dados reais (seguro).
+        """
+        from src.config.runtime_exchange import set_network, summary, network_for
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+
+        ex = str(body.get("exchange", "")).strip().lower()
+        net = str(body.get("network", "")).strip().lower()
+        if net == "mainnet" and str(body.get("confirm", "")).upper() != "MAINNET":
+            return web.json_response(
+                {"ok": False, "error": "Trocar para MAINNET exige confirm=\"MAINNET\"."},
+                status=400,
+            )
+        try:
+            set_network(ex, net)
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+        # Aviso explícito do estado de execução resultante.
+        is_live = (not settings.paper_trading) and getattr(settings, "live_trading_confirmed", False)
+        real_money = (net == "mainnet") and is_live
+
+        try:
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="NETWORK_CHANGED",
+                severity="CRITICAL" if real_money else "WARNING",
+                message=(
+                    f"Rede de {ex} → {net.upper()} via dashboard"
+                    + (" — ⚠️ DINHEIRO REAL (live)" if real_money else " — paper/simulado")
+                ),
+                payload={"exchange": ex, "network": net, "real_money": real_money},
+            )
+        except Exception:
+            pass  # audit best-effort
+
+        logger.warning("Network for '%s' changed to '%s' via dashboard (real_money=%s)",
+                       ex, net, real_money)
+        return web.json_response({
+            "ok": True,
+            "exchange": ex,
+            "network": net,
+            "real_money": real_money,
+            "paper_trading": settings.paper_trading,
+            **summary(),
+        })
+
     async def _handle_mainnet_readiness(self, _: web.Request) -> web.Response:
         """GET /api/mainnet-readiness — run the mainnet preflight and return its
         per-gate verdicts so the operator can see go-live readiness in the
@@ -3610,6 +4027,101 @@ class MekkaDashboardServer:
         except Exception as exc:  # noqa: BLE001
             logger.warning("mainnet-readiness failed: %s", exc)
             return web.json_response({"ok": False, "error": str(exc)}, status=200)
+
+    async def _handle_go_live_status(self, _: web.Request) -> web.Response:
+        """GET /api/go-live-status — veredito GO/NO-GO consolidado para mainnet.
+
+        Combina em uma chamada:
+          1. Preflight (gates automáticos via scripts/preflight_mainnet.py --json)
+          2. Estado do loop de trading (parado/rodando)
+          3. Diário: padrões de perda recorrente (lições outcome-loss >= 5×)
+          4. Modo de operação atual
+          5. Veredito final: GO | GO_WITH_CONDITIONS | NO_GO
+        """
+        import sys as _sys
+        from pathlib import Path as _Path
+
+        result: dict[str, Any] = {
+            "verdict": "NO_GO",
+            "preflight": None,
+            "runtime": {},
+            "learning": {},
+            "operation_mode": None,
+            "conditions": [],
+            "blockers": [],
+        }
+
+        # 1. Preflight --json
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                _sys.executable, "scripts/preflight_mainnet.py", "--json",
+                cwd=str(_Path(__file__).resolve().parents[2]),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=25.0)
+            pf = json.loads(out.decode() or "{}")
+            result["preflight"] = pf
+            for c in (pf.get("checks") or []):
+                if c.get("level") == "FAIL":
+                    result["blockers"].append(f"Preflight FAIL: {c.get('name')} — {c.get('detail','')}")
+                elif c.get("level") == "WARN":
+                    result["conditions"].append(f"{c.get('name')}: {c.get('detail','')}")
+        except Exception as exc:  # noqa: BLE001
+            result["blockers"].append(f"preflight error: {exc}")
+
+        # 2. Estado do loop
+        try:
+            ctrl = getattr(self, "_controller", None)
+            if ctrl:
+                st = ctrl.status() if callable(getattr(ctrl, "status", None)) else {}
+                result["runtime"] = {
+                    "running": st.get("running", False),
+                    "state": st.get("state", "unknown"),
+                    "cycles": st.get("cycles", 0),
+                }
+            else:
+                result["runtime"] = {"running": False, "state": "no_controller"}
+        except Exception:  # noqa: BLE001
+            result["runtime"] = {"running": False, "state": "error"}
+
+        # 3. Padrões de perda recorrente no diário
+        try:
+            import asyncio as _aio
+            from src.services.agent_learning_journal import top_reinforced
+            losses = await _aio.to_thread(top_reinforced, 5, 5, "outcome-loss")
+            result["learning"] = {
+                "recurring_loss_patterns": len(losses),
+                "patterns": [
+                    {"agent": l.get("agent"), "count": l.get("reinforced_count"),
+                     "lesson": str(l.get("lesson", ""))[:80]}
+                    for l in losses
+                ],
+            }
+            if losses:
+                result["conditions"].append(
+                    f"{len(losses)} padrão(ões) de perda recorrente no diário "
+                    f"— revisar antes de escalar."
+                )
+        except Exception:  # noqa: BLE001
+            result["learning"] = {"recurring_loss_patterns": 0}
+
+        # 4. Modo de operação
+        try:
+            from src.config.operation_mode import get_operation_mode, snapshot
+            snap = snapshot()
+            result["operation_mode"] = snap
+        except Exception:  # noqa: BLE001
+            result["operation_mode"] = {"mode": "unknown"}
+
+        # 5. Veredito final
+        if result["blockers"]:
+            result["verdict"] = "NO_GO"
+        elif result["conditions"]:
+            result["verdict"] = "GO_WITH_CONDITIONS"
+        else:
+            result["verdict"] = "GO"
+
+        return web.json_response(result)
 
     async def _handle_env(self, _: web.Request) -> web.Response:
         """GET /api/env — environment & safety posture for the UI badge.
@@ -3645,12 +4157,21 @@ class MekkaDashboardServer:
         else:
             mode = "unknown"
 
+        # F8 (2026-05-28) — Binance market type pra badge USDT-M / COIN-M.
+        # Só relevante quando exchange=binance; outras exchanges retornam None.
+        binance_market_type = (
+            getattr(settings, "binance_market_type", "linear")
+            if settings.active_exchange == "binance" else None
+        )
+
         return web.json_response({
             "exchange": settings.active_exchange,
             "network": network,
             "paper_trading": bool(settings.paper_trading),
             "live_confirmed": bool(settings.live_trading_confirmed),
             "mode": mode,
+            "binance_market_type": binance_market_type,  # "linear" | "inverse" | None
+            "scalp_mainnet_enabled": bool(getattr(settings, "scalp_mainnet_enabled", False)),
             # Symbols the system trades — needed by UI dropdowns (filter
             # tradesTimeline by symbol etc). Always safe to expose.
             "trading_assets": list(settings.trading_assets or []),
@@ -4007,6 +4528,18 @@ class MekkaDashboardServer:
             from src.services.llm_cost_tracker import get_llm_cost_tracker
             tracker = get_llm_cost_tracker(auto_register=True)
             data = tracker.summary()
+            # Estado do guard de orçamento (gasto global vs cap → pausa de Vision)
+            try:
+                from src.services.cycle_budget_guard import get_cycle_budget_guard
+                bg = get_cycle_budget_guard().summary()
+                data["budget_guard"] = {
+                    "global_spent_usd": bg.get("global_spent_usd", 0.0),
+                    "max_cost_usd_global": bg.get("max_cost_usd_global", 0.0),
+                    "global_pct": bg.get("global_pct", 0.0),
+                    "total_skipped": bg.get("total_skipped", 0),
+                }
+            except Exception:  # noqa: BLE001
+                pass
             return web.Response(
                 content_type="application/json",
                 text=_json.dumps({"ok": True, "cost": data}),
@@ -5477,6 +6010,23 @@ class MekkaDashboardServer:
         # ── Guardrail evaluation ────────────────────────────────────────
         checks: list[dict] = []
 
+        # G0 (TRADE-2, 2026-05-29): valida símbolo contra trading_assets
+        # ANTES de tudo. Símbolo errado significa que Batman/IronMan vão
+        # descartar silenciosamente e operador fica achando que vai executar.
+        if _body_symbol:
+            try:
+                from src.services.symbol_validation import validate_trade_symbol  # noqa: WPS433
+                _sv_ok, _sv_norm, _sv_reason = validate_trade_symbol(_body_symbol)
+                checks.append({
+                    "name": "symbol_supported",
+                    "ok": _sv_ok,
+                    "detail": _sv_reason,
+                })
+                if _sv_ok:
+                    _body_symbol = _sv_norm  # usa versão normalizada
+            except Exception as _sv_exc:  # noqa: BLE001
+                logger.debug(f"symbol validation skipped: {_sv_exc}")
+
         # G1: kill switch
         ks_active = is_kill_switch_active()
         checks.append({
@@ -6199,8 +6749,71 @@ class MekkaDashboardServer:
         Returns the final response. Mapping FILLED/PARTIAL/PAPER → 'submitted',
         ERROR/REJECTED/SKIPPED → 'blocked' (operator MUST see venue rejections;
         never claim 'submitted' when notional was below min etc).
+
+        TRADE-1 (2026-05-29): Telegram approval gate. ANTES — dashboard
+        execute pulava `telegram_trade_approval_enabled`. Operador podia
+        executar trade do dashboard sem ver pedido no Telegram. AGORA — se
+        flag ligada e telegram conectado, pede aprovação via Telegram
+        ANTES de IronMan.run() (mesma proteção que NickFury).
         """
         from src.agents.iron_man import IronMan
+
+        # TRADE-1 — Telegram gate (NickFury-equivalent)
+        if (
+            getattr(_s, "telegram_trade_approval_enabled", False)
+            and getattr(_s, "telegram_enabled", False)
+        ):
+            try:
+                from src.services.trade_approval import request_approval as _req_approval  # noqa: WPS433
+                import uuid as _uuid_te  # noqa: WPS433
+                _tid = f"dashboard-{rec_id}-{_uuid_te.uuid4().hex[:8]}"
+                _approved = await _req_approval(
+                    trade_id=_tid,
+                    signal_symbol=str(getattr(signal, "symbol", "?")),
+                    signal_action=str(getattr(signal, "action", "?")),
+                    signal_confidence=float(getattr(signal, "confidence", 0.0)),
+                    entry_price=float(getattr(signal, "entry_price", 0.0) or 0.0),
+                    stop_loss=getattr(signal, "stop_loss", None),
+                    take_profit=getattr(signal, "take_profit", None),
+                    size_pct=float(getattr(signal, "size_pct", 0.0) or 0.0),
+                    leverage=int(getattr(signal, "leverage", 1) or 1),
+                    reasons=[
+                        f"Dashboard execute (rec_id={rec_id})",
+                        f"Batman {approval.verdict.value}",
+                    ],
+                    timeout_s=int(
+                        getattr(_s, "telegram_trade_approval_timeout_s", 120)
+                    ),
+                )
+                if not _approved:
+                    await MekkaRepository.log_event(
+                        agent="Dashboard",
+                        event="TRADE_TELEGRAM_REJECTED",
+                        severity="WARNING",
+                        symbol=str(getattr(signal, "symbol", "?")),
+                        message=(
+                            f"Operador rejeitou ou timeout no Telegram "
+                            f"(trade_id={_tid})"
+                        ),
+                        payload={"trade_id": _tid, "rec_id": rec_id},
+                    )
+                    return web.json_response({
+                        "status": "blocked",
+                        "reason": (
+                            "Operador rejeitou no Telegram (ou timeout). "
+                            "Trade não foi enviado."
+                        ),
+                        "order_id": None,
+                        "is_paper": _s.paper_trading,
+                        "executed_at": executed_at,
+                        "telegram_trade_id": _tid,
+                    }, status=200)
+            except Exception as _tg_exc:  # noqa: BLE001
+                logger.warning(
+                    f"[trade_execute] Telegram approval skipped (exception): {_tg_exc}"
+                )
+                # Fail-open conservative: continua com IronMan (Batman já
+                # aprovou) — não bloquear trade por bug do canal Telegram.
 
         result = await IronMan().run(
             signal=signal,
@@ -6300,6 +6913,20 @@ class MekkaDashboardServer:
         from src.models.signal import TradingSignal, TradeAction
 
         symbol = str(body.get("symbol") or "BTC").strip().upper()
+        # TRADE-2 (2026-05-29): valida symbol contra trading_assets.
+        try:
+            from src.services.symbol_validation import validate_trade_symbol  # noqa: WPS433
+            _sv_ok, _sv_norm, _sv_reason = validate_trade_symbol(symbol)
+            if not _sv_ok:
+                raise ValueError(
+                    f"symbol {symbol!r} não suportado: {_sv_reason}"
+                )
+            symbol = _sv_norm
+        except ValueError:
+            raise
+        except Exception:  # noqa: BLE001
+            pass  # validator unavailable → fail-open (legado)
+
         side   = str(body.get("side") or "LONG").strip().upper()
         if side not in ("LONG", "SHORT"):
             raise ValueError("side inválido (use LONG ou SHORT)")
@@ -6320,6 +6947,21 @@ class MekkaDashboardServer:
 
         if not (1 <= leverage <= 50):
             raise ValueError("leverage fora do range (1–50).")
+
+        # COIN-2 (2026-05-29): se rodando em COIN-M, clamp leverage ao cap
+        # do símbolo. Binance COIN-M tem caps per-symbol (BTC 125x, ETH 100x,
+        # altcoins 25-50x). Sem este clamp, IronMan vê a request CCXT
+        # rejeitada pelo exchange e operador fica confuso.
+        try:
+            from src.config.settings import settings as _s_lev  # noqa: WPS433
+            from src.services.coin_m_leverage_caps import clamp_leverage  # noqa: WPS433
+            _mt = getattr(_s_lev, "binance_market_type", "linear")
+            _eff_lev, _warn = clamp_leverage(leverage, symbol, market_type=_mt)
+            if _warn:
+                logger.warning(f"[trade_manual] {_warn}")
+                leverage = _eff_lev
+        except Exception as _lev_exc:  # noqa: BLE001
+            logger.debug(f"[trade_manual] coin-m leverage clamp skipped: {_lev_exc}")
         if not (0.1 <= sl_pct <= 50):
             raise ValueError("SL% fora do range (0.1–50).")
         if not (0.1 <= tp_pct <= 100):
@@ -6491,6 +7133,32 @@ class MekkaDashboardServer:
 
         executed_at = datetime.now(timezone.utc).isoformat()
         body = await self._safe_json_body(request) or {}
+
+        # TRADE-3 (2026-05-29): rate limit operator manual trades.
+        # ANTES: bombardeio possível — N trades/min só Batman barrava (e Batman
+        # já gasta CPU). Agora throttle in-memory sliding window (5/h default).
+        # Override via env MANUAL_TRADE_MAX_PER_HOUR.
+        try:
+            from src.services.manual_trade_throttle import get_throttle  # noqa: WPS433
+            _tt_ok, _tt_meta = get_throttle().try_consume(bucket="manual_trade")
+            if not _tt_ok:
+                logger.warning(
+                    f"[trade_manual] rate-limited: {_tt_meta}"
+                )
+                return web.json_response({
+                    "status": "rate_limited",
+                    "reason": (
+                        f"Limite de {_tt_meta['max']} trades manuais por "
+                        f"{int(_tt_meta['window_s'] / 60)}min atingido. "
+                        f"Tente novamente em {_tt_meta['retry_after_s']}s."
+                    ),
+                    "throttle": _tt_meta,
+                    "order_id": None,
+                    "is_paper": _s.paper_trading,
+                    "executed_at": executed_at,
+                }, status=429)
+        except Exception as _tt_exc:  # noqa: BLE001
+            logger.debug(f"[trade_manual] throttle check skipped: {_tt_exc}")
 
         # Hard gate: confirmed must be exactly True (boolean).
         if body.get("confirmed") is not True:
@@ -6752,6 +7420,42 @@ class MekkaDashboardServer:
                 status=200,
             )
 
+    async def _handle_second_brain_activity(self, request: web.Request) -> web.Response:
+        """GET /api/second-brain/activity — atividade recente do segundo cérebro.
+
+        Delegado a src/dashboard/handlers/second_brain_activity.py. Mostra
+        arquivos atualizados no vault, observações/aprendizados do Prometheus
+        (se ativo) e estado do sincronizador docs/obsidian → vault.
+        Read-only, fail-soft, cache 10s.
+        """
+        from src.dashboard.handlers.second_brain_activity import handle_get
+        return await handle_get(self, request)
+
+    async def _handle_cable_snapshot(self, request: web.Request) -> web.Response:
+        """GET /api/cable/snapshot — Derivatives Intelligence (Cable agent).
+
+        Snapshot read-only de dados públicos derivativos (Binance funding,
+        OI) + reports do Cable se o agente estiver ativo. NUNCA executa
+        ordens — apenas leitura.
+        """
+        from src.dashboard.handlers.derivatives_intel import handle_get
+        return await handle_get(self, request)
+
+    async def _handle_memory_snapshot(self, request: web.Request) -> web.Response:
+        """GET /api/memory/snapshot — métricas agregadas das 6 camadas de memória."""
+        from src.dashboard.handlers.memory_hub import handle_memory_snapshot
+        return await handle_memory_snapshot(self, request)
+
+    async def _handle_improvements_queued(self, request: web.Request) -> web.Response:
+        """GET /api/improvements/queued — IMPs paradas em queued + matches."""
+        from src.dashboard.handlers.memory_hub import handle_improvements_queued
+        return await handle_improvements_queued(self, request)
+
+    async def _handle_improvements_reconcile_manual(self, request: web.Request) -> web.Response:
+        """POST /api/improvements/reconcile-manual {rec_id, commit_sha, summary}."""
+        from src.dashboard.handlers.memory_hub import handle_reconcile_manual
+        return await handle_reconcile_manual(self, request)
+
     async def _handle_jean_graph(self, _: web.Request) -> web.Response:
         """GET /api/jean/graph — link graph of the vault (second brain) for the
         neural-connections visualization. {nodes, links, total_notes,
@@ -6807,6 +7511,503 @@ class MekkaDashboardServer:
                 {"error": str(exc), "suggestions": [], "observation_summary": {}},
                 status=200,
             )
+
+    async def _handle_implementer_status(self, _: web.Request) -> web.Response:
+        """GET /api/implementer/status — snapshot do squad de implementação.
+
+        Inclui: cost cap, history recente, mapeamento area→implementer,
+        writers de trading (Mentor/Cyclops/Vision) e configuração LLM.
+        """
+        try:
+            from src.services.implementer import cost as _cost
+            from src.services.implementer.router import list_areas
+            from src.services.implementer.layers import llm as _llm
+            from src.services.implementer.worker import history_summary
+            from src.services import trading_vault_writer as _tvw
+            payload = {
+                "cost": _cost.summary(),
+                "areas": list_areas(),
+                "llm": {
+                    "enabled": _llm.is_llm_enabled(),
+                    "sdk_present": _llm._has_anthropic_sdk(),
+                    "model": _llm._get_model(),
+                },
+                "history": history_summary(limit=20),
+                "trading_writers": _tvw.stats(),
+            }
+            return web.json_response(payload, status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("implementer status failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=200)
+
+    async def _handle_check_swap_safe(self, request: web.Request) -> web.Response:
+        """GET /api/binance-market-type/check-swap?target=linear|inverse
+
+        P1-3 (2026-05-28 audit): pre-flight check pra operador antes de
+        trocar BINANCE_MARKET_TYPE no .env. Retorna se é seguro + evidência
+        (count posições abertas heurísticas) + recomendação.
+        """
+        try:
+            target = request.query.get("target", "").lower().strip()
+            from src.services.market_type_swap_guard import check_swap_safe
+            ok, reason, evidence = check_swap_safe(target)
+            return web.json_response({
+                "ok": ok,
+                "reason": reason,
+                "evidence": evidence,
+                "target": target,
+            }, status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("check_swap_safe failed: %s", exc, exc_info=True)
+            return web.json_response({"ok": False, "error": str(exc)}, status=200)
+
+    async def _handle_implementer_run_once(self, request: web.Request) -> web.Response:
+        """POST /api/implementer/run-once — dispara worker manual (1 batch).
+
+        Body opcional: {max|max_imps: int, dry_run: bool}. Review-fix (2026-06-01):
+        dry_run default = TRUE (seguro). Antes era False → uma chamada sem corpo
+        APLICAVA e commitava código local por default, fora dos gates do worker.
+        Para aplicar de verdade, o operador passa dry_run=false explicitamente.
+        """
+        try:
+            body = await self._safe_json_body(request) or {}
+            max_imps = int(body.get("max", body.get("max_imps", 3)))
+            dry_run = bool(body.get("dry_run", True))
+            import asyncio as _asyncio
+            from src.services.implementer.worker import run_once
+            result = await _asyncio.to_thread(run_once, max_imps, dry_run)
+            return web.json_response(result, status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("implementer run failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=200)
+
+    # -----------------------------------------------------------------------
+    # Be Water Framework — multi-estratégia adaptativo
+    # -----------------------------------------------------------------------
+
+    async def _handle_strategies_list(self, _: web.Request) -> web.Response:
+        """GET /api/strategies — lista todas estratégias + fitness por regime.
+
+        Fail-silent: erro retorna payload válido com strategies=[] e error.
+        """
+        try:
+            from src.strategies.registry import list_available_strategies
+            items = list_available_strategies()
+            return web.json_response(
+                {"strategies": items, "total": len(items)},
+                status=200,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("strategies list failed: %s", exc, exc_info=True)
+            return web.json_response(
+                {"error": str(exc), "strategies": [], "total": 0},
+                status=200,
+            )
+
+    async def _handle_strategies_regime(self, request: web.Request) -> web.Response:
+        """GET /api/strategies/regime?symbol=BTC — detecta regime atual.
+
+        Executa ProfessorX (consolida Layer 1 + debate) e roda
+        ``detect_regime`` sobre o MarketAnalysis resultante.
+        """
+        try:
+            symbol = (request.query.get("symbol") or "BTC").upper().strip()
+            from src.agents.professor_x import ProfessorX
+            from src.services.regime_detector import detect_regime
+            prof = ProfessorX()
+            analysis = await prof.run(symbol=symbol)
+            regime = detect_regime(analysis)
+            return web.json_response(
+                {"symbol": symbol, "regime": regime.to_dict()},
+                status=200,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("strategies regime failed: %s", exc, exc_info=True)
+            return web.json_response(
+                {
+                    "error": str(exc),
+                    "symbol": (request.query.get("symbol") or "BTC").upper(),
+                    "regime": None,
+                },
+                status=200,
+            )
+
+    async def _handle_strategies_performance(self, request: web.Request) -> web.Response:
+        """GET /api/strategies/performance?regime=X&window_days=N
+
+        Retorna top estratégias por regime. Quando ``regime`` é informado,
+        retorna ``top_strategies`` desse regime; senão, agrupa por todos
+        os regimes canônicos da enum.
+
+        Fail-silent: usa ``get_top_strategies_for_regime`` quando
+        disponível; caso o tracker não exponha essa API ainda, devolve
+        estrutura vazia com nota explicativa.
+        """
+        try:
+            regime = request.query.get("regime")
+            window = int(request.query.get("window_days", "30"))
+
+            # Import seguro — Be Water Framework usa strategy_performance_tracker
+            # (não confundir com performance_tracker antigo de Story 229)
+            get_top = None
+            try:
+                from src.services.strategy_performance_tracker import (
+                    get_top_strategies_for_regime as _gt,
+                )
+                get_top = _gt
+            except Exception:  # noqa: BLE001
+                get_top = None
+
+            def _to_dict(item: Any) -> Any:
+                if isinstance(item, dict):
+                    return item
+                if hasattr(item, "model_dump"):
+                    return item.model_dump()
+                if hasattr(item, "to_dict"):
+                    return item.to_dict()
+                if hasattr(item, "__dict__"):
+                    return dict(item.__dict__)
+                return {"value": str(item)}
+
+            if get_top is None:
+                return web.json_response(
+                    {
+                        "regime": regime,
+                        "window_days": window,
+                        "top_strategies": [],
+                        "by_regime": {},
+                        "note": "performance_tracker.get_top_strategies_for_regime not yet available",
+                    },
+                    status=200,
+                )
+
+            if regime:
+                tops = await get_top(regime, limit=8, window_days=window)
+                return web.json_response(
+                    {
+                        "regime": regime,
+                        "window_days": window,
+                        "top_strategies": [_to_dict(t) for t in tops],
+                    },
+                    status=200,
+                )
+
+            # Sem regime: agrega por todos os regimes da enum
+            from src.strategies.base import MarketRegime
+            result: dict[str, list[dict]] = {}
+            for r in MarketRegime:
+                try:
+                    tops = await get_top(r.value, limit=3, window_days=window)
+                    result[r.value] = [_to_dict(t) for t in tops]
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "strategies performance: regime %s failed (%s)",
+                        r.value, exc,
+                    )
+                    result[r.value] = []
+            return web.json_response(
+                {"window_days": window, "by_regime": result},
+                status=200,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("strategies performance failed: %s", exc, exc_info=True)
+            return web.json_response(
+                {
+                    "error": str(exc),
+                    "top_strategies": [],
+                    "by_regime": {},
+                },
+                status=200,
+            )
+
+    async def _handle_be_water_decide(self, request: web.Request) -> web.Response:
+        """GET /api/be-water/decide?symbol=BTC&equity=5000
+
+        Pipeline E2E do Be Water: ProfessorX → RegimeDetector → Selector →
+        Strategies → BeWaterDecision com signals ranqueados. Read-only:
+        NÃO executa nenhum trade — apenas mostra o que o sistema FARIA.
+        """
+        try:
+            symbol = request.query.get("symbol", "BTC").upper()
+            equity = float(request.query.get("equity", "5000"))
+
+            from src.agents.professor_x import ProfessorX
+            analysis = await ProfessorX().run(symbol=symbol)
+
+            from src.services.be_water_orchestrator import decide
+            decision = await decide(
+                symbol=symbol, analysis=analysis, equity_usd=equity,
+            )
+            return web.json_response(decision.to_dict(), status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("be_water decide failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc), "flat": True}, status=200)
+
+    async def _handle_auto_learning_status(self, _: web.Request) -> web.Response:
+        """GET /api/auto-learning/status — REV-3 (2026-05-29)."""
+        try:
+            from src.services.auto_learning_scheduler import (
+                get_status, get_last_cycle,
+            )
+            return web.json_response({
+                "status": get_status(),
+                "last_cycle": get_last_cycle(),
+            }, status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("auto_learning status failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=200)
+
+    async def _handle_auto_learning_run_once(self, _: web.Request) -> web.Response:
+        """POST /api/auto-learning/run-once — dispara cycle manual."""
+        try:
+            from src.services.auto_learning_scheduler import run_one_cycle
+            result = await run_one_cycle()
+            return web.json_response(result, status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("auto_learning run failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=200)
+
+    async def _handle_server_health(self, _: web.Request) -> web.Response:
+        """GET /api/server/health — MEM-AUDIT-1 (2026-05-29).
+
+        Reporta: boot_ts, uptime, endpoints registrados, tasks vivas.
+        Permite detectar 'server stale' (com código novo no disco mas
+        endpoints antigos no runtime).
+        """
+        import os as _os
+        boot_ts = getattr(self, "_boot_timestamp", None)
+        uptime_s: float | None = None
+        if boot_ts:
+            try:
+                _b = datetime.fromisoformat(boot_ts.replace("Z", "+00:00"))
+                uptime_s = (
+                    datetime.now(timezone.utc) - _b
+                ).total_seconds()
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Tasks status
+        def _t_running(name: str) -> bool:
+            t = getattr(self, name, None)
+            if t is None:
+                return False
+            try:
+                return not t.done()
+            except Exception:  # noqa: BLE001
+                return False
+
+        # Endpoints registrados
+        endpoints: list[str] = []
+        try:
+            for r in self._app.router._resources:
+                for route in getattr(r, "_routes", []):
+                    try:
+                        path = getattr(r, "_path", None) or getattr(r, "canonical", "?")
+                        method = getattr(route, "method", "?")
+                        endpoints.append(f"{method} {path}")
+                    except Exception:  # noqa: BLE001
+                        continue
+        except Exception:  # noqa: BLE001
+            pass
+
+        return web.json_response({
+            "pid": _os.getpid(),
+            "boot_timestamp": boot_ts,
+            "uptime_seconds": uptime_s,
+            "uptime_human": (
+                f"{int(uptime_s // 60)}min" if uptime_s and uptime_s < 3600
+                else f"{uptime_s / 3600:.1f}h" if uptime_s
+                else "unknown"
+            ),
+            "tasks": {
+                "auto_learning": _t_running("_auto_learning_task"),
+                "cable": _t_running("_cable_task"),
+                "prometheus": _t_running("_prometheus_task"),
+                "implementer_worker": _t_running("_implementer_task"),
+                "broadcast": _t_running("_broadcast_task"),
+                "daily_report": _t_running("_daily_report_task"),
+            },
+            "endpoints_count": len(endpoints),
+            "endpoints": sorted(set(endpoints))[:200],
+        }, status=200)
+
+    async def _handle_implementer_status(self, _: web.Request) -> web.Response:
+        """GET /api/implementer/status — MEM-AUDIT-4 (2026-05-29)."""
+        try:
+            from src.services.implementer.worker import (
+                get_background_status, history_summary,
+            )
+            return web.json_response({
+                "background": get_background_status(),
+                "history": history_summary(limit=10),
+            }, status=200)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)}, status=200)
+
+    # (handler duplicado _handle_implementer_run_once removido no review 2026-06-01
+    #  — a definição canônica acima sobrevivia por ordem de definição; consolidado)
+
+    async def _handle_decision_janitor(self, request: web.Request) -> web.Response:
+        """POST /api/decision-memory/janitor — MEM-AUDIT-3 (2026-05-29).
+        Body opcional: {min_age_hours, max_age_days, dry_run, limit}."""
+        try:
+            body = {}
+            if request.can_read_body:
+                body = await request.json() or {}
+            from src.services.decision_memory_janitor import resolve_decision_orphans
+            result = resolve_decision_orphans(
+                min_age_hours=int(body.get("min_age_hours", 2)),
+                max_age_days=int(body.get("max_age_days", 30)),
+                dry_run=bool(body.get("dry_run", True)),
+                limit=int(body.get("limit", 200)),
+            )
+            return web.json_response(result, status=200)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)}, status=200)
+
+    async def _handle_prometheus_snapshot(self, _: web.Request) -> web.Response:
+        """GET /api/prometheus/snapshot — PROM-D (2026-05-29).
+
+        Expõe estado do Prometheus runtime: agent ligado? quantas observações,
+        quantos learnings, vault writes, últimos 5 learnings com KPIs.
+
+        Quando Prometheus está desligado (flag off), retorna 200 com
+        ``enabled=false`` + dica de como ligar.
+        """
+        import os as _os
+        try:
+            from src.agents.prometheus import (
+                get_prometheus_agent, is_agent_enabled as _prom_enabled,
+            )
+            payload: dict[str, Any] = {
+                "enabled": _prom_enabled(),
+                "env_flag": "PROMETHEUS_AGENT_ENABLED",
+                "env_value": _os.environ.get("PROMETHEUS_AGENT_ENABLED", "<unset>"),
+            }
+            agent = get_prometheus_agent()
+            if agent is None:
+                payload["snapshot"] = None
+                payload["hint"] = (
+                    "Set PROMETHEUS_AGENT_ENABLED=true in .env + reboot. "
+                    "Prometheus subscribe a cycle.end, vision.signal, agent.error "
+                    "(já publicados pelo NickFury/BaseAgent)."
+                )
+            else:
+                payload["snapshot"] = agent.snapshot()
+
+            # Tenta também contar PROMETHEUS_LEARNING events no DB
+            try:
+                import sqlite3 as _sq3  # noqa: WPS433
+                from pathlib import Path as _P  # noqa: WPS433
+                db = _P(__file__).resolve().parents[2] / "data" / "mekka_trading.db"
+                if db.exists():
+                    conn = _sq3.connect(str(db))
+                    row = conn.execute(
+                        "SELECT COUNT(*), MAX(timestamp) FROM audit_log "
+                        "WHERE event='PROMETHEUS_LEARNING'"
+                    ).fetchone()
+                    conn.close()
+                    payload["audit_log"] = {
+                        "total_events": int(row[0] or 0),
+                        "last_event_ts": row[1],
+                    }
+            except Exception:  # noqa: BLE001
+                pass
+
+            return web.json_response(payload, status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("prometheus snapshot failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=200)
+
+    async def _handle_vault_audit(self, _: web.Request) -> web.Response:
+        """GET /api/vault/audit — VAULT-INTEG-1 (2026-05-29).
+
+        Roda o vault_auditor e retorna o estado completo (health, órfãos,
+        broken links, gaps daily, cobertura agentes, densidade). Dashboard
+        widget consulta + Beast/Mentor podem usar pra detectar degradação.
+
+        Read-only — não escreve em nada. Pode ser caro em vaults grandes
+        (>5K notas): considere rate-limit no consumer.
+        """
+        try:
+            from src.services.vault_auditor import audit_vault  # noqa: WPS433
+            report = audit_vault()
+            return web.json_response(report.to_dict(), status=200)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("vault audit failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=200)
+
+    async def _handle_vault_activity(self, _: web.Request) -> web.Response:
+        """GET /api/vault/activity — INV-17 (2026-05-29).
+
+        Vault activity widget: mostra que o segundo cérebro está vivo.
+        Reporta para Mentor / Cyclops / Vision / Cable / Strategy / Improvement:
+          - habilitado? (env flag)
+          - quantos writes nos últimos 7 dias
+          - timestamp do último write (filesystem mtime mais recente)
+
+        Fail-silent — nunca quebra o dashboard.
+        """
+        import os as _os
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        from pathlib import Path as _P
+
+        try:
+            from src.services.cable_vault_writer import get_vault_path as _vault_path
+            vault_root = _vault_path()
+        except Exception:
+            vault_root = _P.home() / "Documents" / "mekka-trading-obsidian"
+
+        # (writer_key, env_flag, subpath_glob)
+        writers = [
+            ("mentor",       "MENTOR_VAULT_WRITER_ENABLED",       "20 - Areas/Trading/Estratégias/*-mentor-*.md"),
+            ("cyclops",      "CYCLOPS_VAULT_WRITER_ENABLED",      "60 - Daily/*-trades.md"),
+            ("vision",       "VISION_VAULT_WRITER_ENABLED",       "20 - Areas/Trading/Decisões/*.md"),
+            ("cable",        "CABLE_VAULT_WRITER_ENABLED",        "20 - Areas/Mercado/Derivativos/*.md"),
+            ("strategy",     "STRATEGY_VAULT_WRITER_ENABLED",     "20 - Areas/Trading/Estratégias/*-regime*.md"),
+            ("improvement",  "IMPROVEMENT_VAULT_WRITER_ENABLED",  "20 - Areas/Melhorias/**/*.md"),
+        ]
+
+        cutoff = _dt.now(_tz.utc) - _td(days=7)
+        cutoff_ts = cutoff.timestamp()
+
+        report: dict[str, Any] = {
+            "vault_path": str(vault_root),
+            "vault_available": vault_root.exists(),
+            "writers": {},
+            "writers_enabled_count": 0,
+            "total_writes_7d": 0,
+        }
+
+        for key, flag, glob_pattern in writers:
+            enabled = _os.environ.get(flag, "false").lower() in (
+                "1", "true", "yes", "on",
+            )
+            if enabled:
+                report["writers_enabled_count"] += 1
+            files: list[_P] = []
+            try:
+                if vault_root.exists():
+                    files = list(vault_root.glob(glob_pattern))
+            except Exception:
+                files = []
+            recent_files = [f for f in files if f.stat().st_mtime >= cutoff_ts]
+            last_mtime = max(
+                (f.stat().st_mtime for f in files), default=None,
+            )
+            last_iso = (
+                _dt.fromtimestamp(last_mtime, _tz.utc).isoformat()
+                if last_mtime else None
+            )
+            report["writers"][key] = {
+                "enabled": enabled,
+                "writes_7d": len(recent_files),
+                "last_write_at": last_iso,
+                "total_files": len(files),
+            }
+            report["total_writes_7d"] += len(recent_files)
+
+        return web.json_response(report, status=200)
 
     async def _handle_improvements_approve_pr(self, request: web.Request) -> web.Response:
         from src.dashboard.routers import improvements as _impr

@@ -189,6 +189,8 @@ backtesting/results/*.json
 *.feather
 data/raw/
 data/processed/
+# Catálogo do Prometheus — artefato local; quem quiser commitar, faz git add -f
+data/prompts/
 
 # =============================================================================
 # Submódulo aiox-core

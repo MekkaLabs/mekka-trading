@@ -96,13 +96,65 @@ class IronMan(BaseAgent[ExecutionResult]):
         super().__init__(
             codename="IronMan",
             role=f"Execution Engineer ({settings.active_exchange} / {settings.hyperliquid_network})",
-            timeout_s=20.0,  # Order placement na exchange (1-2 round trips)
+            # Force-Execute (modo deus) e ordens completas envolvem múltiplas
+            # round-trips: market-order + SL + TP + reconciliação. Em
+            # condições normais soma 5-10s; com latência variável da Binance
+            # testnet (já vi spikes >18s em single call) o ideal é deixar
+            # margem confortável acima do CCXT timeout interno (15s).
+            # Pre-2026-05-28: timeout_s=20s competia com CCXT 20s → race
+            # condition matava o agente antes do CCXT dar erro decente.
+            timeout_s=45.0,
         )
         self._exchange: Optional[Any] = None  # hyperliquid Exchange instance
         self._info: Optional[Any] = None      # hyperliquid Info instance
         self._ccxt_exchange: Optional[Any] = None  # CCXT exchange (Bybit/Binance)
         # [B3] Lock prevents double-init when two coroutines race into _connect_async
         self._connect_lock: asyncio.Lock = asyncio.Lock()
+        # P1-3 (2026-05-28): swap guard — detecta troca de binance_market_type
+        # entre boots; loga WARNING se há posições abertas detectadas.
+        # Fail-silent: nunca bloqueia boot do agente.
+        try:
+            from src.services.market_type_swap_guard import log_boot_swap_warning
+            log_boot_swap_warning()
+        except Exception as _swap_exc:  # noqa: BLE001
+            logger.debug(f"[IronMan] swap guard boot check no-op: {_swap_exc}")
+
+    # ------------------------------------------------------------------
+    # COIN-M helpers (2026-05-28 audit fix P0-3/P0-4)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _binance_market_type_for(exchange_id: str) -> str:
+        """Resolve market_type pro to_ccxt — só relevante para Binance.
+
+        Outras exchanges sempre recebem 'linear' (default seguro).
+        Hyperliquid usa USDC-margined que market_registry trata especialmente.
+        """
+        if exchange_id == "binance":
+            return str(getattr(settings, "binance_market_type", "linear"))
+        return "linear"
+
+    @classmethod
+    def _is_inverse_for(cls, exchange_id: str) -> bool:
+        """True quando exchange está em COIN-M (inverse). Bybit pode ter
+        ambos no futuro mas hoje só Binance suporta inverse."""
+        return cls._binance_market_type_for(exchange_id) == "inverse"
+
+    @classmethod
+    def _balance_currency_for(cls, exchange_id: str, mekka_symbol: str) -> str:
+        """Chave do balance dict pra checar margem disponível.
+
+        - linear (USDT-M): sempre 'USDT' (todos pares cotados em USDT)
+        - inverse (COIN-M): coin do par (BTC, ETH) — Binance separa balance
+          por moeda settlement
+        - bybit: USDT (sem suporte inverse ainda)
+        - hyperliquid: USDC (USDC-margined)
+        """
+        if exchange_id == "hyperliquid":
+            return "USDC"
+        if cls._is_inverse_for(exchange_id):
+            return mekka_symbol.upper().strip()  # 'BTC', 'ETH'
+        return "USDT"
 
     # ------------------------------------------------------------------
     # SDK lifecycle (lazy)
@@ -160,6 +212,61 @@ class IronMan(BaseAgent[ExecutionResult]):
     # ------------------------------------------------------------------
     # Core logic
     # ------------------------------------------------------------------
+
+    async def _annotate_execution_quality(
+        self, result: "ExecutionResult", signal: TradingSignal,
+    ) -> "ExecutionResult":
+        """Mede a qualidade da execução (slippage realizado vs entry planejado +
+        fill ratio) e anota em result.metadata. Em fill LIVE com slippage acima
+        de execution_slippage_alert_bps: WARNING + alerta + lição no diário.
+
+        Fecha o loop execução→aprendizado. Nunca levanta (best-effort)."""
+        try:
+            from src.models.execution import ExecutionStatus  # noqa: WPS433
+            if result.status not in (ExecutionStatus.FILLED, ExecutionStatus.PARTIAL,
+                                     ExecutionStatus.PAPER):
+                return result
+            entry = float(getattr(signal, "entry_price", 0) or 0)
+            avg = float(getattr(result, "avg_price", 0) or 0)
+            if entry <= 0 or avg <= 0:
+                return result
+
+            side = (result.side or "").lower()
+            # Slippage assinado: positivo = pior para nós (comprou mais caro /
+            # vendeu mais barato que o planejado).
+            raw = (avg - entry) / entry
+            signed = raw if side in ("long", "buy") else -raw
+            slippage_bps = round(signed * 10_000, 2)
+
+            meta = dict(result.metadata or {})
+            meta["entry_slippage_bps"] = slippage_bps
+            meta["planned_entry"] = entry
+            result.metadata = meta
+
+            threshold = float(getattr(settings, "execution_slippage_alert_bps", 30.0) or 0.0)
+            if (not result.is_paper) and threshold > 0 and slippage_bps > threshold:
+                self._log.warning(
+                    f"[IronMan] Slippage de entrada ALTO em {result.symbol}: "
+                    f"{slippage_bps:.1f}bps (limite {threshold:.0f}) — "
+                    f"planejado ${entry:.4f} → fill ${avg:.4f}"
+                )
+                self._emit_event("execution.slippage_high", {
+                    "symbol": result.symbol, "slippage_bps": slippage_bps,
+                    "threshold_bps": threshold,
+                })
+                # Lição estável (dedup/reforça em recorrência) — só consultiva.
+                await self.learn(
+                    f"Entradas {side} em {result.symbol} têm slippado acima do "
+                    f"limite ({threshold:.0f}bps) — considerar entry mais conservador, "
+                    f"checar liquidez (Aquaman) ou evitar o horário.",
+                    category="execução",
+                    evidence=f"slippage_bps={slippage_bps}, planned={entry}, fill={avg}",
+                    confidence=0.6,
+                    tags=["slippage", result.symbol, side],
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[IronMan] annotate_execution_quality skipped: {exc}")
+        return result
 
     async def _run(  # type: ignore[override]
         self,
@@ -295,6 +402,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                     **_realism_meta,
                 },
             )
+            result = await self._annotate_execution_quality(result, signal)
             self._log.info(result.summary())
             return result
 
@@ -316,6 +424,13 @@ class IronMan(BaseAgent[ExecutionResult]):
                 # — IronMan honors it by forcing a market order in testnet
                 # so the IOC limit doesn't silently fill 0 (book is thin).
                 _force_execute = bool((approval.metadata or {}).get("force_execute", False))
+                # C1 fix (2026-06-01 audit): cycle_id precisa existir no escopo de
+                # _place_ccxt_order — sem isso o emergency_flatten lançava NameError
+                # justamente quando o SL falhava (posição ficava NUA). Propagado do
+                # approval.metadata quando disponível (NickFury injeta o cycle id).
+                _cycle_id = (approval.metadata or {}).get("cycle_id") or (
+                    getattr(signal, "snapshot_id", None)
+                )
                 result = await self._place_ccxt_order(
                     signal=signal,
                     quantity=quantity,
@@ -323,7 +438,9 @@ class IronMan(BaseAgent[ExecutionResult]):
                     size_pct=size_pct,
                     exchange_id=active,
                     force_market_in_testnet=_force_execute,
+                    cycle_id=_cycle_id,
                 )
+            result = await self._annotate_execution_quality(result, signal)
             self._log.info(result.summary())
             return result
         except RetryError as exc:
@@ -504,7 +621,22 @@ class IronMan(BaseAgent[ExecutionResult]):
             (exchange_id == "binance" and bool(getattr(settings, "binance_testnet", False)))
             or (exchange_id == "bybit" and bool(getattr(settings, "bybit_testnet", False)))
         )
-        cache_key = f"{exchange_id}:{'testnet' if _testnet else 'mainnet'}"
+        # COIN-M support (2026-05-28): cache key inclui market_type para
+        # invalidar quando operador troca de USDT-M (linear) ↔ COIN-M (inverse).
+        # Sem isso, swap não pegaria o novo CCXT client.
+        _mt = ""
+        # P1-2 fix (2026-05-28 audit): snapshot atômico de binance_market_type
+        # numa variável local — settings poderia mudar entre a leitura do
+        # cache_key (linha abaixo) e a leitura no cfg["options"] (linha 605).
+        # Sem isto, sob hot-swap simultâneo, cliente retornado tinha cache_key
+        # de um market_type mas cfg do outro.
+        _binance_mt_snapshot = (
+            str(getattr(settings, "binance_market_type", "linear"))
+            if exchange_id == "binance" else "linear"
+        )
+        if exchange_id == "binance":
+            _mt = f":mt={_binance_mt_snapshot}"
+        cache_key = f"{exchange_id}:{'testnet' if _testnet else 'mainnet'}{_mt}"
         loop = asyncio.get_event_loop()
 
         async with _CCXT_SHARED_LOCK:
@@ -518,7 +650,11 @@ class IronMan(BaseAgent[ExecutionResult]):
 
             cfg: dict = {
                 "enableRateLimit": True,
-                "timeout": 20_000,
+                # 15s por request CCXT — abaixo do timeout_s=45s do agente.
+                # Se um único request travar >15s, CCXT dá NetworkError
+                # específico ANTES do BaseAgent matar com TimeoutError
+                # genérico. Melhor diagnóstico + retry logic do CCXT funciona.
+                "timeout": 15_000,
                 "options": {
                     "defaultType": "swap",
                     # 60s = Binance max recvWindow. Wide window prevents the
@@ -541,13 +677,24 @@ class IronMan(BaseAgent[ExecutionResult]):
                     )
                 cfg["apiKey"] = settings.binance_api_key
                 cfg["secret"] = settings.binance_api_secret
+                # COIN-M Futures support (2026-05-28) — usa snapshot atômico
+                # tomado no início do método (P1-2 fix). NUNCA re-ler settings
+                # aqui: o cache_key foi gerado com _binance_mt_snapshot e o
+                # cfg precisa usar O MESMO valor pra evitar client com config
+                # inconsistente com sua chave de cache.
+                _binance_mt = _binance_mt_snapshot
+                self._log.info(
+                    f"[IronMan/{exchange_id}] CCXT init: defaultSubType={_binance_mt} "
+                    f"(testnet={_testnet}, cache_key={cache_key})"
+                )
                 cfg["options"].update(
                     {
-                        "defaultSubType": "linear",
-                        "fetchMarkets": {"types": ["linear"]},
+                        "defaultSubType": _binance_mt,  # "linear" (USDT-M) ou "inverse" (COIN-M)
+                        "fetchMarkets": {"types": [_binance_mt]},
                         "disableFuturesSandboxWarning": True,
                     }
                 )
+                # cache_key já inclui :mt=... acima — não duplicar aqui
 
             exchange = getattr(ccxt, exchange_id)(cfg)
 
@@ -560,20 +707,28 @@ class IronMan(BaseAgent[ExecutionResult]):
             # routing or load_markets does not leak the underlying aiohttp
             # session — the half-initialised exchange is closed cleanly.
             try:
-                try:
-                    if exchange_id == "bybit" and settings.bybit_testnet:
+                # M3 fix (2026-06-01 audit): fail-CLOSED no roteamento de sandbox.
+                # ANTES, se set_sandbox_mode falhasse em modo testnet, o código só
+                # logava e SEGUIA — com o cliente ainda apontado para PRODUÇÃO.
+                # Uma intenção de testnet podia virar ordem real. Agora, se o
+                # sandbox era necessário e falhou, abortamos (o except externo
+                # fecha o exchange e re-levanta).
+                _need_sandbox = (
+                    (exchange_id == "bybit" and settings.bybit_testnet)
+                    or (exchange_id == "binance" and settings.binance_testnet)
+                )
+                if _need_sandbox:
+                    try:
                         exchange.set_sandbox_mode(True)
-                        self._log.warning("[IronMan/bybit] SANDBOX (testnet) mode ENABLED")
-                    elif exchange_id == "binance" and settings.binance_testnet:
-                        exchange.set_sandbox_mode(True)
-                        self._log.warning("[IronMan/binance] SANDBOX (testnet) mode ENABLED")
-                except Exception as _sbx_exc:
-                    # set_sandbox_mode is best-effort: log and continue. CCXT
-                    # raises for exchanges that don't support it, but bybit
-                    # and binance both do.
-                    self._log.error(
-                        f"[IronMan/{exchange_id}] set_sandbox_mode failed: {_sbx_exc}"
-                    )
+                        self._log.warning(
+                            f"[IronMan/{exchange_id}] SANDBOX (testnet) mode ENABLED"
+                        )
+                    except Exception as _sbx_exc:
+                        self._log.error(
+                            f"[IronMan/{exchange_id}] set_sandbox_mode FAILED — "
+                            f"abortando conexão (fail-closed, intenção=testnet): {_sbx_exc}"
+                        )
+                        raise
 
                 for attempt in range(1, 4):
                     try:
@@ -644,6 +799,135 @@ class IronMan(BaseAgent[ExecutionResult]):
             )
         return True, skew_ms, "ok"
 
+    @staticmethod
+    def _deterministic_client_oid(
+        signal: Any, side: str, cycle_id: Optional[str]
+    ) -> str:
+        """ClientOrderId determinístico para idempotência de entrada (C3).
+
+        Mesma decisão (snapshot_id + symbol + side + cycle_id) → mesmo id. Como é
+        calculado UMA vez antes do loop de retry, é estável entre tentativas
+        (retry seguro: a Binance rejeita a 2ª submissão como duplicata) e único
+        entre decisões distintas. Se faltarem snapshot_id E cycle_id (identidade
+        fraca), usa um nonce único por chamada para NÃO colidir decisões reais.
+        Formato Binance: ^[A-Za-z0-9_-]{1,36}$.
+        """
+        import hashlib  # noqa: WPS433
+        import uuid  # noqa: WPS433
+
+        snap = str(getattr(signal, "snapshot_id", "") or "")
+        cyc = str(cycle_id or "")
+        if not snap and not cyc:
+            cyc = uuid.uuid4().hex
+        sym = str(getattr(signal, "symbol", "") or "")
+        seed = f"{snap}|{sym}|{side}|{cyc}"
+        return "mk_" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:28]
+
+    async def _fetch_order_by_client_oid(
+        self, exchange: Any, ccxt_symbol: str, client_oid: Optional[str]
+    ) -> Optional[dict]:
+        """Recupera uma ordem pela clientOrderId (reconciliação pós-duplicata).
+
+        Usado quando a Binance rejeita uma re-submissão como duplicata: a ordem
+        original DE FATO entrou, então buscamos por clientOrderId em vez de
+        abrir uma segunda. Retorna None se não encontrar (caller re-levanta).
+        """
+        if not client_oid:
+            return None
+        # 1) fetch_order direto via origClientOrderId (Binance suporta).
+        try:
+            o = await exchange.fetch_order(
+                None, ccxt_symbol, params={"origClientOrderId": client_oid}
+            )
+            if o:
+                return o
+        except Exception:  # noqa: BLE001
+            pass
+        # 2) Varrer ordens abertas/recentes e casar pela clientOrderId.
+        for _fname in ("fetch_open_orders", "fetch_orders"):
+            try:
+                fn = getattr(exchange, _fname, None)
+                if fn is None:
+                    continue
+                orders = await fn(ccxt_symbol)
+                for o in (orders or []):
+                    _coid = o.get("clientOrderId") or (
+                        (o.get("info") or {}).get("clientOrderId")
+                    )
+                    if _coid == client_oid:
+                        return o
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
+    async def _try_maker_entry(
+        self,
+        exchange: Any,
+        ccxt_symbol: str,
+        ccxt_side: str,
+        is_buy: bool,
+        quantity: float,
+        wait_seconds: float,
+    ) -> Any:
+        """Tenta uma entrada MAKER: posta uma limit post-only no touch (não cruza
+        o book → paga taxa de maker) e espera até wait_seconds. Retorna a ordem
+        se preencheu (total ou parcial); caso contrário cancela e retorna None
+        (o caller cai para limit_ioc/taker). Nunca levanta — erros viram None.
+        """
+        import asyncio as _aio
+        import time as _time
+
+        # Preço no touch: comprar no melhor bid, vender no melhor ask (não cruza).
+        try:
+            ticker = await exchange.fetch_ticker(ccxt_symbol)
+            bid = float(ticker.get("bid") or 0.0)
+            ask = float(ticker.get("ask") or 0.0)
+        except Exception:  # noqa: BLE001
+            return None
+        px = bid if is_buy else ask
+        if px <= 0:
+            return None
+        try:
+            px = float(exchange.price_to_precision(ccxt_symbol, px))
+        except Exception:  # noqa: BLE001
+            pass
+
+        # post-only (maker). Sem clientOrderId determinístico aqui — é tentativa
+        # única; o id determinístico fica para o fallback taker (idempotência).
+        try:
+            mk = await exchange.create_order(
+                symbol=ccxt_symbol, type="limit", side=ccxt_side,
+                amount=quantity, price=px,
+                params={"reduceOnly": False, "postOnly": True},
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Rejeição comum: cruzaria o book (post-only) → fallback taker.
+            self._log.info(f"[IronMan] maker post-only não aceito ({exc}) — fallback")
+            return None
+
+        oid = str(mk.get("id") or "")
+        # Campo ccxt unificado (NÃO _extract_filled_size, que é do shape Hyperliquid).
+        filled = float(mk.get("filled") or 0.0)
+        deadline = _time.monotonic() + max(1.0, float(wait_seconds))
+        while filled <= 0 and _time.monotonic() < deadline:
+            await _aio.sleep(1.0)
+            if not oid:
+                break
+            try:
+                mk = await exchange.fetch_order(oid, ccxt_symbol)
+                filled = float(mk.get("filled") or 0.0)
+            except Exception:  # noqa: BLE001
+                break
+
+        # Cancela o que sobrou (resto parcial ou ordem inteira não preenchida).
+        if oid:
+            try:
+                await exchange.cancel_order(oid, ccxt_symbol)
+            except Exception:  # noqa: BLE001
+                pass
+
+        return mk if filled > 0 else None
+
     async def _place_ccxt_order(
         self,
         signal: Any,
@@ -652,6 +936,7 @@ class IronMan(BaseAgent[ExecutionResult]):
         size_pct: float,
         exchange_id: str,
         force_market_in_testnet: bool = False,
+        cycle_id: Optional[str] = None,
     ) -> ExecutionResult:
         """Place a live order via CCXT unified API (Bybit / Binance perps).
 
@@ -674,7 +959,11 @@ class IronMan(BaseAgent[ExecutionResult]):
         # still routes correctly.
         symbol = to_mekka(signal.symbol)
         is_buy = signal.action.value.upper() == "LONG"
-        ccxt_symbol = to_ccxt(symbol, exchange_id)  # type: ignore[arg-type]
+        # P0-3 fix (2026-05-28 audit): em modo Binance COIN-M (inverse), o
+        # to_ccxt precisa retornar "BTC/USD:BTC" em vez de "BTC/USDT:USDT".
+        # Sem isso, CCXT rejeitava com "Unknown symbol" silenciosamente.
+        _market_type = self._binance_market_type_for(exchange_id)
+        ccxt_symbol = to_ccxt(symbol, exchange_id, market_type=_market_type)  # type: ignore[arg-type]
         ccxt_side = "buy" if is_buy else "sell"
 
         # ── Min-notional "lance livre" preflight ──────────────────────────
@@ -762,29 +1051,131 @@ class IronMan(BaseAgent[ExecutionResult]):
             )
 
         # Set leverage
-        try:
-            await exchange.set_leverage(leverage, ccxt_symbol)
-        except Exception as _exc:
-            self._log.warning(f"[IronMan/{exchange_id}] set_leverage failed (proceeding): {_exc}")
+        # L2 fix (2026-06-01 audit): era fail-open silencioso — se set_leverage
+        # falhasse, a ordem abria com o leverage RESIDUAL da corretora (≠ aprovado
+        # pelo Batman) → risco real diferente do dimensionado. Agora: -4046 ("no
+        # need to change") é sucesso; demais falhas → 1 retry; se persistir em
+        # LIVE, REJEITA (fail-closed) + alerta. Testnet segue tolerante.
+        _lev_ok = False
+        _lev_exc: Optional[Exception] = None
+        for _lev_attempt in range(1, 3):
+            try:
+                await exchange.set_leverage(leverage, ccxt_symbol)
+                _lev_ok = True
+                break
+            except Exception as _exc:  # noqa: BLE001
+                _es = str(_exc).lower()
+                if "-4046" in _es or "no need to change" in _es:
+                    _lev_ok = True  # já está no leverage desejado
+                    break
+                _lev_exc = _exc
+                self._log.warning(
+                    f"[IronMan/{exchange_id}] set_leverage attempt {_lev_attempt}/2 failed: {_exc}"
+                )
+                if _lev_attempt < 2:
+                    await asyncio.sleep(float(_lev_attempt))
+        if not _lev_ok and not settings.paper_trading:
+            try:
+                from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+                asyncio.create_task(_TA().alert(
+                    event="SET_LEVERAGE_FAILED",
+                    severity="CRITICAL",
+                    agent="IronMan",
+                    symbol=symbol,
+                    message=(
+                        f"⛔ set_leverage falhou em {symbol} ({_lev_exc}) — ordem "
+                        "REJEITADA (fail-closed: leverage residual ≠ aprovado)."
+                    ),
+                ))
+            except Exception:  # noqa: BLE001
+                pass
+            return ExecutionResult(
+                symbol=symbol,
+                status=ExecutionStatus.REJECTED,
+                is_paper=False,
+                side="long" if is_buy else "short",
+                error=f"set_leverage failed in live ({_lev_exc}) — fail-closed.",
+            )
 
-        # Pre-flight margin check via CCXT balance
-        try:
-            bal = await exchange.fetch_balance()
-            free_usdt = float(bal.get("USDT", {}).get("free", 0) or 0)
-            required_margin = (quantity * signal.entry_price) / max(leverage, 1)
-            if free_usdt < required_margin:
+        # Pre-flight margin check via CCXT balance.
+        # P0-4 fix (2026-05-28 audit): em COIN-M (inverse), saldo está em
+        # BTC/ETH (settlement coin), NÃO em USDT. Hardcoded "USDT" antes
+        # retornava 0 → todas ordens rejeitadas como "insufficient margin".
+        # Helper resolve a chave certa baseada em market_type + symbol.
+        # H2 fix (2026-06-01 audit): fail-CLOSED em live. Antes, qualquer exceção
+        # no fetch_balance (ex.: InvalidNonce -1021 conhecido) só logava warning e
+        # a ordem seguia SEM verificar saldo — com dinheiro real isso pode liquidar
+        # prematuro / rejeitar em loop. Agora: 2 tentativas com backoff; se ainda
+        # falhar e estivermos em LIVE, a ordem é REJEITADA (testnet segue tolerante
+        # para não travar os testes do operador).
+        _bal: Any = None
+        _bal_exc: Optional[Exception] = None
+        for _bal_attempt in range(1, 3):
+            try:
+                _bal = await exchange.fetch_balance()
+                _bal_exc = None
+                break
+            except Exception as _exc:  # noqa: BLE001
+                _bal_exc = _exc
+                self._log.warning(
+                    f"[IronMan/{exchange_id}] balance check attempt {_bal_attempt}/2 failed: {_exc}"
+                )
+                if _bal_attempt < 2:
+                    await asyncio.sleep(float(_bal_attempt))
+
+        if _bal_exc is not None or _bal is None:
+            if not settings.paper_trading:
+                # LIVE: nunca enviar ordem sem confirmar margem.
+                try:
+                    from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+                    asyncio.create_task(_TA().alert(
+                        event="MARGIN_CHECK_FAILED",
+                        severity="CRITICAL",
+                        agent="IronMan",
+                        symbol=symbol,
+                        message=(
+                            f"⛔ Checagem de margem falhou em {symbol} "
+                            f"({_bal_exc}) — ordem REJEITADA (fail-closed)."
+                        ),
+                    ))
+                except Exception:  # noqa: BLE001
+                    pass
                 return ExecutionResult(
                     symbol=symbol,
                     status=ExecutionStatus.REJECTED,
                     is_paper=False,
                     side="long" if is_buy else "short",
                     error=(
-                        f"Insufficient USDT margin: need ~${required_margin:,.2f}, "
-                        f"available ${free_usdt:,.2f}"
+                        f"Margin check failed in live ({_bal_exc}) — "
+                        "fail-closed, order rejected."
                     ),
                 )
-        except Exception as _exc:
-            self._log.warning(f"[IronMan/{exchange_id}] balance check failed: {_exc}")
+            self._log.warning(
+                f"[IronMan/{exchange_id}] balance check failed in testnet — proceeding (tolerant)"
+            )
+        else:
+            balance_currency = self._balance_currency_for(exchange_id, symbol)
+            free_balance = float(_bal.get(balance_currency, {}).get("free", 0) or 0)
+            if self._is_inverse_for(exchange_id):
+                # Em inverse: margem requerida em coin (notional_usd / mark_price / leverage)
+                mark = signal.entry_price
+                if mark and mark > 0:
+                    required_margin = (quantity * 100 / mark) / max(leverage, 1)  # 100 = contract size
+                else:
+                    required_margin = 0  # fallback: skip se sem preço
+            else:
+                required_margin = (quantity * signal.entry_price) / max(leverage, 1)
+            if free_balance < required_margin:
+                return ExecutionResult(
+                    symbol=symbol,
+                    status=ExecutionStatus.REJECTED,
+                    is_paper=False,
+                    side="long" if is_buy else "short",
+                    error=(
+                        f"Insufficient {balance_currency} margin: need ~{required_margin:.6f}, "
+                        f"available {free_balance:.6f}"
+                    ),
+                )
 
         # ── Entry order ──
         # Order type is configurable. 'auto' → market on testnet (reliable fills
@@ -813,6 +1204,18 @@ class IronMan(BaseAgent[ExecutionResult]):
             )
             _etype = "market"
         use_market = _etype == "market"
+        # M4 fix (2026-06-01 audit): em MAINNET+LIVE uma ordem `market` ignora o
+        # cap de slippage e pode preencher a um preço muito pior com dinheiro
+        # real. Rebaixar para limit_ioc (sempre com cap). O caminho `market` só é
+        # legítimo em testnet (book ralo) ou via Modo Deus — que já é bloqueado em
+        # mainnet pelo server. Nenhum novo flag: default seguro.
+        if use_market and not _is_testnet and not settings.paper_trading:
+            self._log.warning(
+                f"[IronMan/{exchange_id}] entrada `market` em MAINNET+LIVE rebaixada "
+                "para limit_ioc (proteção de slippage com dinheiro real)"
+            )
+            _etype = "limit_ioc"
+            use_market = False
         self._log.info(f"[IronMan/{exchange_id}] entry order type={_etype} (testnet={_is_testnet})")
 
         # Marketable limit price: a plain limit-IOC at signal.entry_price often
@@ -842,30 +1245,101 @@ class IronMan(BaseAgent[ExecutionResult]):
                 limit_price = float(signal.entry_price)
 
         order: Any = None
+        _entry_liquidity = "taker"  # default; vira "maker" se o post-only encher
+        # limit_maker: tenta uma ordem post-only no touch (taxa de MAKER) e cai
+        # para limit_ioc (taker, já com cap) se não encher em
+        # entry_maker_wait_seconds. NUNCA perde a entrada. Só roda fora de market.
+        if _etype == "limit_maker" and not use_market:
+            try:
+                _wait = float(getattr(settings, "entry_maker_wait_seconds", 8.0) or 8.0)
+                order = await self._try_maker_entry(
+                    exchange, ccxt_symbol, ccxt_side, is_buy, quantity, _wait,
+                )
+            except Exception as _mk_exc:  # noqa: BLE001
+                self._log.warning(
+                    f"[IronMan/{exchange_id}] maker entry erro ({_mk_exc}) — fallback limit_ioc"
+                )
+                order = None
+            if order is None:
+                self._log.info(
+                    f"[IronMan/{exchange_id}] maker não encheu em {_wait:.0f}s — "
+                    f"fallback para limit_ioc (taker, com cap)"
+                )
+            else:
+                _entry_liquidity = "maker"
+                self._log.info(f"[IronMan/{exchange_id}] entrada preenchida como MAKER ✓")
+
+        # C3+H4 fix (2026-06-01 audit): idempotência + retry CCXT correto.
+        # ANTES: o filtro de retry usava (TimeoutError, ConnectionError) built-ins,
+        # que NÃO casam com ccxt.RequestTimeout/NetworkError (herdam de BaseError)
+        # → retry MORTO. E não havia clientOrderId; re-enviar uma ordem após
+        # timeout da RESPOSTA (a ordem chegou, mas a resposta se perdeu) DUPLICARIA
+        # a posição (2× notional, sem aprovação do Batman).
+        # AGORA: clientOrderId determinístico (mesma decisão = mesmo id, calculado
+        # UMA vez e reusado em todas as tentativas) torna o retry seguro — a Binance
+        # rejeita a 2ª submissão como duplicata e nós RECONCILIAMOS a ordem que de
+        # fato entrou, em vez de abrir uma segunda.
+        import ccxt.async_support as _ccxt  # noqa: WPS433
+        _client_oid = self._deterministic_client_oid(signal, ccxt_side, cycle_id)
+        _entry_params: dict[str, Any] = {"reduceOnly": False}
+        if _client_oid:
+            _entry_params["newClientOrderId"] = _client_oid
+        _retry_excs = (
+            _ccxt.NetworkError,
+            _ccxt.RequestTimeout,
+            _ccxt.ExchangeNotAvailable,
+            _ccxt.DDoSProtection,
+        )
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1.0, min=1, max=8),
-            retry=retry_if_exception_type((TimeoutError, ConnectionError)),
+            retry=retry_if_exception_type(_retry_excs),
             reraise=True,
         ):
             with attempt:
-                if use_market:
-                    order = await exchange.create_order(
-                        symbol=ccxt_symbol,
-                        type="market",
-                        side=ccxt_side,
-                        amount=quantity,
-                        params={"reduceOnly": False},
+                # Maker já preencheu a entrada → não coloca ordem taker.
+                if order is not None:
+                    break
+                try:
+                    if use_market:
+                        order = await exchange.create_order(
+                            symbol=ccxt_symbol,
+                            type="market",
+                            side=ccxt_side,
+                            amount=quantity,
+                            params=_entry_params,
+                        )
+                    else:
+                        order = await exchange.create_order(
+                            symbol=ccxt_symbol,
+                            type="limit",
+                            side=ccxt_side,
+                            amount=quantity,
+                            price=limit_price,
+                            params={**_entry_params, "timeInForce": "IOC"},
+                        )
+                except _ccxt.InvalidOrder as _io:
+                    # Idempotência: se a Binance rejeitou por DUPLICATA, é porque
+                    # uma tentativa anterior REALMENTE entrou (só a resposta se
+                    # perdeu). Recupera a ordem existente em vez de duplicar.
+                    _io_str = str(_io).lower()
+                    _is_dup = (
+                        isinstance(_io, _ccxt.DuplicateOrderId)
+                        or "-2010" in _io_str
+                        or "duplicate" in _io_str
+                        or (bool(_client_oid) and _client_oid.lower() in _io_str)
                     )
-                else:
-                    order = await exchange.create_order(
-                        symbol=ccxt_symbol,
-                        type="limit",
-                        side=ccxt_side,
-                        amount=quantity,
-                        price=limit_price,
-                        params={"timeInForce": "IOC", "reduceOnly": False},
+                    if not _is_dup:
+                        raise
+                    self._log.warning(
+                        f"[IronMan/{exchange_id}] entrada duplicada detectada "
+                        f"(clientOrderId={_client_oid}) — reconciliando ordem existente"
                     )
+                    order = await self._fetch_order_by_client_oid(
+                        exchange, ccxt_symbol, _client_oid
+                    )
+                    if order is None:
+                        raise
 
         if order is None:
             return ExecutionResult(
@@ -878,6 +1352,16 @@ class IronMan(BaseAgent[ExecutionResult]):
 
         filled = float(order.get("filled") or 0)
         avg_px = float(order.get("average") or signal.entry_price)
+        # Taxa paga na entrada (visibilidade maker vs taker). ccxt unificado:
+        # order["fee"]["cost"] ou soma de order["fees"]. Fail-safe → 0.
+        _fee_usd = 0.0
+        try:
+            _fee = order.get("fee") or {}
+            _fee_usd = float(_fee.get("cost") or 0.0)
+            if _fee_usd == 0.0 and isinstance(order.get("fees"), list):
+                _fee_usd = sum(float((f or {}).get("cost") or 0.0) for f in order["fees"])
+        except Exception:  # noqa: BLE001
+            _fee_usd = 0.0
         order_id = str(order.get("id") or "")
 
         # Slippage telemetry: how much the fill drifted from signal.entry_price.
@@ -933,6 +1417,29 @@ class IronMan(BaseAgent[ExecutionResult]):
         tp_id: Optional[str] = None
         sl_side = "sell" if is_buy else "buy"
 
+        # C2 fix (2026-06-01 audit): quantizar stopPrice de SL/TP ao tickSize da
+        # corretora ANTES de enviar. Vision gera SL/TP como floats arbitrários
+        # (ex: entry*0.97); sem price_to_precision a Binance rejeita por
+        # PRICE_FILTER (-1111/-4014) — e essa rejeição é justamente o gatilho que
+        # leva ao fail-safe. Espelha o padrão já usado no SL Guardian.
+        # M2: quantizar também a quantidade (reduceOnly precisa casar o LOT_SIZE
+        # do fill; partial fill com `filled` bruto pode rejeitar por LOT_SIZE).
+        _sl_px: float = float(signal.stop_loss)
+        _tp_px: float = float(signal.take_profit)
+        _qty: float = float(filled)
+        try:
+            _sl_px = float(exchange.price_to_precision(ccxt_symbol, signal.stop_loss))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _tp_px = float(exchange.price_to_precision(ccxt_symbol, signal.take_profit))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _qty = float(exchange.amount_to_precision(ccxt_symbol, filled))
+        except Exception:  # noqa: BLE001
+            pass
+
         sl_error: Optional[Exception] = None
         for _sl_attempt in range(1, 4):
             try:
@@ -940,9 +1447,9 @@ class IronMan(BaseAgent[ExecutionResult]):
                     symbol=ccxt_symbol,
                     type="stop_market",
                     side=sl_side,
-                    amount=filled,
+                    amount=_qty,
                     params={
-                        "stopPrice": signal.stop_loss,
+                        "stopPrice": _sl_px,
                         "reduceOnly": True,
                     },
                 )
@@ -951,6 +1458,46 @@ class IronMan(BaseAgent[ExecutionResult]):
                 break
             except Exception as _exc:  # noqa: BLE001
                 sl_error = _exc
+                _err_str = str(_exc)
+                # Binance -4045 ("Reach max stop order limit") — quota cheia
+                # por órfãos acumulados. Limpar e retry imediato no próximo
+                # loop, sem esperar o sleep escalonado (a falha foi de quota,
+                # não de rede). Mesmo padrão usado no guardian loop abaixo.
+                if "-4045" in _err_str or "max stop order" in _err_str.lower():
+                    try:
+                        # Binance Futures: limite -4045 é GLOBAL POR CONTA,
+                        # não por símbolo. Passamos ccxt_symbol=None para
+                        # varrer todos os pares (helper preserva stops de
+                        # posições ativas em outros símbolos).
+                        _cleaned = await self._cleanup_orphan_reduce_only_stops(
+                            exchange, ccxt_symbol=None
+                        )
+
+                        # ESCALATION: se cleanup convencional cancelou 0
+                        # (fantasmas que fetch_open_orders não enxerga —
+                        # bug recorrente da Testnet), escalar para
+                        # mass-cancel via cancel_all_orders por símbolo.
+                        # Só roda na 2ª/3ª tentativa para não ser agressivo
+                        # demais no caso comum.
+                        _mass = 0
+                        if _cleaned == 0 and _sl_attempt >= 2:
+                            _mass = await self._mass_cancel_orphan_symbols(
+                                exchange, ccxt_symbol_in_use=ccxt_symbol
+                            )
+
+                        self._log.warning(
+                            f"[IronMan/{exchange_id}] SL placement attempt "
+                            f"{_sl_attempt}/3 hit -4045; cleaned {_cleaned} "
+                            f"orphan stops + mass-cancelled {_mass} via "
+                            "symbol-scoped cancel_all_orders, retrying immediately"
+                        )
+                        # Imediato — sem sleep — quota acabou de ser liberada.
+                        continue
+                    except Exception as _cleanup_exc:  # noqa: BLE001
+                        self._log.warning(
+                            f"[IronMan/{exchange_id}] orphan cleanup failed: "
+                            f"{_cleanup_exc}"
+                        )
                 self._log.warning(
                     f"[IronMan/{exchange_id}] SL placement attempt {_sl_attempt}/3 failed: {_exc}"
                 )
@@ -965,7 +1512,8 @@ class IronMan(BaseAgent[ExecutionResult]):
                 f"flattening unprotected {symbol} position ({filled} units)"
             )
             close_ok, close_err = await self._emergency_flatten(
-                exchange, ccxt_symbol, is_buy, filled, exchange_id
+                exchange, ccxt_symbol, is_buy, _qty, exchange_id,
+                mekka_symbol=symbol, cycle_id=cycle_id,
             )
             try:
                 from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
@@ -1010,20 +1558,43 @@ class IronMan(BaseAgent[ExecutionResult]):
                 },
             )
 
+        _tp_failed = False
         try:
             tp_order = await exchange.create_order(
                 symbol=ccxt_symbol,
                 type="take_profit_market",
                 side=sl_side,
-                amount=filled,
+                amount=_qty,
                 params={
-                    "stopPrice": signal.take_profit,
+                    "stopPrice": _tp_px,
                     "reduceOnly": True,
                 },
             )
             tp_id = str(tp_order.get("id") or "")
         except Exception as _exc:
+            # Reconciliação SL/TP (2026-06-02): o SL JÁ está colocado (downside
+            # protegido), mas o TP falhou → proteção PARCIAL. Antes era só um log
+            # silencioso; agora alerta o operador (WARNING, não CRITICAL) e
+            # marca tp_failed no metadata. O Cyclops ainda cobre o TP via monitor
+            # (soft TP), mas o operador precisa saber que o TP de corretora faltou.
+            _tp_failed = True
+            tp_id = ""
             self._log.warning(f"[IronMan/{exchange_id}] TP placement failed: {_exc}")
+            try:
+                from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+                asyncio.create_task(_TA().alert(
+                    event="TP_PLACEMENT_FAILED",
+                    severity="WARNING",
+                    agent="IronMan",
+                    symbol=symbol,
+                    message=(
+                        f"{symbol}: SL colocado, mas o TAKE-PROFIT falhou ({_exc}). "
+                        f"Proteção PARCIAL — posição tem stop, mas sem TP de corretora. "
+                        f"O Cyclops cobre o TP via monitor; considere recolocar manualmente."
+                    ),
+                ))
+            except Exception:  # noqa: BLE001
+                pass
 
         notional = filled * avg_px
         status = (
@@ -1049,6 +1620,9 @@ class IronMan(BaseAgent[ExecutionResult]):
                 "size_pct": size_pct,
                 "stop_loss": signal.stop_loss,
                 "take_profit": signal.take_profit,
+                "tp_failed": _tp_failed,
+                "entry_liquidity": _entry_liquidity,
+                "fee_usd": round(_fee_usd, 6),
                 "raw_order": order,
             },
         )
@@ -1060,6 +1634,9 @@ class IronMan(BaseAgent[ExecutionResult]):
         is_buy: bool,
         amount: float,
         exchange_id: str,
+        *,
+        mekka_symbol: Optional[str] = None,
+        cycle_id: Optional[str] = None,
     ) -> tuple[bool, Optional[str]]:
         """Close a just-opened position with a reduce-only MARKET order.
 
@@ -1067,9 +1644,17 @@ class IronMan(BaseAgent[ExecutionResult]):
         an unprotected position. Retries a few times; returns ``(ok, error)``.
         A market order is intentional: we want OUT now, slippage is acceptable
         versus the unbounded risk of a naked position.
+
+        IMPORTANT: this path was NOT instrumented for memory resolution until
+        2026-05-27. Without `resolve_trade_memories` here, every -4045-induced
+        flatten left AgentMemory rows PENDING, biasing Beast/Mentor learning
+        toward the rare Cyclops happy-path. We now call the resolver with
+        pnl_usd=0.0 (immediate flatten = no realized P&L; the trade was
+        cancelled before holding period).
         """
         close_side = "sell" if is_buy else "buy"
         last_err: Optional[str] = None
+        ok = False
         for _attempt in range(1, 4):
             try:
                 await exchange.create_order(
@@ -1082,7 +1667,8 @@ class IronMan(BaseAgent[ExecutionResult]):
                 self._log.warning(
                     f"[IronMan/{exchange_id}] emergency flatten OK ({amount} units)"
                 )
-                return True, None
+                ok = True
+                break
             except Exception as _exc:  # noqa: BLE001
                 last_err = str(_exc)
                 self._log.error(
@@ -1090,7 +1676,208 @@ class IronMan(BaseAgent[ExecutionResult]):
                 )
                 if _attempt < 3:
                     await asyncio.sleep(float(_attempt))
+
+        # Resolver memórias (fail-silent — não afeta o retorno do flatten).
+        if mekka_symbol:
+            try:
+                from src.services.trade_outcome_resolver import resolve_trade_memories
+                await resolve_trade_memories(
+                    symbol=mekka_symbol,
+                    pnl_usd=0.0,
+                    holding_hours=0.0,
+                    cycle_id=cycle_id,
+                )
+            except Exception as _rtm_exc:  # noqa: BLE001
+                self._log.debug(
+                    f"[IronMan/_emergency_flatten] resolve_trade_memories no-op: {_rtm_exc}"
+                )
+
+        if ok:
+            return True, None
         return False, last_err or "flatten failed after 3 attempts"
+
+    # ------------------------------------------------------------------
+    # Helper: free Binance per-symbol stop-order quota by cancelling
+    # reduce-only orphan stops/TPs. Reusable from placement + guardian.
+    # ------------------------------------------------------------------
+
+    # Símbolos comuns para mass-cancel preventivo (último recurso contra
+    # fantasmas do testnet). Mantém lista curta para não esgotar rate limit.
+    _MASS_CANCEL_SYMBOLS = (
+        "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT",
+        "BNB/USDT:USDT", "XRP/USDT:USDT", "DOGE/USDT:USDT",
+    )
+
+    async def _mass_cancel_orphan_symbols(
+        self, exchange: Any, ccxt_symbol_in_use: str,
+    ) -> int:
+        """
+        Último recurso contra `-4045` na Binance Testnet: chama
+        `cancel_all_orders(symbol)` em símbolos comuns SEM posição ativa,
+        pegando stops "fantasma" que `fetch_open_orders` não enxerga.
+
+        NÃO toca no símbolo da posição que está sendo aberta agora
+        (ccxt_symbol_in_use) — preserva eventuais stops já colocados nesse
+        ciclo.
+
+        Conservador: pula símbolos com posição ativa (preserva SL legítimo
+        que esteja invisível ao fetch). Fail-tolerante.
+        """
+        # Descobrir símbolos com posição (para preservá-los)
+        active: set[str] = set()
+        try:
+            positions = await exchange.fetch_positions()
+            for p in positions or []:
+                try:
+                    if abs(float(p.get("contracts") or 0)) > 0:
+                        sym = str(p.get("symbol") or "")
+                        if sym:
+                            active.add(sym)
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(
+                f"[IronMan/mass-cancel] fetch_positions failed: {exc} — "
+                "aborting (conservador)"
+            )
+            return 0
+
+        cancelled = 0
+        for sym in self._MASS_CANCEL_SYMBOLS:
+            # Preserva: símbolo da posição atual + símbolos com qualquer posição
+            if sym == ccxt_symbol_in_use or sym in active:
+                continue
+            try:
+                result = await exchange.cancel_all_orders(sym)
+                n = len(result) if isinstance(result, list) else 1
+                cancelled += n
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                # -2011 / "Unknown order" = nada para cancelar nesse símbolo (OK)
+                if "-2011" in msg or "unknown order" in msg.lower():
+                    continue
+                self._log.debug(
+                    f"[IronMan/mass-cancel] {sym} cancel_all_orders error: {exc}"
+                )
+        return cancelled
+
+    async def _cleanup_orphan_reduce_only_stops(
+        self, exchange: Any, ccxt_symbol: Optional[str] = None
+    ) -> int:
+        """
+        Cancela reduce-only stop/take_profit orders ÓRFÃOS (em símbolos sem
+        posição aberta). Retorna quantos foram cancelados.
+
+        Usado para liberar a quota Binance ("max stop order limit" -4045),
+        que é **global por conta** em Binance Futures (não por símbolo).
+        Por isso varremos TODOS os símbolos por padrão, não só o que está
+        tentando colocar SL.
+
+        Parâmetros
+        ----------
+        exchange : CCXT exchange instance
+        ccxt_symbol : str, opcional
+            Quando dado, restringe a busca a esse símbolo (modo legacy
+            usado pelo guardian). Quando None, varre toda a conta.
+
+        Conservador: só cancela ordens marcadas reduce-only E em símbolos
+        SEM posição aberta. Jamais toca em entradas, jamais remove o stop
+        de uma posição ativa.
+
+        Fail-tolerant: se uma cancel falhar, segue para a próxima.
+        """
+        # 1) descobrir símbolos com posição aberta (para preservar seus stops)
+        active_symbols: set[str] = set()
+        try:
+            positions = await exchange.fetch_positions()
+            for p in positions or []:
+                try:
+                    contracts = float(p.get("contracts") or 0)
+                    if abs(contracts) > 0:
+                        sym = str(p.get("symbol") or "")
+                        if sym:
+                            active_symbols.add(sym)
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception as exc:  # noqa: BLE001
+            # Se não conseguir buscar posições, sermos CONSERVADORES:
+            # só limpamos o símbolo passado (legacy) ou nada se for None.
+            self._log.warning(
+                f"[IronMan/cleanup] fetch_positions failed: {exc}; "
+                "falling back to per-symbol-only mode"
+            )
+            if ccxt_symbol is None:
+                return 0
+            active_symbols = set()  # tudo no símbolo é candidato a cancelar
+
+        # 2) buscar ordens abertas (global se ccxt_symbol=None)
+        # NOTE: CCXT emite warning como exceção em fetch_open_orders() sem
+        # símbolo na Binance. Reconhecemos a opção antes de chamar.
+        try:
+            opts = getattr(exchange, "options", None)
+            if isinstance(opts, dict):
+                opts["warnOnFetchOpenOrdersWithoutSymbol"] = False
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            if ccxt_symbol is None:
+                open_orders = await exchange.fetch_open_orders()
+            else:
+                open_orders = await exchange.fetch_open_orders(ccxt_symbol)
+        except Exception as exc:  # noqa: BLE001
+            # Se a chamada global falhar (mesmo após ack), tentamos por
+            # símbolos conhecidos a partir das posições ativas — pelo
+            # menos liberamos algum stop órfão.
+            self._log.warning(
+                f"[IronMan/cleanup] fetch_open_orders global failed: {exc}; "
+                "falling back to per-active-symbol cleanup"
+            )
+            open_orders = []
+            seed_symbols = list(active_symbols) if ccxt_symbol is None else [ccxt_symbol]
+            for s in seed_symbols:
+                try:
+                    chunk = await exchange.fetch_open_orders(s)
+                    if chunk:
+                        open_orders.extend(chunk)
+                except Exception:  # noqa: BLE001
+                    continue
+            if not open_orders:
+                return 0
+
+        cancelled = 0
+        for o in open_orders or []:
+            try:
+                typ = str(o.get("type") or "").lower()
+                info = o.get("info") or {}
+                itype = str(info.get("type") or "").lower()
+                is_algo = (
+                    "stop" in typ or "stop" in itype
+                    or "take_profit" in typ or "take_profit" in itype
+                )
+                if not is_algo:
+                    continue
+                ro = o.get("reduceOnly")
+                if ro is None:
+                    ro = info.get("reduceOnly") or info.get("reduce_only")
+                if not bool(ro):
+                    continue
+
+                order_sym = str(o.get("symbol") or "")
+                # PROTEÇÃO: não cancelar stops de posições ATIVAS de outros
+                # símbolos. Excecão: se ccxt_symbol foi passado, esse símbolo
+                # específico tem prioridade (caller sabe que precisa limpar).
+                if order_sym in active_symbols and order_sym != ccxt_symbol:
+                    continue
+
+                oid = o.get("id")
+                if not oid:
+                    continue
+                await exchange.cancel_order(oid, order_sym or ccxt_symbol)
+                cancelled += 1
+            except Exception:  # noqa: BLE001 — best-effort
+                continue
+        return cancelled
 
     # ------------------------------------------------------------------
     # Live SL Guardian — ensure every open position keeps a live stop
@@ -1122,6 +1909,28 @@ class IronMan(BaseAgent[ExecutionResult]):
             reduce_only = ro in (True, "true", "True", "TRUE", 1, "1")
             oside = str(o.get("side") or "").lower()
             if is_stop and reduce_only and oside == want_side:
+                return True
+        return False
+
+    @staticmethod
+    def _has_take_profit(open_orders: list, is_long: bool) -> bool:
+        """True if a reduce-only TAKE-PROFIT order on the protective side exists.
+
+        H9 (2026-06-01 audit): espelha _has_protective_stop para o lado do TP.
+        Um long é encerrado no lucro por um SELL take_profit; um short por um BUY.
+        """
+        want_side = "sell" if is_long else "buy"
+        for o in open_orders or []:
+            typ = str(o.get("type") or "").lower()
+            info = o.get("info") or {}
+            info_type = str(info.get("type") or "").lower()
+            is_tp = "take_profit" in typ or "take_profit" in info_type
+            ro = o.get("reduceOnly")
+            if ro is None:
+                ro = info.get("reduceOnly") or info.get("reduce_only") or info.get("closePosition")
+            reduce_only = ro in (True, "true", "True", "TRUE", 1, "1")
+            oside = str(o.get("side") or "").lower()
+            if is_tp and reduce_only and oside == want_side:
                 return True
         return False
 
@@ -1166,12 +1975,46 @@ class IronMan(BaseAgent[ExecutionResult]):
         if exchange_id not in ("bybit", "binance"):
             return summary
 
-        try:
-            exchange = await self._get_ccxt_exchange(exchange_id)
-            positions = await exchange.fetch_positions()
-        except Exception as exc:  # noqa: BLE001
-            summary["errors"].append(f"connect/positions: {exc}")
-            self._log.warning(f"[IronMan/guardian] could not read positions: {exc}")
+        # M7 fix (2026-06-01 audit): retry + escalação. ANTES, uma falha em
+        # fetch_positions retornava em SILÊNCIO — em live, não conseguir ler
+        # posições significa que NÃO dá para garantir que os stops existem (risco
+        # de posição nua passar despercebida). Agora: 2 tentativas + alerta
+        # CRITICAL se ainda falhar.
+        positions = None
+        _pos_exc: Optional[Exception] = None
+        for _attempt in range(1, 3):
+            try:
+                exchange = await self._get_ccxt_exchange(exchange_id)
+                positions = await exchange.fetch_positions()
+                _pos_exc = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                _pos_exc = exc
+                self._log.warning(
+                    f"[IronMan/guardian] read positions attempt {_attempt}/2 failed: {exc}"
+                )
+                if _attempt < 2:
+                    await asyncio.sleep(float(_attempt))
+        if _pos_exc is not None or positions is None:
+            summary["errors"].append(f"connect/positions: {_pos_exc}")
+            summary["escalated"] = True
+            self._log.error(
+                f"[IronMan/guardian] could not read positions (live) — ESCALANDO: {_pos_exc}"
+            )
+            try:
+                from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+                asyncio.create_task(_TA().alert(
+                    event="GUARDIAN_POSITIONS_UNREADABLE",
+                    severity="CRITICAL",
+                    agent="IronMan",
+                    message=(
+                        f"🛡️ SL Guardian NÃO conseguiu ler posições da {exchange_id} "
+                        f"({_pos_exc}). Stops de posições abertas não puderam ser "
+                        "verificados neste ciclo — cheque conexão/clock da corretora."
+                    ),
+                ))
+            except Exception:  # noqa: BLE001
+                pass
             return summary
 
         sl_map = await self._recent_sl_map()
@@ -1193,6 +2036,14 @@ class IronMan(BaseAgent[ExecutionResult]):
                     summary["errors"].append(f"{mekka} fetch_open_orders: {exc}")
                     continue
 
+                # H9 (2026-06-01 audit): o guardian só cuidava do SL — o TP era
+                # best-effort e, se falhasse/fosse cancelado, ninguém percebia.
+                # Detecta TP ausente e REGISTRA (não recoloca: TP errado seria
+                # pior; é perda de oportunidade, não de capital). Visibilidade via
+                # summary['tp_missing'] (auditado abaixo, sem alerta Telegram).
+                if not self._has_take_profit(open_orders, is_long):
+                    summary.setdefault("tp_missing", []).append(mekka)
+
                 if self._has_protective_stop(open_orders, is_long):
                     summary["protected"] += 1
                     continue
@@ -1202,9 +2053,20 @@ class IronMan(BaseAgent[ExecutionResult]):
                 emergency = False
                 if not sl_price or sl_price <= 0:
                     emergency = True
+                    # L6 fix (2026-06-01 audit): ancorar o stop de emergência no
+                    # MARK ATUAL, não no entry. Após downtime longo o preço pode ter
+                    # andado muito e entry*(1±2%) ficaria do lado ERRADO (stop já
+                    # cruzado → trigger imediato/rejeição). O mark garante o lado
+                    # correto + buffer de 2% a partir de agora. Fallback p/ entry.
+                    _mark_g = 0.0
+                    try:
+                        _mark_g = float(p.get("markPrice") or p.get("markPx") or 0) or 0.0
+                    except Exception:  # noqa: BLE001
+                        _mark_g = 0.0
+                    _base_g = _mark_g if _mark_g > 0 else entry
                     sl_price = (
-                        entry * (1 - self._GUARDIAN_DEFAULT_SL_PCT) if is_long
-                        else entry * (1 + self._GUARDIAN_DEFAULT_SL_PCT)
+                        _base_g * (1 - self._GUARDIAN_DEFAULT_SL_PCT) if is_long
+                        else _base_g * (1 + self._GUARDIAN_DEFAULT_SL_PCT)
                     )
 
                 sl_side = "sell" if is_long else "buy"
@@ -1342,7 +2204,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                 if _sym_u in open_syms:
                     continue  # has a position; do not touch its stops
                 try:
-                    _ccxt_s = to_ccxt(_sym_u, exchange_id)  # type: ignore[arg-type]
+                    _ccxt_s = to_ccxt(_sym_u, exchange_id, market_type=self._binance_market_type_for(exchange_id))  # type: ignore[arg-type]
                     _oo = await exchange.fetch_open_orders(_ccxt_s)
                 except Exception:  # noqa: BLE001
                     continue
@@ -1433,6 +2295,11 @@ class IronMan(BaseAgent[ExecutionResult]):
                     recent_trade_symbols.add(sym_recent)
 
         db_net: dict[str, float] = defaultdict(float)
+        # L5 fix (2026-06-01 audit): acumular preço médio ponderado para o
+        # synthetic close usar um avg_price PLAUSÍVEL (entry) em vez de 0.0, que
+        # distorcia agregações de preço.
+        _px_num: dict[str, float] = defaultdict(float)
+        _px_den: dict[str, float] = defaultdict(float)
         for t in trades or []:
             if getattr(t, "is_paper", True):
                 continue
@@ -1445,6 +2312,10 @@ class IronMan(BaseAgent[ExecutionResult]):
             if not sym or qty <= 0:
                 continue
             db_net[sym] += qty if side == "long" else -qty
+            _avg = float(getattr(t, "avg_price", 0) or 0)
+            if _avg > 0:
+                _px_num[sym] += qty * _avg
+                _px_den[sym] += qty
 
         db_open = {s for s, q in db_net.items() if abs(q) > 1e-8}
         summary["checked"] = len(db_open)
@@ -1491,14 +2362,17 @@ class IronMan(BaseAgent[ExecutionResult]):
                 offset_side = "short" if is_phantom_long else "long"
                 close_qty = abs(net_qty)
 
+                # L5: preço estimado = avg entry ponderado (close ~ break-even,
+                # honesto: não sabemos o preço real do fechamento na corretora).
+                _est_px = (_px_num.get(sym, 0.0) / _px_den[sym]) if _px_den.get(sym) else 0.0
                 close_result = ExecutionResult(
                     symbol=sym,
                     status=ExecutionStatus.FILLED,
                     is_paper=False,
                     side=offset_side,
                     quantity=close_qty,
-                    avg_price=0.0,
-                    notional_usd=0.0,
+                    avg_price=round(_est_px, 6),
+                    notional_usd=round(close_qty * _est_px, 2),
                     order_id=f"PHANTOM-{sym}-{uuid.uuid4().hex[:8]}",
                     metadata={
                         "action": "phantom_reconciled",
@@ -1506,6 +2380,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                         "reason": "DB had open position, exchange did not.",
                         "original_net_qty": round(net_qty, 8),
                         "original_side": "LONG" if is_phantom_long else "SHORT",
+                        "estimated_close_price": True,
                     },
                 )
                 await MekkaRepository.save_trade(close_result)
@@ -1532,6 +2407,20 @@ class IronMan(BaseAgent[ExecutionResult]):
                         "side": "LONG" if is_phantom_long else "SHORT",
                     }
                 )
+                # Resolver memórias para o phantom fechado (fail-silent).
+                # PnL desconhecido (já foi processado pela corretora em outra sessão),
+                # passamos 0.0 — marca como NEUTRAL no AgentMemory.
+                try:
+                    from src.services.trade_outcome_resolver import resolve_trade_memories
+                    await resolve_trade_memories(
+                        symbol=sym,
+                        pnl_usd=0.0,
+                        holding_hours=None,
+                    )
+                except Exception as _rtm_exc:  # noqa: BLE001
+                    self._log.debug(
+                        f"[IronMan/reconcile_phantom] resolve_trade_memories no-op: {_rtm_exc}"
+                    )
                 try:
                     from src.services.telegram_alerter import (  # noqa: WPS433
                         TelegramAlerter as _TA,
@@ -1572,7 +2461,7 @@ class IronMan(BaseAgent[ExecutionResult]):
             )
 
         exchange = await self._get_ccxt_exchange(exchange_id)
-        ccxt_symbol = to_ccxt(to_mekka(symbol), exchange_id)  # type: ignore[arg-type]
+        ccxt_symbol = to_ccxt(to_mekka(symbol), exchange_id, market_type=self._binance_market_type_for(exchange_id))  # type: ignore[arg-type]
 
         # Confirm the live size on the venue (don't trust the caller).
         size = 0.0
@@ -1593,13 +2482,88 @@ class IronMan(BaseAgent[ExecutionResult]):
 
         is_long = side.upper() == "LONG"
         close_side = "sell" if is_long else "buy"
-        order = await exchange.create_order(
-            symbol=ccxt_symbol,
-            type="market",
-            side=close_side,
-            amount=size,
-            params={"reduceOnly": True},
-        )
+
+        # Detectar position mode (one-way vs hedge). Em one-way mode, qty
+        # MARKET sem reduceOnly fecha a posição automaticamente — essa é
+        # a rota MAIS CONFIÁVEL (validada empiricamente em 2026-05-27 após
+        # bug do Testnet com -2022 em reduceOnly).
+        is_one_way = True
+        if exchange_id == "binance":
+            try:
+                mode = await exchange.fapiPrivateGetPositionSideDual()
+                is_one_way = not bool(mode.get("dualSidePosition", False))
+            except Exception:  # noqa: BLE001
+                pass
+
+        order = None
+        errs: list[str] = []
+
+        # Calcular qty truncada ao step (necessário para MARKET_LOT_SIZE)
+        try:
+            market = exchange.market(ccxt_symbol)
+            step = float(
+                (market.get("limits", {}).get("amount", {}) or {}).get("min", 0)
+                or (market.get("precision", {}) or {}).get("amount", 0)
+                or 0.001
+            )
+            truncated = (int(size / step)) * step if step > 0 else size
+        except Exception:  # noqa: BLE001
+            step = 0.0
+            truncated = size
+
+        # Estratégia 1 — One-way mode + Binance: MARKET sem reduceOnly.
+        # Funciona mesmo quando reduceOnly está bugado no Testnet (-2022).
+        # Em one-way, a Binance auto-fecha a posição. Se qty > position,
+        # abre dust no lado oposto — por isso truncamos pra baixo no step.
+        if exchange_id == "binance" and is_one_way and truncated > 0:
+            try:
+                order = await exchange.create_order(
+                    symbol=ccxt_symbol, type="market", side=close_side,
+                    amount=truncated, params={},
+                )
+                self._log.info(
+                    f"[IronMan/{exchange_id}] manual close via MARKET (one-way "
+                    f"auto-close, no reduceOnly) qty={truncated} OK"
+                )
+            except Exception as exc:  # noqa: BLE001
+                errs.append(f"MARKET one-way no-reduceOnly: {exc}")
+
+        # Estratégia 2 — STOP_MARKET closePosition (cobre dust restante e
+        # hedge mode). Funciona se quota -4045 livre.
+        if order is None and exchange_id == "binance":
+            try:
+                ticker = await exchange.fetch_ticker(ccxt_symbol)
+                last_px = float(ticker.get("last") or ticker.get("close") or 0.0)
+                if last_px > 0:
+                    stop_px = round(last_px * (0.9995 if is_long else 1.0005), 2)
+                    order = await exchange.create_order(
+                        symbol=ccxt_symbol, type="STOP_MARKET", side=close_side,
+                        amount=size,
+                        params={
+                            "closePosition": True, "stopPrice": stop_px,
+                            "workingType": "MARK_PRICE", "priceProtect": False,
+                        },
+                    )
+                    self._log.info(
+                        f"[IronMan/{exchange_id}] manual close via STOP_MARKET "
+                        f"closePosition OK"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                errs.append(f"STOP_MARKET closePosition: {exc}")
+
+        # Estratégia 3 — MARKET reduceOnly (path histórico, fallback).
+        if order is None:
+            try:
+                order = await exchange.create_order(
+                    symbol=ccxt_symbol, type="market", side=close_side,
+                    amount=truncated or size, params={"reduceOnly": True},
+                )
+                self._log.info(
+                    f"[IronMan/{exchange_id}] manual close via reduceOnly OK"
+                )
+            except Exception as exc:  # noqa: BLE001
+                errs.append(f"MARKET reduceOnly: {exc}")
+                raise type(exc)("; ".join(errs)) from exc
         # Cancel resting SL/TP so they don't fire on a now-flat position.
         try:
             await exchange.cancel_all_orders(ccxt_symbol)
@@ -1610,6 +2574,22 @@ class IronMan(BaseAgent[ExecutionResult]):
         self._log.warning(
             f"[IronMan/{exchange_id}] manual close {symbol} {side} qty={size} @ {avg}"
         )
+
+        # Resolver memórias (fail-silent). PnL é desconhecido em close manual
+        # programático — passamos 0.0 (NEUTRAL). Cyclops/dashboard chamam
+        # resolve_trade_memories diretamente quando têm PnL real.
+        try:
+            from src.services.trade_outcome_resolver import resolve_trade_memories
+            await resolve_trade_memories(
+                symbol=symbol,
+                pnl_usd=0.0,
+                holding_hours=None,
+            )
+        except Exception as _rtm_exc:  # noqa: BLE001
+            self._log.debug(
+                f"[IronMan/close_position] resolve_trade_memories no-op: {_rtm_exc}"
+            )
+
         return ExecutionResult(
             symbol=symbol,
             status=ExecutionStatus.FILLED,
@@ -1740,7 +2720,7 @@ class IronMan(BaseAgent[ExecutionResult]):
         exchange = await self._get_ccxt_exchange(exchange_id)
         # Same defensive normalisation as the entry path — keeps the two
         # places in sync if the caller eventually passes a non-bare symbol.
-        ccxt_symbol = to_ccxt(to_mekka(symbol), exchange_id)  # type: ignore[arg-type]
+        ccxt_symbol = to_ccxt(to_mekka(symbol), exchange_id, market_type=self._binance_market_type_for(exchange_id))  # type: ignore[arg-type]
         is_buy = side.lower() == "long"
         sl_side = "sell" if is_buy else "buy"
 

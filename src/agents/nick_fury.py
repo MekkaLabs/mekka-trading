@@ -104,6 +104,10 @@ class NickFury(BaseAgent[list[CycleReport]]):
         self._stale_price_detectors: dict[str, Any] = {}
         # One spread breaker per symbol — created lazily
         self._spread_breakers: dict[str, Any] = {}
+        # Última ação (LONG/SHORT/HOLD) por símbolo — usado para detectar
+        # REVERSÃO real de direção e alertar o operador só quando importa
+        # (não no 1º ciclo, não em →HOLD). Ver bloco SIGNAL_FLIP no _cycle.
+        self._last_action_by_symbol: dict[str, str] = {}
         self._StalePriceDetector = StalePriceDetector  # keep ref for lazy init
         self._SpreadBreaker = SpreadBreaker             # keep ref for lazy init
         # Story 140 — DEGRADED_MODE formal state machine (NORMAL ↔ DEGRADED)
@@ -170,17 +174,18 @@ class NickFury(BaseAgent[list[CycleReport]]):
         except Exception as _dd_exc:  # noqa: BLE001
             self._log.debug(f"[NickFury] degradation detector skipped: {_dd_exc}")
 
-        # Restore peak_equity from DB so a mid-day restart does not hide
-        # intra-day drawdown from Batman's daily drawdown guard (Story 057).
+        # Restore the daily PnL baseline (starting + peak) from DB so a mid-day
+        # restart does not hide intra-day drawdown from Batman's daily drawdown
+        # guard (Story 057 + H3 fix 2026-06-01).
+        # ANTES: gravava em self._daily_pnl._peak_equity — um atributo MORTO que
+        # o DailyPnLWriter nunca lê (o estado real é _state.peak_equity). O peak
+        # restaurado era silenciosamente descartado e o primeiro ciclo pós-restart
+        # re-semeava a baseline com a equity já rebaixada → drawdown ≈ 0 → Batman
+        # voltava a aprovar trades num dia ruim.
         try:
-            persisted_peak = await MekkaRepository.get_today_peak_equity()
-            if persisted_peak > 0:
-                self._daily_pnl._peak_equity = persisted_peak
-                self._log.info(
-                    f"[NickFury] Restored peak_equity from DB: ${persisted_peak:,.2f}"
-                )
+            await self._daily_pnl.hydrate_from_db()
         except Exception as _exc:
-            self._log.warning(f"[NickFury] Could not restore peak_equity: {_exc}")
+            self._log.warning(f"[NickFury] Could not hydrate daily PnL baseline: {_exc}")
 
         await MekkaRepository.log_event(
             agent="NickFury",
@@ -193,6 +198,42 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 "assets": settings.trading_assets,
             },
         )
+
+        # M1 fix (2026-06-01 audit): o kill-switch de PERDA ABSOLUTA diária
+        # (max_daily_loss_usd) default 0.0 fica DESLIGADO silenciosamente. Em
+        # mainnet+live isso é um buraco de risco — alerta alto no boot (defesa em
+        # profundidade; o gate autoritativo é o preflight check_daily_loss_cap).
+        try:
+            _cap = float(getattr(settings, "max_daily_loss_usd", 0.0) or 0.0)
+            _live = not bool(settings.paper_trading)
+            _is_testnet = settings.exchange_is_testnet(settings.active_exchange)
+            if _live and not _is_testnet and _cap <= 0:
+                self._log.error(
+                    "[NickFury] MAX_DAILY_LOSS_USD=0 em MAINNET+LIVE — kill-switch de "
+                    "perda absoluta DESLIGADO. Defina um teto no .env."
+                )
+                await MekkaRepository.log_event(
+                    agent="NickFury",
+                    event="DAILY_LOSS_CAP_DISABLED",
+                    severity="CRITICAL",
+                    message="MAX_DAILY_LOSS_USD=0 em mainnet+live — kill-switch absoluto desligado.",
+                )
+                try:
+                    await self._telegram.alert(
+                        event="DAILY_LOSS_CAP_DISABLED",
+                        severity="CRITICAL",
+                        agent="NickFury",
+                        message=(
+                            "⚠️ MAINNET+LIVE com MAX_DAILY_LOSS_USD=0 — o kill-switch de "
+                            "perda absoluta diária está DESLIGADO. Defina um teto (2–5% do "
+                            "capital) no .env."
+                        ),
+                        payload={},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as _exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury] daily-loss-cap boot check skipped: {_exc}")
 
         # [Boot reconciliation + SL guardian] In live mode, a restart must not
         # leave an open position unprotected for up to a full monitor interval.
@@ -412,6 +453,47 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 severity="WARNING",
                 message="Kill switch active",
             )
+
+        # P1-1 fix (2026-05-28 audit): scalp em mainnet live só com flag
+        # explícita. Defensa contra acidente: ativar scalp em config + mainnet
+        # ao mesmo tempo abriria 120s loop com risco real.
+        # Combo perigoso: paper=False + testnet=False + modo=scalp + flag=False
+        try:
+            from src.config.runtime_mode import is_scalp_mode
+            if (is_scalp_mode()
+                    and not settings.paper_trading
+                    and not getattr(settings, "binance_testnet", True)
+                    and not getattr(settings, "scalp_mainnet_enabled", False)):
+                self._log.error(
+                    "[NickFury] BLOCK — scalp mode in live mainnet without "
+                    "SCALP_MAINNET_ENABLED=true. Set the flag explicitly to opt in."
+                )
+                await MekkaRepository.log_event(
+                    agent="NickFury",
+                    event="CYCLE_SKIPPED",
+                    severity="ERROR",
+                    message="scalp + mainnet + live without explicit enable flag",
+                    payload={
+                        "mode": "scalp",
+                        "paper_trading": False,
+                        "binance_testnet": False,
+                        "scalp_mainnet_enabled": False,
+                    },
+                )
+                try:
+                    await self._telegram.alert(
+                        event="RISK_KILL_SWITCH",
+                        severity="ERROR",
+                        agent="NickFury",
+                        message="BLOCK: scalp mode on live mainnet — set SCALP_MAINNET_ENABLED=true to opt in",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return []
+        except Exception as _scalp_gate_exc:  # noqa: BLE001
+            self._log.warning(
+                f"[NickFury] scalp_mainnet gate check no-op: {_scalp_gate_exc}"
+            )
             # Story 035 — push the kill-switch event so the operator
             # actually hears about it.
             await self._telegram.alert(
@@ -574,6 +656,43 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 "error": snapshot.error,
             },
         )
+
+        # H1 fix (2026-06-01 audit): em LIVE, NUNCA dimensionar contra um snapshot
+        # PAPER_FALLBACK (equity sintético = paper_equity_usd, positions=[]). Isso
+        # inflaria o notional contra a conta real e cegaria os gates de exposição/
+        # concorrência. Pular o ciclo de ENTRADA (não abrir trade novo) + alertar.
+        # O monitoramento de posições já abertas roda em run_monitor_cycle (caminho
+        # separado, não afetado). CLI override de equity não cobre o loop de prod.
+        if (
+            not settings.paper_trading
+            and equity_usd is None
+            and snapshot.source == EquitySource.PAPER_FALLBACK
+        ):
+            self._log.error(
+                "[NickFury] Snapshot PAPER_FALLBACK em LIVE — ciclo de entrada "
+                f"PULADO (sizing sintético inaceitável com dinheiro real). erro={snapshot.error}"
+            )
+            await MekkaRepository.log_event(
+                agent="NickFury",
+                event="LIVE_CYCLE_SKIPPED_DEGRADED",
+                severity="CRITICAL",
+                message=f"Live entry cycle skipped: PAPER_FALLBACK / {snapshot.error}",
+            )
+            try:
+                from src.services.telegram_alerter import TelegramAlerter as _TA  # noqa: WPS433
+                asyncio.create_task(_TA().alert(
+                    event="LIVE_SNAPSHOT_DEGRADED",
+                    severity="CRITICAL",
+                    agent="NickFury",
+                    message=(
+                        "⛔ Snapshot de equity caiu em PAPER_FALLBACK em modo LIVE. "
+                        "Nenhum trade novo foi aberto neste ciclo. Verifique conexão/clock "
+                        "da corretora (InvalidNonce -1021?)."
+                    ),
+                ))
+            except Exception:  # noqa: BLE001
+                pass
+            return []
 
         # CLI override wins over Portfolio Manager. Otherwise use snapshot.
         effective_equity = (
@@ -1300,6 +1419,25 @@ class NickFury(BaseAgent[list[CycleReport]]):
             if _bskip:
                 _budget_skipped = True
                 self._log.warning(f"[NickFury:189] CycleBudgetGuard → HOLD: {_breason}")
+                # Alerta o operador UMA vez por sessão: o guard de custo pausou
+                # as chamadas de LLM (proteção de créditos). Antes era silencioso.
+                if not getattr(self, "_budget_alert_sent", False):
+                    self._budget_alert_sent = True
+                    try:
+                        from src.services.telegram_alerter import TelegramAlerter
+                        await TelegramAlerter().alert(
+                            event="LLM_BUDGET_EXCEEDED",
+                            severity="WARNING",
+                            agent="NickFury",
+                            symbol=symbol,
+                            message=(
+                                f"Orçamento de LLM da sessão atingido — trades "
+                                f"forçados a HOLD (sem chamada de IA) para proteger "
+                                f"créditos. {_breason}"
+                            ),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
         except Exception as _bg189_exc:  # noqa: BLE001
             self._log.debug(f"[NickFury:189] CycleBudgetGuard check skipped: {_bg189_exc}")
 
@@ -1763,30 +1901,46 @@ class NickFury(BaseAgent[list[CycleReport]]):
                 # we record this signal now and compare on the next cycle.
             _change_record = _scl.record(
                 symbol=symbol,
-                prev=None,        # first cycle: all-new
+                prev=None,        # diff histórico (registro por ciclo)
                 curr=signal,
                 curr_cycle_id=_cycle_id,
             )
-            # On action flip (LONG↔SHORT): log prominently + push Telegram alert
-            if _change_record.has_action_change:
-                _commit_msg = _change_record.commit_message()
-                self._log.info(f"[NickFury:167] ACTION FLIP {symbol}: {_commit_msg}")
+
+            # Detecção de REVERSÃO real de direção (LONG↔SHORT). O diff do
+            # changelog acima usa prev=None (registro), então NÃO é confiável
+            # para "flip" — comparamos contra a última ação REAL do símbolo.
+            # Regras: só alerta quando antes E agora são direções opostas.
+            # 1º ciclo (sem ação anterior), →HOLD ou HOLD→ NÃO disparam alerta.
+            _DIRECTIONS = {"LONG", "SHORT", "BUY", "SELL"}
+            _curr_action = getattr(getattr(signal, "action", None), "value", None)
+            _curr_action = (_curr_action or "").upper()
+            _prev_action = self._last_action_by_symbol.get(symbol, "")
+            _is_real_flip = (
+                _prev_action in _DIRECTIONS
+                and _curr_action in _DIRECTIONS
+                and _prev_action != _curr_action
+            )
+            if _is_real_flip:
+                _from = "compra" if _prev_action in ("LONG", "BUY") else "venda"
+                _to = "compra" if _curr_action in ("LONG", "BUY") else "venda"
+                _human = f"A IA inverteu de {_from} para {_to} no {symbol}."
+                self._log.info(f"[NickFury:167] ACTION FLIP {symbol}: {_prev_action}→{_curr_action}")
                 await MekkaRepository.log_event(
                     agent="NickFury",
                     event="SIGNAL_FLIP",
                     severity="WARNING",
                     symbol=symbol,
-                    message=_commit_msg,
+                    message=f"{_prev_action}→{_curr_action}",
                     payload=_change_record.to_dict(),
                 )
                 try:
+                    # Mensagem curta e leiga — sem diff técnico no Telegram.
                     await self._telegram.alert(
                         event="SIGNAL_FLIP",
                         severity="WARNING",
                         agent="Vision",
                         symbol=symbol,
-                        message=_commit_msg,
-                        payload={"diff": _change_record.to_search_replace_block()[:500]},
+                        message=_human,
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -1795,6 +1949,10 @@ class NickFury(BaseAgent[list[CycleReport]]):
                     f"[NickFury:167] {symbol} changelog: "
                     f"{_change_record.to_audit_line()}"
                 )
+
+            # Atualiza a última ação observada (para o próximo ciclo).
+            if _curr_action:
+                self._last_action_by_symbol[symbol] = _curr_action
         except Exception as _scl_exc:  # noqa: BLE001
             self._log.debug(f"[NickFury:167] SignalChangeLog skipped: {_scl_exc}")
 
@@ -2064,7 +2222,13 @@ class NickFury(BaseAgent[list[CycleReport]]):
         # Request operator confirmation via Telegram before IronMan executes.
         # Story 127 adds LangGraph interrupt() path when lg_thread_id is set.
         # Falls open: any non-BaseException error skips the gate and proceeds.
-        if settings.telegram_trade_approval_enabled:
+        #
+        # Operation Mode (2026-06-01): o gate humano é dirigido por
+        # operation_mode — manual exige confirmação, automatic auto-executa.
+        # Os gates de risco do Batman/kill-switch já rodaram acima e seguem
+        # valendo em ambos os modos; aqui removemos apenas a camada HUMANA.
+        from src.config.operation_mode import requires_trade_approval  # noqa: WPS433
+        if requires_trade_approval():
             try:
                 import uuid as _uuid  # noqa: WPS433
                 _trade_id = f"T-{_uuid.uuid4().hex[:10].upper()}"
@@ -2137,14 +2301,155 @@ class NickFury(BaseAgent[list[CycleReport]]):
             except Exception as _appr_exc:  # noqa: BLE001
                 # Note: NodeInterrupt inherits from BaseException — NOT caught here.
                 self._log.warning("[NickFury] Trade approval gate error (skipped): %s", _appr_exc)
+        else:
+            # Modo automatic: sem gate humano. Os gates de risco do Batman/
+            # kill-switch já aprovaram acima. Log para auditoria/observabilidade.
+            self._log.info(
+                "[NickFury] AUTO mode — trade %s %s auto-aprovado (sem gate humano)",
+                signal.action.value, symbol,
+            )
+
+        # 3.9 Guard de decisão obsoleta (stale-price, 2026-06-02)
+        # Entre a decisão do Vision e este ponto pode ter passado tempo (espera
+        # de aprovação no Telegram, até 120s). Se o mercado andou demais, a tese
+        # e o SL/TP (calculados do entry antigo) ficaram obsoletos — cancela.
+        # Best-effort: sem preço atual disponível, não bloqueia (não derruba por
+        # feed transitoriamente ausente).
+        try:
+            _drift_lim = float(getattr(settings, "max_entry_price_drift_pct", 0.0) or 0.0)
+            _entry_px = float(getattr(signal, "entry_price", 0) or 0)
+            if _drift_lim > 0 and _entry_px > 0:
+                _mids = await self._fetch_current_mids([symbol])
+                _cur = float(_mids.get(symbol, 0) or 0)
+                if _cur > 0:
+                    _drift = self._entry_drift_pct(_entry_px, _cur)
+                    if _drift > _drift_lim:
+                        self._log.warning(
+                            "[NickFury] STALE entry %s: mercado %.4f vs entry %.4f "
+                            "(drift %.2f%% > %.2f%%) — execução cancelada",
+                            symbol, _cur, _entry_px, _drift * 100, _drift_lim * 100,
+                        )
+                        await MekkaRepository.log_event(
+                            agent="NickFury",
+                            event="ENTRY_STALE_PRICE",
+                            severity="WARNING",
+                            symbol=symbol,
+                            message=(
+                                f"Entrada cancelada: drift {_drift:.2%} "
+                                f"(mercado {_cur:.4f} vs entry {_entry_px:.4f})"
+                            ),
+                            payload={"symbol": symbol, "current": _cur,
+                                     "entry": _entry_px, "drift_pct": round(_drift, 5)},
+                        )
+                        return CycleReport(symbol=symbol, signal=signal, approval=approval)
+        except Exception as _drift_exc:  # noqa: BLE001
+            self._log.debug("[NickFury] stale-price guard skipped: %s", _drift_exc)
 
         # 4. Iron Man execution
-        execution = await self._ironman.run(
-            signal=signal,
-            approval=approval,
-            equity_usd=equity_usd,
+        # H6 outbox COMPLETO (2026-06-01 audit): grava uma linha PENDING ANTES de
+        # a ordem ir à corretora. Se o processo cair entre a colocação da ordem e
+        # o registro final, a linha PENDING sobrevive e o reaper a detecta — vs.
+        # uma posição órfã sem NENHUM registro (os gates do Batman não a contam →
+        # risco de entrada duplicada). Degradação segura: se o pending falhar
+        # (None), o finalize cai para save_trade (insert) = comportamento anterior.
+        _side_hint = (
+            "long" if signal.action == TradeAction.LONG
+            else ("short" if signal.action == TradeAction.SHORT else None)
         )
-        await MekkaRepository.save_trade(execution=execution, signal_id=signal_id)
+        _pending_id = await MekkaRepository.save_pending_trade(
+            signal_id=signal_id,
+            symbol=symbol,
+            side=_side_hint,
+            quantity=0.0,
+            is_paper=settings.paper_trading,
+            cycle_id=str(
+                (approval.metadata or {}).get("cycle_id")
+                or getattr(signal, "snapshot_id", "")
+                or ""
+            ),
+        )
+
+        try:
+            execution = await self._ironman.run(
+                signal=signal,
+                approval=approval,
+                equity_usd=equity_usd,
+            )
+        except Exception as _run_exc:  # noqa: BLE001
+            # Review-fix (2026-06-01): IronMan.run pode LEVANTAR (AgentError/
+            # timeout) — em geral ANTES de qualquer ordem chegar à corretora.
+            # Sem tratamento, a linha PENDING ficava dangling e o reaper a marcava
+            # ORPHAN + Telegram CRITICAL (falso-órfão, ruído). Finaliza o PENDING
+            # como ERROR para não disparar o alerta falso; uma posição real na
+            # corretora (caso raro: exceção pós-ordem) continua protegida pelo SL
+            # guardian + phantom recon. Re-levanta para o tratamento do caller.
+            try:
+                from src.models.execution import ExecutionResult as _ER, ExecutionStatus as _ES  # noqa: WPS433
+                await MekkaRepository.finalize_trade(
+                    _pending_id,
+                    execution=_ER(
+                        symbol=symbol,
+                        status=_ES.ERROR,
+                        is_paper=settings.paper_trading,
+                        side=_side_hint,
+                        error=f"IronMan.run raised: {_run_exc}",
+                    ),
+                    signal_id=signal_id,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+
+        # Finaliza a linha PENDING com o resultado real. Se a gravação falhar,
+        # retry + alerta CRITICAL anti-órfão. finalize_trade degrada para insert
+        # se o pending não existir (nunca perde o registro).
+        _saved = False
+        for _save_attempt in range(1, 3):
+            try:
+                await MekkaRepository.finalize_trade(
+                    _pending_id, execution=execution, signal_id=signal_id
+                )
+                _saved = True
+                break
+            except Exception as _save_exc:  # noqa: BLE001
+                self._log.error(
+                    f"[NickFury] finalize_trade attempt {_save_attempt}/2 failed for {symbol}: {_save_exc}"
+                )
+        if not _saved:
+            _is_real_open = (
+                not execution.is_paper
+                and execution.status in (ExecutionStatus.FILLED, ExecutionStatus.PARTIAL)
+            )
+            try:
+                await MekkaRepository.log_event(
+                    agent="NickFury",
+                    event="TRADE_SAVE_FAILED",
+                    severity="CRITICAL" if _is_real_open else "ERROR",
+                    symbol=symbol,
+                    message=f"save_trade falhou — possível posição órfã no DB: {execution.summary()}",
+                    payload={
+                        "order_id": getattr(execution, "order_id", None),
+                        "is_paper": execution.is_paper,
+                        "status": execution.status.value,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            if _is_real_open:
+                try:
+                    await self._telegram.alert(
+                        event="TRADE_SAVE_FAILED",
+                        severity="CRITICAL",
+                        agent="NickFury",
+                        message=(
+                            f"🚨 {symbol}: ordem REAL preenchida mas NÃO gravada no DB "
+                            f"(order_id={getattr(execution, 'order_id', None)}). Posição órfã — "
+                            "RECONCILIE MANUALMENTE antes do próximo ciclo (risco de entrada duplicada)."
+                        ),
+                        payload={},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
         await MekkaRepository.log_event(
             agent="IronMan",
@@ -2522,6 +2827,14 @@ class NickFury(BaseAgent[list[CycleReport]]):
     # Market price helper (for Wolverine real-time drawdown)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _entry_drift_pct(entry_px: float, current_px: float) -> float:
+        """Fração de desvio entre o preço atual e o entry planejado.
+        0 se entry inválido. Usado pelo guard de decisão obsoleta."""
+        if entry_px <= 0 or current_px <= 0:
+            return 0.0
+        return abs(current_px - entry_px) / entry_px
+
     async def _fetch_current_mids(self, symbols: list[str]) -> dict[str, float]:
         """
         Fetch last mid-prices for ``symbols`` from Hyperliquid public REST.
@@ -2651,7 +2964,8 @@ class NickFury(BaseAgent[list[CycleReport]]):
             try:
                 from src.agents.iron_man import IronMan  # noqa: WPS433
                 sl_guardian = await IronMan().ensure_stops_for_open_positions()
-                if sl_guardian.get("replaced") or sl_guardian.get("errors"):
+                _tp_missing = sl_guardian.get("tp_missing") or []
+                if sl_guardian.get("replaced") or sl_guardian.get("errors") or _tp_missing:
                     await MekkaRepository.log_event(
                         agent="IronMan",
                         event="SL_GUARDIAN",
@@ -2660,7 +2974,8 @@ class NickFury(BaseAgent[list[CycleReport]]):
                             f"SL guardian: checked={sl_guardian.get('checked')} "
                             f"protected={sl_guardian.get('protected')} "
                             f"replaced={len(sl_guardian.get('replaced') or [])} "
-                            f"errors={len(sl_guardian.get('errors') or [])}"
+                            f"errors={len(sl_guardian.get('errors') or [])} "
+                            f"tp_missing={len(_tp_missing)}"
                         ),
                         payload=sl_guardian,
                     )
@@ -2691,6 +3006,56 @@ class NickFury(BaseAgent[list[CycleReport]]):
             except Exception as _exc:  # noqa: BLE001
                 self._log.warning(f"[NickFury] Phantom reconciliation skipped: {_exc}")
 
+        # [C4b] H8 (2026-06-01 audit) — monitor de proximidade de liquidação.
+        # liquidation_price já era lido/exibido mas NENHUM agente agia: um SL
+        # cancelado/falho + vela rápida entre ciclos podia liquidar (perda total
+        # da margem) sem aviso. Agora alerta CRITICAL quando o mark está a menos
+        # de liq_proximity_alert_pct da liquidação. Best-effort; só live.
+        if not settings.paper_trading:
+            try:
+                await self._check_liquidation_proximity(snapshot)
+            except Exception as _exc:  # noqa: BLE001
+                self._log.warning(f"[NickFury] liq proximity check skipped: {_exc}")
+
+        # [C4c] H7 (2026-06-01 audit) — reconciliador de PnL de closes LIVE.
+        # Closes por bracket (SL/TP na corretora) não passam pelo nosso código →
+        # ficavam com pnl_usd=NULL no DB, cegando Beast/leaderboards/win-rate.
+        # Busca fills realizados desde um cursor e grava o realizedPnl real.
+        if not settings.paper_trading:
+            try:
+                await self._reconcile_live_close_pnl()
+            except Exception as _exc:  # noqa: BLE001
+                self._log.warning(f"[NickFury] live close PnL reconcile skipped: {_exc}")
+
+        # [C4d] H6 outbox reaper — detecta linhas PENDING órfãs (o processo caiu
+        # entre a ordem e a finalização). Marca como ORPHAN e alerta CRITICAL: a
+        # posição pode estar aberta na corretora sem registro completo.
+        try:
+            _orphans = await MekkaRepository.reap_stale_pending_trades(max_age_seconds=600)
+            if _orphans:
+                await MekkaRepository.log_event(
+                    agent="NickFury",
+                    event="PENDING_TRADE_ORPHANED",
+                    severity="CRITICAL",
+                    message=f"{len(_orphans)} trade(s) PENDING órfão(s) → marcados ORPHAN: {_orphans}",
+                    payload={"orphans": _orphans},
+                )
+                try:
+                    await self._telegram.alert(
+                        event="PENDING_TRADE_ORPHANED",
+                        severity="CRITICAL",
+                        agent="NickFury",
+                        message=(
+                            f"🚨 {len(_orphans)} ordem(ns) PENDING sem finalização (provável "
+                            "crash mid-execução). Verifique posições abertas na corretora vs DB."
+                        ),
+                        payload={},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as _exc:  # noqa: BLE001
+            self._log.warning(f"[NickFury] pending reaper skipped: {_exc}")
+
         # [C5] Mentor — Charles Xavier: distila resolved outcomes + rejections
         # + drawdown em ParameterSuggestion. Read-only; só audita se houver
         # sugestão (zero spam). Roda a cada monitor cycle (~5min) — leve
@@ -2717,6 +3082,154 @@ class NickFury(BaseAgent[list[CycleReport]]):
             "phantom_recon": phantom_recon,
             "mentor": mentor_summary,
         }
+
+    async def _check_liquidation_proximity(self, snapshot) -> None:
+        """H8 (2026-06-01 audit) — alerta CRITICAL quando o mark de uma posição
+        live está a menos de ``liq_proximity_alert_pct`` da liquidação.
+
+        liquidation_price já vinha no snapshot mas nenhum agente agia. Quando o
+        Binance cross-margin não reporta liq (liq=None), o símbolo é pulado
+        (limitação conhecida). Best-effort; nunca levanta.
+        """
+        thr = float(getattr(settings, "liq_proximity_alert_pct", 0.05) or 0.05)
+        for p in (snapshot.positions or []):
+            mark = float(getattr(p, "mark_price", None) or 0.0)
+            liq = float(getattr(p, "liquidation_price", None) or 0.0)
+            if mark <= 0 or liq <= 0:
+                continue
+            dist = abs(mark - liq) / mark
+            if dist >= thr:
+                continue
+            self._log.error(
+                f"[NickFury] {p.symbol} PERTO DA LIQUIDAÇÃO: mark={mark} liq={liq} "
+                f"({dist * 100:.2f}% < {thr * 100:.1f}%)"
+            )
+            try:
+                await MekkaRepository.log_event(
+                    agent="NickFury",
+                    event="LIQUIDATION_PROXIMITY",
+                    severity="CRITICAL",
+                    symbol=p.symbol,
+                    message=(
+                        f"{p.symbol} a {dist * 100:.2f}% da liquidação "
+                        f"(mark={mark}, liq={liq})"
+                    ),
+                    payload={"mark": mark, "liq": liq, "distance_pct": round(dist, 4)},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                await self._telegram.alert(
+                    event="LIQUIDATION_PROXIMITY",
+                    severity="CRITICAL",
+                    agent="NickFury",
+                    symbol=p.symbol,
+                    message=(
+                        f"🔥 {p.symbol} PERTO DA LIQUIDAÇÃO: mark ${mark:,.2f} vs "
+                        f"liq ${liq:,.2f} ({dist * 100:.2f}% < {thr * 100:.1f}%). "
+                        "Considere de-riscar/fechar."
+                    ),
+                    payload={},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _reconcile_live_close_pnl(self) -> None:
+        """H7 (2026-06-01 audit) — grava o PnL realizado de closes LIVE.
+
+        Closes por bracket (SL/TP na corretora) não passam pelo nosso código →
+        ficavam com pnl_usd=NULL, cegando Beast/leaderboards/win-rate. Lê
+        ``fetch_my_trades`` desde um cursor persistido (data/live_pnl_cursor.json)
+        para cada ativo configurado (o símbolo pode já não estar aberto) e emite
+        um audit ``LIVE_PNL_RECONCILED`` com o realizedPnl real. Best-effort;
+        nunca levanta. Atribuição por-trade fica como follow-up.
+        """
+        import json as _json
+        import time as _time
+        from pathlib import Path as _Path
+
+        exchange_id = settings.active_exchange
+        if exchange_id not in ("bybit", "binance"):
+            return
+
+        cursor_file = _Path("data/live_pnl_cursor.json")
+        try:
+            cursor = int(_json.loads(cursor_file.read_text()).get("since_ms", 0) or 0)
+        except Exception:  # noqa: BLE001
+            cursor = 0
+        # Sem cursor: começa nas últimas 24h para não varrer o histórico todo.
+        if cursor <= 0:
+            cursor = int((_time.time() - 24 * 3600) * 1000)
+
+        try:
+            from src.agents.iron_man import IronMan as _IM  # noqa: WPS433
+            from src.services.market_registry import to_ccxt  # noqa: WPS433
+            exchange = await _IM()._get_ccxt_exchange(exchange_id)
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[NickFury] H7: exchange indisponível: {exc}")
+            return
+
+        max_ts = cursor
+        for sym in settings.trading_assets:
+            try:
+                ccxt_sym = to_ccxt(sym, exchange_id)  # type: ignore[arg-type]
+                fills = await exchange.fetch_my_trades(ccxt_sym, since=cursor, limit=200)
+            except Exception as exc:  # noqa: BLE001
+                self._log.debug(f"[NickFury] H7: fetch_my_trades {sym} falhou: {exc}")
+                continue
+            realized = 0.0
+            n = 0
+            for f in (fills or []):
+                info = f.get("info") or {}
+                rp = info.get("realizedPnl")
+                if rp is None:
+                    continue
+                try:
+                    rpf = float(rp)
+                except (TypeError, ValueError):
+                    continue
+                ts = int(f.get("timestamp") or 0)
+                if ts > max_ts:
+                    max_ts = ts
+                if rpf == 0.0:
+                    continue
+                realized += rpf
+                n += 1
+            if n > 0:
+                # H7 atribuição por-trade (2026-06-01 audit): grava o realizedPnl
+                # no trade de abertura mais recente do símbolo (pnl_usd=NULL), não
+                # só no audit agregado. Cobre o caso comum 1-posição-por-símbolo.
+                _attributed_id = None
+                try:
+                    _attributed_id = await MekkaRepository.attribute_realized_pnl(sym, realized)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    await MekkaRepository.log_event(
+                        agent="NickFury",
+                        event="LIVE_PNL_RECONCILED",
+                        severity="INFO",
+                        symbol=sym,
+                        message=(
+                            f"{sym}: realized PnL ${realized:+.2f} em {n} fills (brackets live)"
+                            + (f" → trade #{_attributed_id}" if _attributed_id else "")
+                        ),
+                        payload={
+                            "symbol": sym,
+                            "realized_pnl_usd": round(realized, 4),
+                            "fills": n,
+                            "attributed_trade_id": _attributed_id,
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if max_ts > cursor:
+            try:
+                cursor_file.parent.mkdir(parents=True, exist_ok=True)
+                cursor_file.write_text(_json.dumps({"since_ms": int(max_ts)}))
+            except Exception:  # noqa: BLE001
+                pass
 
     async def _execute_recovery_plan(
         self,
@@ -2984,14 +3497,24 @@ async def run_forever(equity_usd: Optional[float] = None) -> None:
     await fury.initialize()
 
     monitor_interval = settings.monitor_interval_seconds
-    main_interval = settings.main_loop_interval_seconds
     last_main_at = 0.0
 
     try:
         while True:
             now = asyncio.get_event_loop().time()
+            # Mode-aware loop interval: scalp mode roda em ~2min (preset value),
+            # outros modos usam o default de settings.py (4h). Lemos a cada
+            # iteração para que mode-switch via /api/mode tenha efeito imediato
+            # no próximo loop sem precisar restart do dashboard.
+            try:
+                from src.config.runtime_mode import get_params as _get_mode_params
+                _mode_interval = _get_mode_params().get("main_loop_interval_seconds")
+                main_interval = int(_mode_interval) if _mode_interval else settings.main_loop_interval_seconds
+            except Exception:
+                main_interval = settings.main_loop_interval_seconds
+
             if now - last_main_at >= main_interval:
-                logger.info("[NickFury] Starting main cycle")
+                logger.info(f"[NickFury] Starting main cycle (interval={main_interval}s)")
                 await fury.run_main_cycle(equity_usd=equity_usd)
                 last_main_at = now
             else:

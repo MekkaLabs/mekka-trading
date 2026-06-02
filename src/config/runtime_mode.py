@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,19 @@ _log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Presets
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Campos opcionais (no-op em modos swing, ativos em scalp). Documentados aqui
+# pra qualquer agente que ler PRESETS saber o contrato:
+#
+#   max_trades_per_hour: int | None        # Batman gate (None = sem cap horário)
+#   max_position_age_minutes: int | None   # Cyclops time-stop (None = sem limite)
+#   scalp_primary_timeframe: str | None    # Superman tf override (None = settings)
+#   scalp_confirmation_timeframe: str | None
+#   main_loop_interval_seconds: int | None # NickFury loop (None = settings)
+#   flash_is_proposer: bool                # Flash entra no MarketAnalysis
+#   min_atr_pct_for_entry: float | None    # Batman gate (vol mínima)
 # ---------------------------------------------------------------------------
 
 PRESETS: dict[str, dict[str, Any]] = {
@@ -52,6 +66,14 @@ PRESETS: dict[str, dict[str, Any]] = {
         # and hard-reject after M. Conservative = tightest limits.
         "correlation_penalty_threshold": 1,   # 1st same-dir → 60% size reduction
         "correlation_reject_threshold": 2,    # 2nd same-dir → REJECT
+        # Scalp fields — no-op em swing
+        "max_trades_per_hour": None,
+        "max_position_age_minutes": None,
+        "scalp_primary_timeframe": None,
+        "scalp_confirmation_timeframe": None,
+        "main_loop_interval_seconds": 7200,   # 2h (conservador — ritmo lento)
+        "flash_is_proposer": False,
+        "min_atr_pct_for_entry": None,
     },
     "balanced": {
         "label": "⚖️ Balanceado",
@@ -69,6 +91,14 @@ PRESETS: dict[str, dict[str, Any]] = {
         # Story 057 — Correlation gate
         "correlation_penalty_threshold": 1,   # 1st same-dir → 50% size reduction
         "correlation_reject_threshold": 2,    # 2nd same-dir → REJECT
+        # Scalp fields — no-op em swing
+        "max_trades_per_hour": None,
+        "max_position_age_minutes": None,
+        "scalp_primary_timeframe": None,
+        "scalp_confirmation_timeframe": None,
+        "main_loop_interval_seconds": 3600,   # 1h (balanceado)
+        "flash_is_proposer": False,
+        "min_atr_pct_for_entry": None,
     },
     "aggressive": {
         "label": "⚡ Agressivo",
@@ -86,11 +116,60 @@ PRESETS: dict[str, dict[str, Any]] = {
         # Story 057 — Correlation gate: relaxed in aggressive mode
         "correlation_penalty_threshold": 2,   # 2nd same-dir → 40% size reduction
         "correlation_reject_threshold": 3,    # 3rd same-dir → REJECT
+        # Scalp fields — no-op em swing
+        "max_trades_per_hour": None,
+        "max_position_age_minutes": None,
+        "scalp_primary_timeframe": None,
+        "scalp_confirmation_timeframe": None,
+        "main_loop_interval_seconds": 1800,   # 30min (agressivo — ritmo rápido)
+        "flash_is_proposer": False,
+        "min_atr_pct_for_entry": None,
+    },
+    "scalp": {
+        "label": "⚡⚡ Scalp",
+        "description": (
+            "Intraday curto — timeframes pequenos (5m/1m), loop rápido (2min), "
+            "max 6 trades/hora, time-stop 30min, Flash como proposer ativo. "
+            "MVP recomendado em paper/testnet."
+        ),
+        # Risk caps — apertados (posição pequena, leverage baixo)
+        "max_position_size_pct": 0.01,    # 1% (menor que aggressive)
+        "max_leverage": 3,
+        "max_leverage_high_regime": 2,
+        "max_leverage_extreme_regime": 1,
+        "max_daily_drawdown_pct": 0.04,   # 4% (mais apertado pq mais trades)
+        "max_trades_per_day": 30,         # várias entradas/dia
+        "trading_assets": ["BTC", "ETH"], # só os mais líquidos
+        "min_risk_reward_ratio": 1.0,     # scalp aceita R:R 1:1 (alta freq compensa)
+        # VisionCritic mais permissivo — modo permite mais trades
+        "vision_critic_min_disagreement": 0.50,
+        # Correlation: stricter (não quer N positions same-dir em scalp)
+        "correlation_penalty_threshold": 1,
+        "correlation_reject_threshold": 2,
+        # Scalp-specific fields — ativos
+        "max_trades_per_hour": 6,           # Batman cap horário
+        "max_position_age_minutes": 30,     # Cyclops time-stop
+        "scalp_primary_timeframe": "5m",
+        "scalp_confirmation_timeframe": "1m",
+        "main_loop_interval_seconds": 120,  # 2min loop (vs 4h em swing)
+        "flash_is_proposer": True,          # Flash entra no MarketAnalysis
+        "min_atr_pct_for_entry": 0.0015,    # 0.15% ATR mínimo — evita range morto
     },
 }
 
 VALID_MODES = list(PRESETS.keys())
 DEFAULT_MODE = "balanced"
+
+# Modos que devem ativar o scalp pipeline (timeframes curtos, Flash proposer).
+# Future-proof: se criarmos scalp-aggressive ou scalp-conservative, basta
+# adicionar aqui sem editar quem lê.
+SCALP_MODES = frozenset({"scalp"})
+
+
+def is_scalp_mode(mode: str | None = None) -> bool:
+    """True quando o modo ativo (ou explícito) é uma variante scalp."""
+    m = mode if mode is not None else _current_mode
+    return m in SCALP_MODES
 
 # ---------------------------------------------------------------------------
 # Persistence path
@@ -153,6 +232,33 @@ def get_preset(mode: str) -> dict[str, Any]:
     if mode not in PRESETS:
         raise ValueError(f"Unknown mode '{mode}'. Valid: {VALID_MODES}")
     return dict(PRESETS[mode])
+
+
+# P1-4 (2026-05-28 audit): snapshot atômico para uso por orquestradores
+# que precisam de consistência mid-cycle. Agentes individuais que chamam
+# get_mode() + get_params() separadamente podem ler valores divergentes
+# se operador troca mode entre as 2 chamadas. snapshot_mode() retorna
+# ambos sob o mesmo lock.
+
+
+def snapshot_mode() -> dict[str, Any]:
+    """Snapshot atômico de mode + params + is_scalp. Use isto em loops
+    de orquestração (NickFury cycle) e passe o resultado pra agentes
+    via parâmetro em vez de cada um chamar get_*().
+
+    Returns:
+        {"mode": str, "params": dict, "is_scalp": bool, "snapshot_at": str}
+    """
+    _ensure_loaded()
+    with _lock:
+        mode = _current_mode
+        params = dict(PRESETS[mode])
+    return {
+        "mode": mode,
+        "params": params,
+        "is_scalp": mode in SCALP_MODES,
+        "snapshot_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def set_mode(mode: str) -> dict[str, Any]:

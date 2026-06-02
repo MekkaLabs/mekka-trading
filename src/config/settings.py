@@ -69,6 +69,15 @@ class Settings(BaseSettings):
         default="",
         description="Anthropic API key (sk-ant-...). Used as fallback when OpenAI fails or is not set.",
     )
+    llm_prefer_anthropic: bool = Field(
+        default=True,
+        description=(
+            "Quando True (default 2026-06-02), o LLM tenta Anthropic Claude PRIMEIRO "
+            "e cai para OpenAI se Claude falhar/estiver ausente. False inverte "
+            "(OpenAI primeiro, Claude fallback). A ordem efetiva sempre pula "
+            "providers não configurados."
+        ),
+    )
     anthropic_model: str = Field(
         default="claude-sonnet-4-6",
         description="Claude model for Vision fallback (e.g. claude-sonnet-4-6, claude-opus-4-6)",
@@ -169,12 +178,52 @@ class Settings(BaseSettings):
             "testnet endpoints. Default True to match BYBIT_TESTNET safety posture."
         ),
     )
+    binance_market_type: Literal["linear", "inverse"] = Field(
+        default="linear",
+        alias="BINANCE_MARKET_TYPE",
+        description=(
+            "Binance Futures market type:\n"
+            "  - 'linear' (default): USDT-Margined Futures (BTCUSDT, ETHUSDT). "
+            "    Settled em USDT; PnL em USD. fapi.binance.com endpoint.\n"
+            "  - 'inverse': COIN-Margined Futures (BTCUSD_PERP). Settled em coin "
+            "    (BTC, ETH); PnL em coin convertido para USD via mark price. "
+            "    dapi.binance.com endpoint.\n"
+            "Hot-swap requer reconnect do CCXT client em IronMan (cache invalidation "
+            "automática quando setting muda). NÃO mude com posições abertas — "
+            "validator do trade_now bloqueia. Affects market_registry.to_ccxt "
+            "(symbol formato) e contract_sizer (quantity calculation)."
+        ),
+    )
+    scalp_mainnet_enabled: bool = Field(
+        default=False,
+        alias="SCALP_MAINNET_ENABLED",
+        description=(
+            "Hard gate adicional para o Modo Scalp: quando False (default), "
+            "qualquer trade em modo='scalp' + paper_trading=False + binance_testnet=False "
+            "é BLOQUEADO. Razão: scalp em loop 120s pode explodir custos LLM e "
+            "ainda não foi validado em condições mainnet. Setar True só depois "
+            "de validar end-to-end em testnet e estar confortável com o gasto."
+        ),
+    )
+    entry_maker_wait_seconds: float = Field(
+        default=8.0,
+        ge=1.0,
+        le=120.0,
+        description=(
+            "Quando binance_entry_order_type='limit_maker': segundos que o IronMan "
+            "espera a ordem post-only (maker, economiza taxa) preencher antes de "
+            "cancelar e cair para limit_ioc (taker). Nunca perde a entrada — só "
+            "tenta a taxa de maker primeiro."
+        ),
+    )
     binance_entry_order_type: str = Field(
         default="auto",
         description=(
-            "Entry order type for CCXT execution: 'auto' | 'market' | 'limit_ioc'. "
-            "'auto' resolves to 'market' on testnet (reliable fills so the full flow "
-            "can be tested) and 'limit_ioc' on mainnet (slippage control)."
+            "Entry order type for CCXT execution: 'auto' | 'market' | 'limit_ioc' "
+            "| 'limit_maker'. 'auto' → 'market' on testnet, 'limit_ioc' on mainnet. "
+            "'limit_maker' posta uma ordem post-only no touch (economiza taxa de "
+            "maker) e cai para limit_ioc se não encher em entry_maker_wait_seconds "
+            "— nunca perde a entrada."
         ),
     )
     binance_max_entry_slippage_bps: float = Field(
@@ -183,6 +232,97 @@ class Settings(BaseSettings):
             "Max slippage (basis points) for a mainnet limit-IOC entry. The entry "
             "limit is priced to CROSS the book by up to this much (buy=ask*(1+bps), "
             "sell=bid*(1-bps)) so it fills reliably while capping slippage. 20 = 0.20%."
+        ),
+    )
+    execution_slippage_alert_bps: float = Field(
+        default=30.0,
+        ge=0.0,
+        description=(
+            "Realized entry-slippage threshold (bps) for execution-quality "
+            "alerting/learning. After a LIVE fill, IronMan compares the avg fill "
+            "price vs the planned entry; if the realized slippage exceeds this, it "
+            "logs a WARNING, emits an alert and records a lesson in its journal. "
+            "Measurement-only (does not block — the IOC limit already caps placement)."
+        ),
+    )
+    max_entry_price_drift_pct: float = Field(
+        default=0.01,
+        ge=0.0,
+        description=(
+            "Guard de decisão obsoleta (NickFury): antes de executar, compara o "
+            "preço de mercado atual com signal.entry_price. Se o mercado andou "
+            "mais que esta fração (0.01 = 1%) desde a decisão do Vision (ex.: "
+            "demora na aprovação Telegram), a entrada é cancelada — a tese/SL/TP "
+            "ficaram obsoletos. Set 0 para desabilitar."
+        ),
+    )
+    # CycleBudgetGuard (Story 189) — cap de custo LLM. Antes hardcoded; agora
+    # configurável via .env (Fields reais — extra="ignore" ignorava sem isto).
+    llm_budget_max_cost_usd: float = Field(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "Cap de custo LLM POR SÍMBOLO por sessão (USD). Ao exceder, Vision é "
+            "pulado (HOLD) para aquele símbolo. 0 desliga o cap por símbolo."
+        ),
+    )
+    llm_budget_max_cost_usd_global: float = Field(
+        default=3.0,
+        ge=0.0,
+        description=(
+            "Cap de custo LLM GLOBAL (soma de todos os símbolos) por janela de "
+            "reset (USD). Ao exceder, Vision é pulado para TODOS os símbolos — "
+            "proteção de créditos no agregado. 0 desliga o cap global."
+        ),
+    )
+    llm_budget_max_calls: int = Field(
+        default=500,
+        ge=0,
+        description="Máximo de chamadas Vision por símbolo por sessão. 0 desliga.",
+    )
+    llm_budget_reset_hours: float = Field(
+        default=24.0,
+        gt=0.0,
+        description="Janela de reset automático do budget LLM (horas). 24 ≈ diário.",
+    )
+    vision_consume_learnings: bool = Field(
+        default=False,
+        description=(
+            "Quando True, o Vision injeta no prompt as lições mais reforçadas do "
+            "diário (suas + outcomes do Cyclops) para calibrar decisões. Default "
+            "OFF (opt-in): muda o comportamento de decisão, então deve ser "
+            "validado em paper/testnet antes da mainnet. Fecha o loop de "
+            "aprendizado→decisão."
+        ),
+    )
+    learning_prune_stale_days: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Higiene do diário de aprendizado: o Beast poda lições com mais de N "
+            "dias sem atualização QUE TAMBÉM sejam nunca-reforçadas e de baixa "
+            "confiança (<0.6). Lições reforçadas ou confiáveis são preservadas."
+        ),
+    )
+    learning_loss_escalation_count: int = Field(
+        default=5,
+        ge=2,
+        description=(
+            "Quando uma lição de PREJUÍZO recorrente (Cyclops outcome-loss: mesmo "
+            "símbolo/lado fechando no stop) atinge este número de reforços, o "
+            "operador recebe um alerta Telegram para revisar/pausar o ativo. "
+            "Transforma a memória passiva em sinal proativo."
+        ),
+    )
+    max_entry_slippage_estimate_pct: float = Field(
+        default=0.02,
+        ge=0.0,
+        description=(
+            "Pre-trade liquidity gate (Batman): blocks the entry when Aquaman's "
+            "estimated slippage for the order exceeds this fraction (0.02 = 2%). "
+            "A thin book would destroy the R:R. Only blocks when liquidity data is "
+            "available (data_available=True); degraded data falls back to the size "
+            "penalty. Set 0 to disable the hard gate."
         ),
     )
     mainnet_dry_run: bool = Field(
@@ -307,6 +447,15 @@ class Settings(BaseSettings):
             "Mainnet recommended: a conservative absolute floor independent of equity."
         ),
     )
+    min_equity_floor_usd: Annotated[float, Field(ge=0.0)] = Field(
+        default=0.0,
+        description=(
+            "M6 (2026-06-01 audit): piso de equity mínimo (USD). Quando > 0, o "
+            "preflight de mainnet exige que o equity real da conta esteja acima "
+            "deste valor antes de operar live (FAIL se abaixo ou ilegível). "
+            "0 = desativado. Read-only; nunca afrouxa nenhum gate."
+        ),
+    )
     # Story 066 — Trailing stop distance after TP1 scale-out
     trailing_stop_pct: Annotated[float, Field(gt=0.0, le=0.10)] = Field(
         default=0.015,
@@ -357,13 +506,37 @@ class Settings(BaseSettings):
         le=1.0,
         description="Floor for ATR size multiplier — never reduces size below this fraction.",
     )
+    # Modo de Operação — switch RAIZ. Governa APENAS a execução de TRADES.
+    # Ver src/config/operation_mode.py.
+    #   manual    → operador aprova cada trade via Telegram
+    #   automatic → trades auto-executam (gates de risco/kill-switch seguem ativos)
+    # MELHORIAS SEMPRE EXIGEM APROVAÇÃO — o modo NÃO as auto-aplica (evita que um
+    # clique no botão faça o worker escrever/commitar código sozinho).
+    # Default 'manual' = seguro. Trocável em runtime via Telegram (/opmode) —
+    # override em data/operation_mode.json tem precedência sobre este default.
+    operation_mode: Literal["manual", "automatic"] = Field(
+        default="manual",
+        description=(
+            "Root operation mode — governs TRADE execution only. 'manual' = "
+            "operator approves every trade via Telegram. 'automatic' = trades "
+            "auto-execute (deterministic safety gates still apply). Improvements "
+            "ALWAYS require approval regardless of mode. Default 'manual'."
+        ),
+    )
+
     # Story 074 — Telegram Trade Approval
+    # NB (2026-06-01): o LIGA/DESLIGA do gate de trade agora é derivado de
+    # operation_mode (manual=gate ON, automatic=gate OFF) via
+    # operation_mode.requires_trade_approval(). Este campo NÃO liga/desliga
+    # mais o gate — fica para compatibilidade de .env e para o timeout
+    # (telegram_trade_approval_timeout_s) usado quando o gate ESTÁ ativo.
     telegram_trade_approval_enabled: bool = Field(
         default=True,
         description=(
-            "If True, Batman-approved trades are sent to Telegram for operator confirmation "
-            "before IronMan executes. In paper mode, auto-approves on timeout. "
-            "In live mode, auto-rejects on timeout (safety-first)."
+            "SUPERSEDED by operation_mode (manual=gate ON, automatic=gate OFF). "
+            "Kept for .env back-compat; no longer toggles the trade-approval gate. "
+            "When the gate is active (manual mode), paper auto-approves on timeout "
+            "and live auto-rejects on timeout (safety-first)."
         ),
     )
     telegram_trade_approval_timeout_s: int = Field(
@@ -1341,6 +1514,34 @@ class Settings(BaseSettings):
         return v
 
     @model_validator(mode="after")
+    def _llm_keys_fallback_to_dotenv(self) -> "Settings":
+        """Robustez (2026-06-02): uma variável de ambiente VAZIA (ex.:
+        ``ANTHROPIC_API_KEY=""`` injetada por outro processo/shell) tem
+        precedência sobre o ``.env`` no pydantic e MASCARA a key real
+        configurada no arquivo. Aqui, se a key resolvida estiver vazia mas o
+        ``.env`` tiver valor não-vazio, usamos o do ``.env``. Fail-silent."""
+        try:
+            from pathlib import Path as _P  # noqa: WPS433
+
+            from dotenv import dotenv_values  # noqa: WPS433
+
+            env_path = _P(__file__).resolve().parents[2] / ".env"
+            if not env_path.exists():
+                return self
+            vals = dotenv_values(str(env_path))
+            for field_name, env_name in (
+                ("anthropic_api_key", "ANTHROPIC_API_KEY"),
+                ("openai_api_key", "OPENAI_API_KEY"),
+            ):
+                cur = (getattr(self, field_name, "") or "").strip()
+                file_val = (vals.get(env_name) or "").strip()
+                if not cur and file_val:
+                    object.__setattr__(self, field_name, file_val)
+        except Exception:  # noqa: BLE001
+            pass  # nunca quebra a inicialização por causa disso
+        return self
+
+    @model_validator(mode="after")
     def warn_paper_trading(self) -> "Settings":
         """Log a clear warning when running in paper trading mode."""
         if self.paper_trading:
@@ -1441,6 +1642,26 @@ class Settings(BaseSettings):
     @cached_property
     def is_mainnet(self) -> bool:
         return self.hyperliquid_network == "mainnet"
+
+    def exchange_is_testnet(self, exchange_id: str | None = None) -> bool:
+        """Resolve testnet/mainnet POR exchange (não atrelado ao Hyperliquid).
+
+        H5 fix (2026-06-01 audit): `is_mainnet` só olha `hyperliquid_network`.
+        Operador em Binance mainnet com `hyperliquid_network=testnet` (default)
+        fazia leitores de saldo/posições (PortfolioManager) cair em sandbox da
+        Binance TESTNET enquanto o IronMan executava na MAINNET → equity fictício
+        inflando sizing. Este helper é a fonte única de verdade de network por
+        exchange e deve ser usado em TODOS os clients CCXT.
+        """
+        ex = (exchange_id or self.active_exchange or "").lower()
+        if ex == "binance":
+            return bool(self.binance_testnet)
+        if ex == "bybit":
+            return bool(self.bybit_testnet)
+        if ex == "hyperliquid":
+            return self.hyperliquid_network != "mainnet"
+        # Desconhecido: conservador → assume testnet (nunca presumir mainnet).
+        return True
 
     @cached_property
     def telegram_enabled(self) -> bool:

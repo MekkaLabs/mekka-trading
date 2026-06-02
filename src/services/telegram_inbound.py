@@ -74,7 +74,10 @@ _HELP_TEXT = (
     "/positions  — posições abertas\n"
     "/perf [N]   — relatório Deadpool (N dias, padrão: 30)\n"
     "/gates      — status gates H1–H6 mainnet\n"
-    "/mode [X]   — mostra ou muda modo (conservative/balanced/aggressive)\n"
+    "/mode [X]   — mostra ou muda modo de trading (conservative/balanced/aggressive)\n"
+    "/opmode [X] — modo de operação (só TRADES): manual (você aprova) ou automatic\n"
+    "/manual     — atalho: você aprova cada trade\n"
+    "/auto       — atalho: trades executam sozinhos (gates de risco seguem ativos)\n"
     "/report     — envia relatório diário agora (Slack + Telegram)\n"
     "/ping       — testa conexão e exibe status do bot\n"
     "/risk       — painel de risco ao vivo (exposure, PnL, cooldowns, blacklist, ATR)\n"
@@ -91,6 +94,7 @@ _HELP_TEXT = (
     "/desligar   — desliga o sistema (para o runtime; sem gasto de tokens)\n"
     "/reboot     — reinicia o sistema (desliga e liga)\n"
     "—— Melhorias ——\n"
+    "/aprendizados [agente] — o que os agentes aprenderam (diário de memória)\n"
     "/melhorias  — lista propostas pendentes do conselho (Mekka)\n"
     "/aprovar <id>  — aprova proposta (envia ao dev) — sincroniza com o dashboard\n"
     "/reprovar <id> — reprova proposta — sincroniza com o dashboard\n"
@@ -248,6 +252,10 @@ class TelegramInboundPoller:
             "/perf": self._cmd_perf,
             "/gates": self._cmd_gates,
             "/mode": self._cmd_mode,
+            "/opmode": self._cmd_opmode,       # Operation Mode (manual/automatic)
+            "/manual": self._cmd_opmode_manual,
+            "/auto": self._cmd_opmode_auto,
+            "/aprendizados": self._cmd_learnings,  # diário de aprendizado por agente
             "/report": self._cmd_report,
             "/ping": self._cmd_ping,
             "/risk": self._cmd_risk,
@@ -273,7 +281,7 @@ class TelegramInboundPoller:
         handler = handlers.get(command)
         if handler is None:
             reply = await self._cmd_help()
-        elif command in ("/pnl", "/perf", "/mode", "/leaderboard", "/stats", "/unblacklist", "/dryrun", "/aprovar", "/reprovar"):
+        elif command in ("/pnl", "/perf", "/mode", "/opmode", "/aprendizados", "/leaderboard", "/stats", "/unblacklist", "/dryrun", "/aprovar", "/reprovar"):
             reply = await handler(args)  # type: ignore[call-arg]
         else:
             reply = await handler()  # type: ignore[call-arg]
@@ -306,9 +314,17 @@ class TelegramInboundPoller:
         else:
             ks_str = "🟢 clear"
 
+        try:
+            from src.config.operation_mode import get_operation_mode
+            _op = get_operation_mode()
+            op_str = "🤖 AUTOMÁTICO" if _op == "automatic" else "🙋 MANUAL"
+        except Exception:  # noqa: BLE001
+            op_str = "?"
+
         return (
             f"📊 Mekka Trading — Status\n"
             f"Mode    : {settings.mode_label}\n"
+            f"Operação: {op_str}\n"
             f"Network : {settings.hyperliquid_network.upper()}\n"
             f"Kill sw : {ks_str}\n"
             f"Positions: {positions_count}\n"
@@ -652,6 +668,97 @@ class TelegramInboundPoller:
             )
         except Exception as exc:
             return f"⚠️ Erro ao mudar modo: {exc}"
+
+    @staticmethod
+    def _opmode_status_text(mode: str) -> str:
+        """Renderiza o status do modo de operação."""
+        if mode == "automatic":
+            return (
+                "🤖 Modo de operação: AUTOMÁTICO\n"
+                "O sistema executa TRADES sozinho (gates de risco seguem ativos).\n\n"
+                "• Trades: auto-executam após os gates do Batman\n"
+                "• Melhorias: SEMPRE exigem sua aprovação (não muda com o modo)\n"
+                "• Gates de risco/kill-switch/double-gate: SEGUEM ATIVOS\n\n"
+                "Use /manual para aprovar os trades você mesmo."
+            )
+        return (
+            "🙋 Modo de operação: MANUAL\n"
+            "Você aprova cada TRADE via Telegram.\n\n"
+            "• Trades: pedem sua confirmação antes do IronMan executar\n"
+            "• Melhorias: sempre na fila aguardando sua aprovação\n\n"
+            "Use /auto para os trades executarem sozinhos."
+        )
+
+    async def _cmd_opmode(self, args: list[str]) -> str:
+        """
+        /opmode            — mostra o modo de operação atual
+        /opmode manual     — você aprova trades e melhorias
+        /opmode automatic  — o sistema aprova sozinho
+        """
+        from src.config.operation_mode import (
+            VALID_OPERATION_MODES,
+            get_operation_mode,
+            set_operation_mode,
+        )
+
+        if not args:
+            return self._opmode_status_text(get_operation_mode())
+
+        target = args[0].lower()
+        if target in ("auto",):
+            target = "automatic"
+        if target not in VALID_OPERATION_MODES:
+            return (
+                f"❌ Modo de operação '{target}' desconhecido.\n"
+                f"Válidos: {', '.join(VALID_OPERATION_MODES)} (ou /manual, /auto)"
+            )
+        try:
+            new_mode = set_operation_mode(target)
+            return "✅ " + self._opmode_status_text(new_mode)
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ Erro ao mudar modo de operação: {exc}"
+
+    async def _cmd_opmode_manual(self) -> str:
+        """/manual — atalho para o modo de operação manual."""
+        return await self._cmd_opmode(["manual"])
+
+    async def _cmd_opmode_auto(self) -> str:
+        """/auto — atalho para o modo de operação automático."""
+        return await self._cmd_opmode(["automatic"])
+
+    async def _cmd_learnings(self, args: list[str]) -> str:
+        """
+        /aprendizados            — resumo: quantas lições cada agente tem
+        /aprendizados <agente>   — as lições mais relevantes do agente
+        """
+        from src.services.agent_learning_journal import recall, stats
+
+        if args:
+            agent = args[0]
+            lessons = recall(agent, limit=8)
+            if not lessons:
+                return f"🧠 {agent} ainda não registrou aprendizados."
+            lines = [f"🧠 Aprendizados de {agent} (top {len(lessons)}):"]
+            for ls in lessons:
+                conf = f"{float(ls.get('confidence', 0)) * 100:.0f}%"
+                reinf = int(ls.get("reinforced_count", 1))
+                rtag = f" ×{reinf}" if reinf > 1 else ""
+                lines.append(f"• [{conf}{rtag}] {ls.get('lesson', '')}")
+            return "\n".join(lines)
+
+        data = stats()
+        by_agent = (data or {}).get("by_agent", {})
+        if not by_agent:
+            return (
+                "🧠 Nenhum aprendizado registrado ainda.\n"
+                "Os agentes vão preenchendo conforme operam (Mentor, IronMan...).\n"
+                "Use /aprendizados <agente> para ver os de um agente."
+            )
+        lines = ["🧠 Aprendizados por agente:"]
+        for ag, info in list(by_agent.items())[:15]:
+            lines.append(f"• {ag}: {info.get('lessons', 0)} lição(ões)")
+        lines.append("\nUse /aprendizados <agente> para detalhes.")
+        return "\n".join(lines)
 
     async def _cmd_ping(self) -> str:
         """

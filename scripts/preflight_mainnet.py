@@ -290,47 +290,209 @@ def check_network(report: PreflightReport) -> None:
 
 
 def check_risk_limits(report: PreflightReport) -> None:
-    """Warn if risk limits are looser than recommended first-week mainnet values."""
+    """Gate de limites de risco conservadores para a 1ª semana de mainnet.
+
+    M5 (2026-06-01 audit): thresholds alinhados ao docs/MAINNET-AUTHORIZATION.md
+    (size ≤ 0.1%, lev ≤ 2x, ≤ 3 trades/dia) e promovidos a FAIL em mainnet+live
+    (antes eram só WARN e usavam 0.5%). O hard clamp do Batman já força 0.1%/2x;
+    o preflight agora exige coerência ANTES de operar com dinheiro real.
+    """
     try:
         s = _get_settings()
+        live = not bool(s.paper_trading)
+        try:
+            is_testnet = bool(s.exchange_is_testnet(s.active_exchange))
+        except Exception:  # noqa: BLE001
+            is_testnet = True
+        mainnet_live = live and not is_testnet
 
         issues = []
-        # Recommended first-week caps (conservative)
-        if s.max_position_size_pct > 0.005:
+        # Recommended first-week caps (conservative — per MAINNET-AUTHORIZATION).
+        if s.max_position_size_pct > 0.001:
             issues.append(
-                f"max_position_size_pct={s.max_position_size_pct:.3f} "
-                f"(recommended ≤ 0.005 = 0.5% for first week)"
+                f"max_position_size_pct={s.max_position_size_pct:.4f} "
+                f"(recomendado ≤ 0.001 = 0.1% na 1ª semana)"
             )
         if s.max_leverage > 2:
             issues.append(
-                f"max_leverage={s.max_leverage}x "
-                f"(recommended ≤ 2x for first week)"
+                f"max_leverage={s.max_leverage}x (recomendado ≤ 2x na 1ª semana)"
             )
-        if s.max_trades_per_day > 5:
+        if s.max_trades_per_day > 3:
             issues.append(
-                f"max_trades_per_day={s.max_trades_per_day} "
-                f"(recommended ≤ 5 for first week)"
+                f"max_trades_per_day={s.max_trades_per_day} (recomendado ≤ 3 na 1ª semana)"
             )
         if s.max_open_positions > 2:
             issues.append(
-                f"max_open_positions={s.max_open_positions} "
-                f"(recommended ≤ 2 for first week)"
+                f"max_open_positions={s.max_open_positions} (recomendado ≤ 2 na 1ª semana)"
             )
 
         if issues:
-            report.warn(
-                "risk_limits",
-                "Risk limits looser than first-week mainnet recommendation:\n  " + "\n  ".join(issues),
-                fix="Tighten limits in .env before going live.",
+            detail = (
+                "Limites de risco mais frouxos que a recomendação da 1ª semana:\n  "
+                + "\n  ".join(issues)
             )
+            fix = "Aperte os limites no .env antes de operar live (size 0.1%, lev 2x, 3 trades/dia)."
+            if mainnet_live:
+                report.fail("risk_limits", detail, fix=fix)
+            else:
+                report.warn("risk_limits", detail, fix=fix)
         else:
             report.ok(
                 "risk_limits",
-                f"Conservative: size={s.max_position_size_pct:.3f} "
-                f"lev={s.max_leverage}x trades/day={s.max_trades_per_day}",
+                f"Conservador: size={s.max_position_size_pct:.4f} "
+                f"lev={s.max_leverage}x trades/dia={s.max_trades_per_day}",
             )
     except Exception as exc:
         report.warn("risk_limits", f"Could not check risk limits: {exc}")
+
+
+def check_daily_loss_cap(report: PreflightReport) -> None:
+    """M1 (2026-06-01 audit): o kill-switch de PERDA ABSOLUTA diária
+    (max_daily_loss_usd) tem default 0.0, que o DESLIGA. Em mainnet + live isso
+    é inaceitável — força FAIL para que o operador defina um teto antes de
+    operar com dinheiro real. Em paper/testnet é só um WARN.
+    """
+    try:
+        s = _get_settings()
+        cap = float(getattr(s, "max_daily_loss_usd", 0.0) or 0.0)
+        live = not bool(s.paper_trading)
+        try:
+            is_testnet = bool(s.exchange_is_testnet(s.active_exchange))
+        except Exception:  # noqa: BLE001
+            is_testnet = True  # conservador
+        mainnet_live = live and not is_testnet
+
+        if cap > 0:
+            report.ok(
+                "daily_loss_cap",
+                f"Absolute daily-loss kill-switch armed: MAX_DAILY_LOSS_USD=${cap:,.2f}",
+            )
+        elif mainnet_live:
+            report.fail(
+                "daily_loss_cap",
+                "MAX_DAILY_LOSS_USD=0 desliga o kill-switch de perda absoluta diária "
+                "em MAINNET+LIVE.",
+                fix="Defina MAX_DAILY_LOSS_USD > 0 no .env (recomendado: 2–5% do capital).",
+            )
+        else:
+            report.warn(
+                "daily_loss_cap",
+                "MAX_DAILY_LOSS_USD=0 (kill-switch de perda absoluta desligado) — "
+                "tolerável em paper/testnet, obrigatório antes da mainnet.",
+                fix="Defina MAX_DAILY_LOSS_USD > 0 antes de ir para mainnet+live.",
+            )
+    except Exception as exc:  # noqa: BLE001
+        report.warn("daily_loss_cap", f"Could not check daily loss cap: {exc}")
+
+
+def check_operation_mode(report: PreflightReport) -> None:
+    """Modo de operação (manual/automatic) — switch raiz de aprovação.
+
+    Em MAINNET+LIVE, o modo 'automatic' significa que o sistema executa trades
+    com dinheiro REAL sem confirmação humana (os gates de risco do Batman/
+    kill-switch/daily-loss seguem ativos, mas não há gate humano). Isso é uma
+    decisão deliberada — em mainnet+live levantamos um WARN bem visível para
+    que o operador confirme que é intencional. Em manual, ou em paper/testnet,
+    é só informativo (PASS).
+    """
+    try:
+        s = _get_settings()
+        try:
+            from src.config.operation_mode import get_operation_mode
+            mode = get_operation_mode()
+        except Exception:  # noqa: BLE001
+            mode = str(getattr(s, "operation_mode", "manual"))
+
+        live = not bool(s.paper_trading)
+        try:
+            is_testnet = bool(s.exchange_is_testnet(s.active_exchange))
+        except Exception:  # noqa: BLE001
+            is_testnet = True
+        mainnet_live = live and not is_testnet
+
+        if mode == "automatic" and mainnet_live:
+            report.warn(
+                "operation_mode",
+                "OPERATION_MODE=automatic em MAINNET+LIVE — trades com dinheiro real "
+                "auto-executam SEM confirmação humana (gates de risco seguem ativos).",
+                fix="Confirme que é intencional. Para aprovar cada trade você mesmo, "
+                    "use OPERATION_MODE=manual (ou /manual no Telegram).",
+            )
+        elif mode == "automatic":
+            report.ok(
+                "operation_mode",
+                "OPERATION_MODE=automatic (sistema aprova sozinho) — seguro em paper/testnet.",
+            )
+        else:
+            report.ok(
+                "operation_mode",
+                "OPERATION_MODE=manual (operador aprova trades e melhorias via Telegram).",
+            )
+    except Exception as exc:  # noqa: BLE001
+        report.warn("operation_mode", f"Could not check operation mode: {exc}")
+
+
+def check_min_balance(report: PreflightReport) -> None:
+    """M6 (2026-06-01 audit): gate de saldo mínimo no preflight.
+
+    Antes, a verificação de saldo era só um checkbox HUMANO. Agora, quando
+    ``min_equity_floor_usd > 0``, o preflight LÊ o equity real da conta e FALHA
+    se estiver abaixo do piso (ou se não conseguir confirmar) em mainnet+live.
+    Em mainnet+live sem piso definido → WARN (recomenda definir). Nunca levanta.
+    """
+    import asyncio
+
+    try:
+        s = _get_settings()
+        live = not bool(s.paper_trading)
+        try:
+            is_testnet = bool(s.exchange_is_testnet(s.active_exchange))
+        except Exception:  # noqa: BLE001
+            is_testnet = True
+        mainnet_live = live and not is_testnet
+        floor = float(getattr(s, "min_equity_floor_usd", 0.0) or 0.0)
+
+        if floor <= 0:
+            if mainnet_live:
+                report.warn(
+                    "min_balance",
+                    "MIN_EQUITY_FLOOR_USD não definido — sem piso de saldo mínimo em mainnet+live.",
+                    fix="Defina MIN_EQUITY_FLOOR_USD no .env (capital mínimo aceitável).",
+                )
+            else:
+                report.ok("min_balance", "MIN_EQUITY_FLOOR_USD não definido (tolerável em paper/testnet).")
+            return
+
+        # floor > 0 → ler o equity real da conta.
+        try:
+            from src.agents.portfolio_manager import PortfolioManager
+            pm = PortfolioManager()
+            try:
+                snap = asyncio.run(pm.run())
+            except RuntimeError:
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    snap = pool.submit(asyncio.run, pm.run()).result(timeout=30)
+            equity = float(getattr(snap, "equity_usd", 0.0) or 0.0)
+            degraded = bool(getattr(snap, "is_degraded", False))
+            if degraded or equity <= 0:
+                report.warn(
+                    "min_balance",
+                    f"Não foi possível confirmar o equity (snapshot degradado). piso=${floor:,.2f}",
+                    fix="Verifique conexão/credenciais da corretora.",
+                )
+            elif equity < floor:
+                report.fail(
+                    "min_balance",
+                    f"Equity ${equity:,.2f} ABAIXO do piso MIN_EQUITY_FLOOR_USD=${floor:,.2f}.",
+                    fix="Aporte ou ajuste o piso antes de operar live.",
+                )
+            else:
+                report.ok("min_balance", f"Equity ${equity:,.2f} ≥ piso ${floor:,.2f}")
+        except Exception as exc:  # noqa: BLE001
+            report.warn("min_balance", f"Não foi possível verificar saldo: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        report.warn("min_balance", f"Could not check min balance: {exc}")
 
 
 def check_telegram(report: PreflightReport) -> None:
@@ -545,6 +707,9 @@ def run_preflight(strict: bool = False) -> PreflightReport:
     check_kill_switch(report)
     check_network(report)
     check_risk_limits(report)
+    check_daily_loss_cap(report)
+    check_operation_mode(report)
+    check_min_balance(report)
     check_telegram(report)
     check_sdk_availability(report)
     check_authorization_file(report)
@@ -592,6 +757,14 @@ def print_report(report: PreflightReport, as_json: bool = False, strict: bool = 
         warns = report.warn_count
         status = "🟢 ALL AUTOMATED CHECKS PASSED" if fails == 0 else f"🔴 {fails} CHECK(S) FAILED"
         print(f"  {status}  ({warns} warning(s))")
+        # L3 fix (2026-06-01 audit): "ALL PASSED" em PAPER_TRADING=true lia-se como
+        # prontidão de mainnet. Banner explícito de que NÃO é live.
+        try:
+            if bool(getattr(_get_settings(), "paper_trading", True)):
+                print("  📝 MODO PAPER (PAPER_TRADING=true) — nenhuma ordem real será")
+                print("     colocada. Isto NÃO é prontidão de mainnet com dinheiro real.")
+        except Exception:  # noqa: BLE001
+            pass
         print("=" * 60)
         print()
 

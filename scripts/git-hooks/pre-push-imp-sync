@@ -1,0 +1,26 @@
+#!/bin/sh
+# scripts/git-hooks/pre-push-imp-sync
+# ====================================
+# Pre-push hook: roda sync_imp_commits.py antes de cada push pra
+# reconciliar commits taggeados com [IMP-xxxxxxxx] com o pr_tracker.
+#
+# Instalação: bash scripts/install-git-hooks.sh
+# Bypass:     SKIP_IMP_SYNC=1 git push ...
+#
+# Nunca aborta o push — sempre retorna 0.
+
+if [ "${SKIP_IMP_SYNC:-}" = "1" ]; then
+    exit 0
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+SYNC_SCRIPT="$REPO_ROOT/scripts/sync_imp_commits.py"
+
+if [ ! -f "$SYNC_SCRIPT" ]; then
+    exit 0
+fi
+
+# Roda silencioso. Nunca aborta.
+python3 "$SYNC_SCRIPT" --quiet 2>/dev/null || true
+
+exit 0

@@ -51,41 +51,96 @@ from src.models.signal import TradeAction, TradingSignal
 
 _ORCHESTRATOR_SYSTEM = """You are the MoA Synthesis Orchestrator for the Mekka Trading System.
 
-Three independent Vision LLMs analyzed identical market data and produced the
-TradingSignal proposals below. Your task: synthesize one consensus TradingSignal.
+ROLE
+----
+Three independent Vision LLMs analyzed identical market data and produced
+the TradingSignal proposals below. Your purpose is to synthesize one
+consensus TradingSignal and emit a single strict JSON object.
 
-SYNTHESIS RULES
----------------
-1. ACTION — majority vote: if 2 or 3 agents agree on action, use that action.
-   If all 3 differ (no majority), output HOLD.
-2. CONFIDENCE — weighted average: weight each proposal by its confidence value.
-3. ENTRY / STOP_LOSS / TAKE_PROFIT — weighted average (by confidence) from
-   agreeing proposals only. For HOLD, use the agreeing agents' geometric center.
-4. SIZE_PCT / LEVERAGE — weighted average from agreeing proposals.
-5. REASONING — 2-4 sentences explaining the consensus and any notable dissent.
-6. AGENT_CONTRIBUTIONS — list the 3 proposing models and their brief verdicts.
-
-HARD CONSTRAINTS (same as Vision):
-- LONG:  stop_loss < entry_price < take_profit
-- SHORT: take_profit < entry_price < stop_loss
-- confidence ∈ [0.0, 1.0], size_pct ∈ [0.005, 0.05], leverage ∈ [1, 5]
-- For HOLD: entry=current_price, stop=entry×0.97, take=entry×1.03
-
-Output ONLY a single valid JSON object matching the TradingSignal schema.
-No markdown, no code fences, no commentary.
-
+OUTPUT FORMAT (JSON object only — no markdown, no fences, no commentary)
+------------------------------------------------------------------------
 Schema:
 {
   "action": "LONG" | "SHORT" | "HOLD",
-  "confidence": 0.0–1.0,
+  "confidence": 0.0..1.0,
   "entry_price": number,
   "stop_loss": number,
   "take_profit": number,
-  "size_pct": 0.005–0.05,
-  "leverage": integer 1–5,
+  "size_pct": 0.005..0.05,
+  "leverage": integer 1..5,
   "reasoning": "2-4 sentences",
   "agent_contributions": {"model_name": "brief verdict"}
 }
+
+METHOD (apply in order)
+-----------------------
+Step 1: Inspect the three proposals. Count action votes.
+Step 2: ACTION — majority vote: if 2 or 3 agents agree, use that action.
+        If all 3 differ (no majority), output HOLD.
+Step 3: CONFIDENCE — confidence-weighted average across ALL three proposals.
+Step 4: ENTRY/STOP_LOSS/TAKE_PROFIT — confidence-weighted average of the
+        AGREEING proposals only (those matching the majority action).
+        For HOLD: entry=current_price, stop=entry×0.97, take=entry×1.03.
+Step 5: SIZE_PCT/LEVERAGE — confidence-weighted average of the agreeing
+        proposals only.
+Step 6: REASONING — 2-4 sentences explaining the consensus and any
+        notable dissent.
+Step 7: AGENT_CONTRIBUTIONS — map of model name → 1-sentence verdict
+        (one entry per proposal).
+
+HARD CONSTRAINTS (same as Vision — NEVER violate)
+-------------------------------------------------
+- LONG:  stop_loss < entry_price < take_profit.
+- SHORT: take_profit < entry_price < stop_loss.
+- HOLD:  entry=current_price, stop=entry*0.97, take=entry*1.03.
+- confidence ∈ [0.0, 1.0].
+- size_pct ∈ [0.005, 0.05].
+- leverage ∈ [1, 5] (integer).
+
+PITFALLS — NEVER
+----------------
+- NEVER pick an action that NO proposal voted for.
+- NEVER emit a tie-breaking action other than HOLD when there is no majority.
+- NEVER include dissenting proposals in the entry/SL/TP average.
+- NEVER emit confidence > max(proposals.confidence) — synthesis cannot
+  invent certainty.
+- NEVER output markdown, code fences, comments, or any text outside the
+  JSON object.
+- NEVER omit agent_contributions; include all three proposing models.
+
+ACCEPTANCE CRITERIA (verifiable)
+--------------------------------
+- Output parses as JSON.
+- action ∈ {"LONG", "SHORT", "HOLD"}.
+- For LONG: stop_loss < entry_price < take_profit (strict).
+- For SHORT: take_profit < entry_price < stop_loss (strict).
+- confidence ∈ [0, 1]; size_pct ∈ [0.005, 0.05]; leverage ∈ {1,2,3,4,5}.
+- len(agent_contributions) == 3.
+- reasoning has 2-4 sentences (string non-empty).
+
+EXAMPLES
+--------
+<example name="majority-long-with-dissent">
+Proposals: GPT-4o=LONG conf 0.80, Claude-Sonnet=LONG conf 0.65, GPT-4o-mini=HOLD conf 0.50.
+Output:
+```json
+{"action":"LONG","confidence":0.74,"entry_price":68500.0,
+"stop_loss":67100.0,"take_profit":71000.0,"size_pct":0.018,"leverage":2,
+"reasoning":"Two of three models agree on LONG with strong confidence. Mini dissents to HOLD but its lower conviction is outweighed. Entry/SL/TP are confidence-weighted averages of the two LONG proposals.",
+"agent_contributions":{"GPT-4o":"LONG 0.80, momentum confirmed","Claude-Sonnet":"LONG 0.65, trend with caveat","GPT-4o-mini":"HOLD 0.50, sees mixed signals"}}
+```
+</example>
+
+<example name="no-majority-hold">
+Proposals: GPT-4o=LONG conf 0.60, Claude-Sonnet=SHORT conf 0.55, GPT-4o-mini=HOLD conf 0.62.
+Output:
+```json
+{"action":"HOLD","confidence":0.59,"entry_price":68500.0,
+"stop_loss":66445.0,"take_profit":70555.0,"size_pct":0.005,"leverage":1,
+"reasoning":"All three agents disagree, with no majority. Defaulting to HOLD per synthesis rule. Stop/TP set to the HOLD 3% envelope.",
+"agent_contributions":{"GPT-4o":"LONG 0.60","Claude-Sonnet":"SHORT 0.55","GPT-4o-mini":"HOLD 0.62"}}
+```
+</example>
 """
 
 
@@ -206,7 +261,40 @@ class VisionMoA:
             )
         except Exception as exc:  # noqa: BLE001
             self._log.warning(f"[VisionMoA] orchestrator failed: {exc} — using vote fallback")
-            final = self._vote_fallback(proposals=proposals, symbol=symbol, price=price)
+            # Review-fix (2026-06-01): _vote_fallback constrói TradingSignal de
+            # médias ponderadas que podem violar a geometria (ValidationError) e
+            # propagar para fora de run() — quebrando o contrato "never raises" e
+            # derrubando o ciclo. Envolver → HOLD seguro.
+            try:
+                final = self._vote_fallback(proposals=proposals, symbol=symbol, price=price)
+            except Exception as _vf_exc:  # noqa: BLE001
+                self._log.error(f"[VisionMoA] vote fallback crashou: {_vf_exc} → HOLD")
+                return Vision._fallback_hold(
+                    symbol=symbol, price=price, reason=f"MoA vote fallback failed: {_vf_exc}",
+                )
+
+        # Review-fix (2026-06-01): clampar a confiança final ao MÁXIMO das
+        # proposals. A média ponderada por confiança auto-reportada pode amplificar
+        # um outlier (modelo barato alucinando 0.95 domina). A síntese não deve ser
+        # MAIS confiante que o proposal mais confiante.
+        try:
+            _max_prop_conf = max(
+                (float(getattr(p, "confidence", 0.0) or 0.0) for p in proposals),
+                default=1.0,
+            )
+            if getattr(final, "confidence", 0.0) > _max_prop_conf:
+                final = final.model_copy(update={"confidence": round(_max_prop_conf, 4)})
+        except Exception as _cc_exc:  # noqa: BLE001
+            self._log.debug(f"[VisionMoA] confidence clamp skip: {_cc_exc}")
+
+        # Review-fix (2026-06-01): o MoA pulava os clamps determinísticos do Vision
+        # (corte de size em análise degradada + flash scalp hard-block), contornando
+        # proteções de segurança. Aplicá-los aqui também, usando a instância Vision.
+        try:
+            final = self._vision_fallback._apply_degraded_quality_clamp(final, analysis)
+            final = self._vision_fallback._apply_flash_scalp_hard_block(final, analysis, price)
+        except Exception as _clamp_exc:  # noqa: BLE001
+            self._log.warning(f"[VisionMoA] clamps de segurança falharam (mantendo final): {_clamp_exc}")
 
         self._log.info(
             f"[VisionMoA] {symbol} consensus → {final.summary()} "

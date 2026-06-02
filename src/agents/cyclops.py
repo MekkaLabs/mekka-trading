@@ -130,21 +130,35 @@ class Cyclops:
             # Determine the net open position and its SL/TP
             # Use the SL/TP from the oldest open trade on the prevailing side.
             # ----------------------------------------------------------------
+            # Review-fix (2026-06-01): avg_entry deve usar só trades de ABERTURA.
+            # Os fechamentos parciais do próprio Cyclops (TP-ladder, scale-out,
+            # partial SL) são gravados a `mark` (não entry) e, em reentradas/
+            # reversões no mesmo símbolo, podiam contaminar o avg_entry → SL/TP/PnL
+            # sobre entrada errada. Filtra trades marcados como Cyclops.
+            def _is_cyclops_close(_t) -> bool:
+                _oid = str(getattr(_t, "order_id", "") or "")
+                _tb = str(((getattr(_t, "raw", {}) or {}).get("metadata", {}) or {}).get("triggered_by", "") or "")
+                return _oid.startswith("CYCLOPS-") or _tb.startswith("cyclops")
+
             if net > 0:
                 side = "long"
                 open_qty = net
                 open_trades = longs
+                _entry_trades = [t for t in longs if not _is_cyclops_close(t)]
+                _entry_qty = sum(t.quantity for t in _entry_trades)
                 avg_entry = (
-                    sum(t.quantity * t.avg_price for t in longs) / long_qty
-                    if long_qty > 0 else 0.0
+                    sum(t.quantity * t.avg_price for t in _entry_trades) / _entry_qty
+                    if _entry_qty > 0 else 0.0
                 )
             else:
                 side = "short"
                 open_qty = abs(net)
                 open_trades = shorts
+                _entry_trades = [t for t in shorts if not _is_cyclops_close(t)]
+                _entry_qty = sum(t.quantity for t in _entry_trades)
                 avg_entry = (
-                    sum(t.quantity * t.avg_price for t in shorts) / short_qty
-                    if short_qty > 0 else 0.0
+                    sum(t.quantity * t.avg_price for t in _entry_trades) / _entry_qty
+                    if _entry_qty > 0 else 0.0
                 )
 
             # Aggregate SL/TP: use the most conservative SL and most
@@ -158,8 +172,18 @@ class Cyclops:
                 if tp is not None:
                     tp_values.append(tp)
 
-            if not sl_values and not tp_values:
-                continue  # no SL/TP defined for this position — skip
+            # Review-fix (2026-06-01): NÃO pular uma posição sem SL/TP se o
+            # time-stop (scalp) estiver ativo — antes o `continue` impedia que o
+            # bloco de idade (mais abaixo) rodasse, então posição sem SL/TP nunca
+            # expirava, contrariando a intenção do scalp. sl_trigger/tp_trigger
+            # ficam None (todos os blocos de SL/TP já guardam `if ... and`).
+            try:
+                from src.config.runtime_mode import get_params as _gp_age  # noqa: WPS433
+                _max_age_active = bool((_gp_age() or {}).get("max_position_age_minutes"))
+            except Exception:  # noqa: BLE001
+                _max_age_active = False
+            if not sl_values and not tp_values and not _max_age_active:
+                continue  # sem SL/TP e sem time-stop → nada a monitorar
 
             # For LONG: SL = highest of the sl values (most conservative = closest to entry)
             #           TP = lowest of the tp values (most conservative = first to trigger)
@@ -609,11 +633,55 @@ class Cyclops:
                     continue
 
             # ----------------------------------------------------------------
-            # Check triggers (full close — SL or full TP)
+            # Check triggers (full close — SL, full TP, ou TIME-STOP em scalp)
             # ----------------------------------------------------------------
             trigger_reason: Optional[str] = None
 
-            if side == "long":
+            # Scalp Mode (2026-05-28) — time-stop: fecha posição que
+            # ultrapassou max_position_age_minutes. Vence SL/TP normais
+            # porque em scalp o objetivo é não segurar posição além do
+            # horizonte planejado. Sem-op em modos swing (max_age = None).
+            try:
+                from src.config.runtime_mode import get_params as _get_mode_params  # noqa: WPS433
+                _mp = _get_mode_params()
+                _max_age_min = _mp.get("max_position_age_minutes")
+            except Exception:
+                _max_age_min = None
+
+            if _max_age_min and _max_age_min > 0:
+                # Idade = agora - timestamp do trade ABERTO mais antigo da side
+                from datetime import datetime as _dt, timezone as _tz, timedelta as _td  # noqa: WPS433
+                _now = _dt.now(_tz.utc)
+                _cutoff = _now - _td(minutes=_max_age_min)
+                _oldest = None
+                for _t in open_trades:
+                    _ts = getattr(_t, "timestamp", None)
+                    if _ts is None:
+                        continue
+                    if _ts.tzinfo is None:
+                        _ts = _ts.replace(tzinfo=_tz.utc)
+                    if _oldest is None or _ts < _oldest:
+                        _oldest = _ts
+                if _oldest is not None and _oldest < _cutoff:
+                    _age_min = (_now - _oldest).total_seconds() / 60.0
+                    # P2 (2026-05-28 audit): detecta clock skew anômalo.
+                    # Se age > 24h, provavelmente é timestamp em outro fuso
+                    # ou relógio do servidor desincronizado — log WARNING
+                    # mas mantém o close (defensivo: posição velha precisa
+                    # fechar mesmo se medição estiver errada).
+                    if _age_min > 1440:  # 24h
+                        logger.warning(
+                            f"[Cyclops] CLOCK_SKEW suspeito: position age "
+                            f"{_age_min:.1f}min > 1440min (24h). "
+                            f"Verifique TZ do servidor e timestamp do trade. "
+                            f"Closing anyway as defensive measure."
+                        )
+                    trigger_reason = (
+                        f"SCALP time-stop: position age {_age_min:.1f}min "
+                        f"> max {_max_age_min}min"
+                    )
+
+            if trigger_reason is None and side == "long":
                 if sl_trigger and mark <= sl_trigger:
                     trigger_reason = (
                         f"SL triggered: mark {mark:,.4f} ≤ sl {sl_trigger:,.4f}"
@@ -622,7 +690,7 @@ class Cyclops:
                     trigger_reason = (
                         f"TP triggered: mark {mark:,.4f} ≥ tp {tp_trigger:,.4f}"
                     )
-            else:  # short
+            elif trigger_reason is None:  # short
                 if sl_trigger and mark >= sl_trigger:
                     trigger_reason = (
                         f"SL triggered: mark {mark:,.4f} ≥ sl {sl_trigger:,.4f}"
@@ -695,6 +763,71 @@ class Cyclops:
                     "[Cyclops] %s — %s (qty=%.6f, close_price=%.4f)",
                     symbol, trigger_reason, open_qty, mark,
                 )
+                # Write-back loop: append linha em 60-Daily/YYYY-MM-DD-trades.md
+                # Opt-in via CYCLOPS_VAULT_WRITER_ENABLED. Fail-silent.
+                try:
+                    from src.services import trading_vault_writer as _tvw
+                    _tvw.record_cyclops_close({
+                        "symbol": symbol,
+                        "side": side,
+                        "pnl_usd": pnl_usd,
+                        "holding_hours": None,  # close_position não tem hold_h direto
+                        "reason": trigger_reason,
+                    })
+                except Exception as exc_vault:  # noqa: BLE001
+                    logger.debug(f"[Cyclops] vault writer no-op: {exc_vault}")
+                # Outcome → aprendizado (2026-06-02): registra uma lição estável
+                # por (símbolo, lado, tipo de saída) no diário do Cyclops. Dedup
+                # reforça em recorrência — se um símbolo/lado vive batendo no
+                # stop, a lição acumula reforço e vira sinal. Só consultiva.
+                try:
+                    _tr = (trigger_reason or "").upper()
+                    if "TIME" in _tr:
+                        _lesson = (
+                            f"{symbol} {side}: posições fecham por TEMPO sem atingir "
+                            f"alvo nem stop — alvo pode estar longe / momentum fraco."
+                        )
+                        _cat = "outcome-time"
+                    elif pnl_usd >= 0 or "TP" in _tr or "TAKE" in _tr or "LADDER" in _tr:
+                        _lesson = (
+                            f"{symbol} {side}: posições atingiram o alvo (TP) — "
+                            f"setup tende a funcionar nesse ativo/lado."
+                        )
+                        _cat = "outcome-win"
+                    else:
+                        _lesson = (
+                            f"{symbol} {side}: posições fecham no STOP — revisar "
+                            f"qualidade da entrada/timing nesse ativo/lado."
+                        )
+                        _cat = "outcome-loss"
+                    from src.services.agent_learning_journal import record as _rec  # noqa: WPS433
+                    import asyncio as _aio  # noqa: WPS433
+                    _lr = await _aio.to_thread(
+                        _rec, "Cyclops", _lesson,
+                        category=_cat, evidence=f"último pnl={pnl_usd:+.2f} ({trigger_reason})",
+                        confidence=0.5, tags=["outcome", symbol, side],
+                    )
+                    # Escalonamento por reforço: prejuízo recorrente vira alerta.
+                    _rc = int((_lr or {}).get("reinforced_count", 1))
+                    _thr = int(getattr(settings, "learning_loss_escalation_count", 5))
+                    if _cat == "outcome-loss" and _rc >= _thr:
+                        try:
+                            from src.services.telegram_alerter import TelegramAlerter
+                            await TelegramAlerter().alert(
+                                event="LEARNING_LOSS_PATTERN",
+                                severity="WARNING",
+                                agent="Cyclops",
+                                symbol=symbol,
+                                message=(
+                                    f"{symbol} {side} fechou no stop {_rc}× — "
+                                    f"padrão recorrente. Considere revisar o setup "
+                                    f"ou pausar o ativo (/unblacklist para reverter)."
+                                ),
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                except Exception as exc_learn:  # noqa: BLE001
+                    logger.debug(f"[Cyclops] outcome learning no-op: {exc_learn}")
                 # Stories 063/183/186 — resolve all memory stores via central helper.
                 # AgentMemory (063), RoleWorkingMemory (183), SignalOutcomeMemory (186)
                 # are all written from the same place so closes via SL/TP, manual or

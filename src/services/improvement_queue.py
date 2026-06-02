@@ -89,6 +89,27 @@ def _load_index() -> dict[str, dict]:
         return {}
 
 
+def _success_kpi_for(area: str, impact: str) -> str:
+    """P1.9 — sugere uma success metric padrão por área. Galactus/Sage
+    podem reescrever via rec['success_kpi'] explícito. Operador também
+    pode editar no brief antes de marcar merged."""
+    a = (area or "").lower()
+    presets = {
+        "trading_logic":  "win_rate_7d_after_merge > win_rate_7d_before_merge",
+        "trading-ops":    "win_rate_7d_after_merge > win_rate_7d_before_merge",
+        "risk":           "max_drawdown_7d_after_merge < max_drawdown_7d_before_merge",
+        "infra":          "agent_error_rate_24h < 0.05",
+        "ops":            "incident_count_7d_after_merge <= incident_count_7d_before_merge",
+        "memory":         "agent_memory_resolved_pct > 0.80",
+        "vault":          "vault_broken_links_after < vault_broken_links_before",
+        "agents":         "agent_p95_latency_ms_after < agent_p95_latency_ms_before",
+        "ux":             "_(manual operator confirmation)_",
+        "architecture":   "_(manual reviewer confirmation in PR)_",
+        "calibration":    "param_change_did_not_regress_win_rate_7d",
+    }
+    return presets.get(a, "_(definir KPI mensurável antes de fechar)_")
+
+
 def _render_brief(rec: dict, rec_id: str, created_at: str) -> str:
     title = str(rec.get("title") or "Melhoria sem título")
     area = str(rec.get("area") or "infra").lower()
@@ -99,6 +120,8 @@ def _render_brief(rec: dict, rec_id: str, created_at: str) -> str:
     evidence = str(rec.get("evidence") or "").strip()
     rationale = str(rec.get("rationale") or "").strip()
     decision = str(rec.get("decision") or "").strip()
+    # P1.9 — success metric explícito (override via rec['success_kpi']).
+    success_kpi = str(rec.get("success_kpi") or _success_kpi_for(area, impact)).strip()
     pm = _premortem(rec)
 
     try:
@@ -162,6 +185,14 @@ def _render_brief(rec: dict, rec_id: str, created_at: str) -> str:
 
 {evidence or "_(sem evidência fornecida)_"}
 
+## Success KPI (P1.9 — outcome measurement)
+
+> Bridge `improvement_memory_bridge` tirará snapshot Sage ANTES (no
+> momento da aprovação) e DEPOIS (após merged), permitindo atribuir
+> impacto real desta melhoria.
+
+`{success_kpi}`
+
 ## Acceptance Criteria
 
 - [ ] Mudança implementada conforme a descrição acima.
@@ -169,6 +200,7 @@ def _render_brief(rec: dict, rec_id: str, created_at: str) -> str:
 - [ ] Testes adicionados/atualizados; `ruff` e `mypy` passam.
 - [ ] Validado em paper/testnet antes de qualquer impacto em produção.
 - [ ] PR aberto e vinculado a este rec_id ({rec_id}) para aprovação do operador.
+- [ ] Commit subject contém `[IMP-{rec_id}]` para reconciliação automática.
 """
     return frontmatter + "\n" + body
 
@@ -177,7 +209,7 @@ def _render_brief(rec: dict, rec_id: str, created_at: str) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-_VALID_BRIEF_STATES = {"queued", "in_dev", "pr_open", "merged"}
+_VALID_BRIEF_STATES = {"queued", "in_dev", "pr_open", "merged", "stale"}
 
 
 def update_brief_status(
@@ -307,3 +339,56 @@ def enqueue_brief(rec: dict) -> str:
 
     logger.info(f"[improvement_queue] queued brief {brief_path}")
     return str(brief_path)
+
+
+# ---------------------------------------------------------------------------
+# P1.7 — TTL stale (2026-05-27)
+# ---------------------------------------------------------------------------
+
+def mark_stale_old_briefs(max_age_days: int = 14) -> dict:
+    """
+    Marca como `stale` todos os briefs em `queued` há mais de
+    `max_age_days` dias e sem `claimer`. Fail-silent.
+
+    Returns: {checked, marked_stale, skipped_recent, skipped_claimed,
+              skipped_not_queued, errors}
+    """
+    from datetime import datetime, timedelta, timezone
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+
+    summary: dict = {
+        "checked": 0, "marked_stale": 0, "skipped_recent": 0,
+        "skipped_claimed": 0, "skipped_not_queued": 0, "errors": 0,
+        "stale_ids": [],
+    }
+    index = _load_index()
+    for rec_id, entry in list(index.items()):
+        summary["checked"] += 1
+        if entry.get("dev_state") != "queued":
+            summary["skipped_not_queued"] += 1
+            continue
+        if entry.get("claimer"):
+            summary["skipped_claimed"] += 1
+            continue
+        queued_at_str = entry.get("queued_at")
+        if not queued_at_str:
+            summary["skipped_recent"] += 1
+            continue
+        try:
+            queued_at = datetime.fromisoformat(queued_at_str)
+            if queued_at.tzinfo is None:
+                queued_at = queued_at.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            summary["errors"] += 1
+            continue
+        if queued_at >= cutoff:
+            summary["skipped_recent"] += 1
+            continue
+        # Marca como stale via update_brief_status (atualiza brief.md + index)
+        result = update_brief_status(rec_id, "stale")
+        if result.get("ok"):
+            summary["marked_stale"] += 1
+            summary["stale_ids"].append(rec_id)
+        else:
+            summary["errors"] += 1
+    return summary

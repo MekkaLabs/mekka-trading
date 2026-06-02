@@ -127,6 +127,50 @@ class SignalOutcomeMemory:
         self._records: List[OutcomeRecord] = []
         self._max_records = max_records
         self._total_stored: int = 0
+        # Persistência leve JSON (2026-05-27)
+        try:
+            from src.services.memory_persistence import load_state
+            payload = load_state("signal_outcome_memory")
+            if payload and isinstance(payload.get("records"), list):
+                for r in payload["records"][-max_records:]:
+                    try:
+                        self._records.append(OutcomeRecord(
+                            symbol=r.get("symbol", "?"),
+                            regime=r.get("regime", "UNKNOWN"),
+                            action=r.get("action", "HOLD"),
+                            confidence=float(r.get("confidence", 0.0)),
+                            pnl_usd=float(r.get("pnl_usd", 0.0)),
+                            trade_id=r.get("trade_id", ""),
+                        ))
+                    except (ValueError, TypeError):
+                        continue
+                self._total_stored = int(payload.get("total_stored", len(self._records)))
+                logger.info(
+                    f"[SignalOutcomeMemory] recovered {len(self._records)} outcomes "
+                    f"(total_stored counter={self._total_stored})"
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[SignalOutcomeMemory] load failed: {exc}")
+
+    def _persist(self) -> None:
+        """Fail-silent snapshot."""
+        try:
+            from src.services.memory_persistence import save_state
+            save_state("signal_outcome_memory", {
+                "version": 1,
+                "max_records": self._max_records,
+                "total_stored": self._total_stored,
+                "records": [
+                    {
+                        "symbol": r.symbol, "regime": r.regime, "action": r.action,
+                        "confidence": r.confidence, "pnl_usd": r.pnl_usd,
+                        "trade_id": r.trade_id,
+                    }
+                    for r in self._records
+                ],
+            })
+        except Exception:  # noqa: BLE001
+            pass
 
     def record(
         self,
@@ -165,6 +209,8 @@ class SignalOutcomeMemory:
         # Rotação: descarta os mais antigos
         if len(self._records) > self._max_records:
             self._records = self._records[-self._max_records:]
+
+        self._persist()
 
         logger.debug(
             f"[SignalOutcomeMemory] stored {symbol} {action} "

@@ -81,8 +81,6 @@ class BaseAgent(ABC, Generic[T]):
 
     # Last measured runtime in milliseconds — useful for introspection,
     # dashboards, and adaptive timeout tuning. Reset on every run() call.
-    _last_elapsed_ms: float = 0.0
-
     def __init__(
         self,
         codename: str,
@@ -92,6 +90,9 @@ class BaseAgent(ABC, Generic[T]):
         self.codename = codename
         self.role = role
         self.timeout_s = timeout_s
+        # Review-fix (2026-06-01): instância, não atributo de classe — evita que
+        # todas as instâncias compartilhem o mesmo 0.0 antes do 1º run().
+        self._last_elapsed_ms: float = 0.0
         self._log = logger.bind(agent=codename)
 
     async def run(self, *args: Any, **kwargs: Any) -> T:
@@ -132,6 +133,12 @@ class BaseAgent(ABC, Generic[T]):
                 "timeout_s": timeout_s,
             })
             raise AgentTimeoutError(self.codename, timeout_s) from exc
+        except asyncio.CancelledError:
+            # Review-fix (2026-06-01): defensivo/documental. Cancelamento de task
+            # (shutdown do NickFury) NUNCA deve virar AgentError — propaga limpo.
+            # (CancelledError já é BaseException e escaparia o except Exception
+            # abaixo, mas explicitar evita que um futuro refactor o engula.)
+            raise
         except AgentError as exc:
             elapsed = (time.perf_counter() - t0) * 1000
             self._last_elapsed_ms = elapsed
@@ -153,6 +160,51 @@ class BaseAgent(ABC, Generic[T]):
                 "error_type": type(exc).__name__,
             })
             raise AgentError(self.codename, str(exc)) from exc
+
+    # ------------------------------------------------------------------
+    # Diário de Aprendizado por Agente (2026-06-02)
+    # Cada agente escreve e relê suas próprias lições. Só CONSULTIVO:
+    # as lições viram contexto, nunca ajustam risco (isso é do Mentor).
+    # Ver src/services/agent_learning_journal.py.
+    # ------------------------------------------------------------------
+
+    async def learn(
+        self,
+        lesson: str,
+        *,
+        category: str = "general",
+        evidence: str = "",
+        confidence: float = 0.5,
+        tags: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """Registra uma lição deste agente (dedup/reforço; espelha no Obsidian).
+        Roda em thread para não bloquear o loop. Nunca levanta."""
+        try:
+            from src.services.agent_learning_journal import record  # noqa: WPS433
+            return await asyncio.to_thread(
+                record, self.codename, lesson,
+                category=category, evidence=evidence,
+                confidence=confidence, tags=tags,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[{self.codename}] learn() failed (ignored): {exc}")
+            return {"status": "error", "reason": str(exc)}
+
+    async def recall_learnings(
+        self,
+        query: Optional[str] = None,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Relê as lições mais relevantes deste agente (por reforço×confiança×
+        recência). Roda em thread. Nunca levanta — retorna [] em falha."""
+        try:
+            from src.services.agent_learning_journal import recall  # noqa: WPS433
+            return await asyncio.to_thread(
+                recall, self.codename, query, limit,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[{self.codename}] recall_learnings() failed: {exc}")
+            return []
 
     def _emit_event(self, topic: str, extra: dict[str, Any]) -> None:
         """Best-effort event publication. Never raises."""

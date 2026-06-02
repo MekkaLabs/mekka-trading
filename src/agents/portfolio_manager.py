@@ -118,17 +118,57 @@ class PortfolioManager(BaseAgent[EquitySnapshot]):
             raw_balance, raw_positions = await self._fetch_bybit_account_snapshot()
             return self._parse_bybit_rest_snapshot(raw_balance, raw_positions)
 
-        exchange = await self._connect_ccxt(exchange_id)
+        # L7 fix (2026-06-01 audit): reusar o exchange CCXT process-wide do IronMan
+        # (_CCXT_SHARED, já pré-aquecido com load_markets) em vez de construir e
+        # FECHAR um novo a cada snapshot — antes pagava load_markets (9-18s) toda
+        # vez (o motivo real da lentidão do painel). A instância é compartilhada:
+        # NÃO fechar. Fallback para cliente próprio se o cache não estiver pronto.
+        _shared = False
+        exchange = None
+        try:
+            from src.agents.iron_man import IronMan  # noqa: WPS433
+            exchange = await IronMan()._get_ccxt_exchange(exchange_id)
+            _shared = True
+        except Exception as _share_exc:  # noqa: BLE001
+            self._log.debug(
+                f"[PortfolioManager] shared CCXT indisponível, fallback próprio: {_share_exc}"
+            )
+            exchange = await self._connect_ccxt(exchange_id)
+
         try:
             balance = await exchange.fetch_balance()
             positions = await exchange.fetch_positions()
+            # P0-5: em COIN-M precisa mark prices pra converter saldo coin→USD.
+            # Best-effort fetch_tickers; injeta no balance dict via chave
+            # privada que parse_ccxt_snapshot extrai.
+            if (exchange_id == "binance"
+                    and str(getattr(settings, "binance_market_type", "linear")) == "inverse"):
+                try:
+                    assets = list(getattr(settings, "trading_assets", []) or [])
+                    if assets:
+                        ccxt_syms = [f"{a.upper()}/USD:{a.upper()}" for a in assets]
+                        tickers = await exchange.fetch_tickers(ccxt_syms)
+                        mp = {}
+                        for sym, ticker in (tickers or {}).items():
+                            coin = sym.split("/")[0].upper() if "/" in sym else sym
+                            last = ticker.get("last") or ticker.get("mark")
+                            if last:
+                                mp[coin] = float(last)
+                        balance["_mekka_mark_prices"] = mp
+                except Exception as exc:  # noqa: BLE001
+                    self._log.warning(
+                        f"[PortfolioManager/COIN-M] fetch_tickers failed: {exc}"
+                    )
             return self._parse_ccxt_snapshot(exchange_id, balance, positions)
         finally:
-            close_fn = getattr(exchange, "close", None)
-            if close_fn is not None:
-                maybe_awaitable = close_fn()
-                if hasattr(maybe_awaitable, "__await__"):
-                    await maybe_awaitable
+            # L7: só fechar se for um cliente PRÓPRIO (fallback). O exchange
+            # compartilhado do IronMan é process-wide e não deve ser fechado aqui.
+            if not _shared:
+                close_fn = getattr(exchange, "close", None)
+                if close_fn is not None:
+                    maybe_awaitable = close_fn()
+                    if hasattr(maybe_awaitable, "__await__"):
+                        await maybe_awaitable
 
     async def _connect_ccxt(self, exchange_id: str) -> Any:
         import ccxt.async_support as ccxt  # noqa: WPS433
@@ -169,7 +209,11 @@ class PortfolioManager(BaseAgent[EquitySnapshot]):
 
         exchange = cls(cfg)
         try:
-            if exchange_id in ("bybit", "binance") and not settings.is_mainnet:
+            # H5 fix (2026-06-01 audit): rotear sandbox POR exchange, não por
+            # settings.is_mainnet (que só olha hyperliquid_network). Antes, um
+            # operador em Binance mainnet com hyperliquid_network=testnet lia
+            # saldo/posições da Binance TESTNET → equity fictício inflando sizing.
+            if exchange_id in ("bybit", "binance") and settings.exchange_is_testnet(exchange_id):
                 set_sandbox_mode = getattr(exchange, "set_sandbox_mode", None)
                 if callable(set_sandbox_mode):
                     set_sandbox_mode(True)
@@ -386,7 +430,13 @@ class PortfolioManager(BaseAgent[EquitySnapshot]):
             else EquitySource.BINANCE
         )
 
-        equity, available = self._extract_balance_totals(exchange_id, balance)
+        # P0-5 fix: mark_prices injetados pelo caller async em inverse mode.
+        # `balance` dict pode ter chave `_mekka_mark_prices` pré-populada
+        # pelo _run_ccxt_exchange. Sync method não pode fazer fetch.
+        mark_prices_for_balance = balance.pop("_mekka_mark_prices", {}) or {}
+        equity, available = self._extract_balance_totals(
+            exchange_id, balance, mark_prices=mark_prices_for_balance,
+        )
         parsed_positions: list[PositionSummary] = []
         margin_used = max(equity - available, 0.0)
 
@@ -497,6 +547,7 @@ class PortfolioManager(BaseAgent[EquitySnapshot]):
         self,
         exchange_id: str,
         balance: dict[str, Any],
+        mark_prices: Optional[dict[str, float]] = None,
     ) -> tuple[float, float]:
         info = balance.get("info", {}) or {}
         if exchange_id == "bybit":
@@ -513,6 +564,44 @@ class PortfolioManager(BaseAgent[EquitySnapshot]):
 
         total_map = balance.get("total", {}) or {}
         free_map = balance.get("free", {}) or {}
+
+        # P0-5 fix (2026-05-28 audit): Binance COIN-M (inverse) settles em
+        # BTC/ETH, NÃO em USDT. Buscar só USDT/USDC retornava 0 → equity_usd=0
+        # → Batman/IronMan achavam conta vazia → não colocava ordens.
+        # Em inverse, somar saldos das trading_assets convertidos para USD
+        # via mark_prices do feed (se disponível).
+        binance_market_type = (
+            str(getattr(settings, "binance_market_type", "linear"))
+            if exchange_id == "binance" else "linear"
+        )
+        if binance_market_type == "inverse":
+            equity_usd = 0.0
+            available_usd = 0.0
+            mark_prices = mark_prices or {}
+            assets = list(getattr(settings, "trading_assets", []) or [])
+            for coin in assets:
+                coin_u = str(coin).upper().strip()
+                total_coin = self._safe_float(total_map.get(coin_u), 0.0)
+                free_coin = self._safe_float(free_map.get(coin_u), 0.0)
+                mark = float(mark_prices.get(coin_u, 0.0) or 0.0)
+                if mark > 0:
+                    equity_usd += total_coin * mark
+                    available_usd += free_coin * mark
+                else:
+                    # Sem cotação ao vivo: log mas não força equity=0
+                    # (operador pode rodar com 1 ativo principal)
+                    self._log.warning(
+                        f"[PortfolioManager/COIN-M] no mark price for {coin_u}, "
+                        f"{total_coin:.6f} {coin_u} excluded from equity_usd"
+                    )
+            if equity_usd <= 0:
+                # Fallback final: tenta USDT mesmo em inverse (algumas contas
+                # mistas têm USDT residual)
+                equity_usd = self._safe_float(total_map.get("USDT"), 0.0)
+                available_usd = self._safe_float(free_map.get("USDT"), equity_usd)
+            return equity_usd, max(available_usd, 0.0)
+
+        # Linear path (default)
         equity = self._safe_float(total_map.get("USDT"), 0.0)
         if equity <= 0:
             equity = self._safe_float(total_map.get("USDC"), 0.0)
@@ -571,6 +660,28 @@ class PortfolioManager(BaseAgent[EquitySnapshot]):
             snap = EquitySnapshot.model_validate(raw)
             if snap.source.value != settings.active_exchange.upper():
                 return None
+            # L1 fix (2026-06-01 audit): TTL + flag de staleness. ANTES, um cache
+            # arbitrariamente velho era servido como se confiável (sizing contra
+            # equity desatualizado). Agora: descarta se mais velho que o TTL
+            # (default 15min) e anota a idade no error (is_degraded fica True).
+            ttl = float(getattr(settings, "snapshot_cache_max_age_seconds", 900.0) or 900.0)
+            try:
+                from datetime import datetime, timezone  # noqa: WPS433
+                ts = getattr(snap, "timestamp", None)
+                if ts is not None:
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    age = (datetime.now(timezone.utc) - ts).total_seconds()
+                    if age > ttl:
+                        self._log.warning(
+                            f"[PortfolioManager] cache de snapshot expirado "
+                            f"({age:.0f}s > {ttl:.0f}s TTL) — descartando"
+                        )
+                        return None
+                    snap.error = f"{reason} (cache {age:.0f}s atrás)"
+                    return snap
+            except Exception:  # noqa: BLE001
+                pass
             snap.error = reason
             return snap
         except Exception:  # noqa: BLE001

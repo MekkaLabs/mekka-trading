@@ -107,22 +107,29 @@ class SpiderMan(BaseAgent[AnomalyReport]):
         # ------------------------------------------------------------------
         # 1. Flash Crash
         # ------------------------------------------------------------------
+        # Review-fix (2026-06-01): flash crash = queda BRUSCA candle-a-candle, não
+        # desvio da EMA-20. Antes, em downtrend sustentado o preço fica
+        # naturalmente >5% abaixo da EMA-20 sem crash → HIGH/should_pause FALSO que
+        # paralisava o trading; e um crash perto da EMA não disparava. Agora mede o
+        # maior retorno negativo close-a-close em recent_closes (queda real).
         price = market_data.price
-        if price > 0 and market_data.ema_20 is not None:
-            # Approximate: if price is > FLASH_CRASH_PCT below ema_20
-            drop_from_ema = (market_data.ema_20 - price) / market_data.ema_20
-            if drop_from_ema > FLASH_CRASH_PCT:
-                msg = (
-                    f"Flash crash detected: price {price:,.2f} is "
-                    f"{drop_from_ema:.1%} below EMA-20 ({market_data.ema_20:,.2f})"
-                )
-                anomalies.append(msg)
-                details["flash_crash"] = {
-                    "price": price,
-                    "ema_20": market_data.ema_20,
-                    "drop_pct": round(drop_from_ema, 4),
-                }
-                _bump(AnomalySeverity.HIGH)
+        _closes = market_data.recent_closes or []
+        max_candle_drop = 0.0
+        if len(_closes) >= 2:
+            for _i in range(1, len(_closes)):
+                _prev = _closes[_i - 1]
+                if _prev and _prev > 0:
+                    _d = (_prev - _closes[_i]) / _prev
+                    if _d > max_candle_drop:
+                        max_candle_drop = _d
+        if max_candle_drop > FLASH_CRASH_PCT:
+            msg = f"Flash crash: queda de {max_candle_drop:.1%} em um candle (close-a-close)"
+            anomalies.append(msg)
+            details["flash_crash"] = {
+                "price": price,
+                "max_candle_drop_pct": round(max_candle_drop, 4),
+            }
+            _bump(AnomalySeverity.HIGH)
 
         # ------------------------------------------------------------------
         # 2. Volume Spike

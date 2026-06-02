@@ -103,10 +103,14 @@ class Thor(BaseAgent[VolatilityData]):
         if atr is not None and price > 0:
             atr_pct = atr / price
         else:
-            # Estimate from high/low range of last bar if ATR missing
-            atr_pct = 0.02  # conservative default: 2% (MEDIUM regime)
+            # Review-fix (2026-06-01): ATR ausente → assumir regime ALTO (não
+            # MEDIUM). "Não sei a volatilidade" NÃO deve virar "posição cheia":
+            # ATR costuma faltar justamente com dados ruins/poucos candles —
+            # exatamente quando se quer REDUZIR o tamanho. 0.045 cai em HIGH (0.6×).
+            atr_pct = 0.045
             self._log.warning(
-                f"[Thor] {symbol} ATR unavailable, defaulting to 2% regime"
+                f"[Thor] {symbol} ATR unavailable — assumindo regime HIGH "
+                "(sizing conservador 0.6×)"
             )
 
         # Classify regime

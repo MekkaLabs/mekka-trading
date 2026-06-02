@@ -103,6 +103,42 @@ class DecisionMemoryStore:
     _EVENT_DECISION = "DECISION_MEMORY"
     _EVENT_OUTCOME = "DECISION_OUTCOME"
 
+    def summary(self) -> dict:
+        """INV-3 (2026-05-29) — snapshot pro /api/memory/snapshot.
+        Conta decisions, outcomes, win_rate via audit_log direto."""
+        out = {
+            "total_decisions": 0, "with_outcome": 0, "pending": 0,
+            "win_rate": None, "last_decision_ts": None,
+        }
+        try:
+            from pathlib import Path as _P
+            import sqlite3 as _sqlite3
+            db = _P(__file__).resolve().parents[2] / "data" / "mekka_trading.db"
+            if not db.exists():
+                return out
+            conn = _sqlite3.connect(str(db))
+            try:
+                cur = conn.execute(
+                    "SELECT COUNT(*) FROM audit_log WHERE event='DECISION_MEMORY'"
+                )
+                out["total_decisions"] = int(cur.fetchone()[0] or 0)
+                cur = conn.execute(
+                    "SELECT COUNT(*) FROM audit_log WHERE event='DECISION_OUTCOME'"
+                )
+                out["with_outcome"] = int(cur.fetchone()[0] or 0)
+                out["pending"] = max(0, out["total_decisions"] - out["with_outcome"])
+                cur = conn.execute(
+                    "SELECT MAX(timestamp) FROM audit_log WHERE event='DECISION_MEMORY'"
+                )
+                ts = cur.fetchone()[0]
+                if ts:
+                    out["last_decision_ts"] = ts
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[DecisionMemory] summary failed: {exc}")
+        return out
+
     # ── escrita ──────────────────────────────────────────
 
     async def save_decision(self, record: DecisionRecord) -> None:

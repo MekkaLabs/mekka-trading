@@ -397,13 +397,29 @@ def map_ccxt_positions(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
         coin = to_mekka(row.get("symbol") or "")
         side_raw = (row.get("side") or "").lower()
         side = "LONG" if side_raw == "long" else "SHORT"
+        # P2 (2026-05-28 audit): em Binance COIN-M (inverse), unrealizedPnl
+        # vem em COIN (BTC, ETH) — settlement currency. Converter pra USD
+        # via markPrice se inverse mode.
+        pnl_raw = _to_float(row.get("unrealizedPnl"))
+        pnl_usd = pnl_raw
+        try:
+            from src.config.settings import settings
+            if (settings.active_exchange == "binance"
+                    and str(getattr(settings, "binance_market_type", "linear")) == "inverse"):
+                mark = _to_float(row.get("markPrice"))
+                if mark and mark > 0 and pnl_raw is not None:
+                    pnl_usd = pnl_raw * mark
+        except Exception:  # noqa: BLE001
+            pass  # mantém pnl_raw como pnl_usd no fallback
+
         out.append({
             "symbol": coin,
             "side": side,
             "size": abs(size),
             "entry_price": _to_float(row.get("entryPrice")),
             "mark_price": _to_float(row.get("markPrice")),
-            "pnl_usd": _to_float(row.get("unrealizedPnl")),
+            "pnl_usd": pnl_usd,
+            "pnl_quote": pnl_raw,  # raw da exchange (USDT em linear, coin em inverse)
             "leverage": _to_int(row.get("leverage")),
             "liq_price": _to_float(row.get("liquidationPrice")) or None,
             "is_paper": False,
@@ -606,7 +622,12 @@ async def fetch_open_orders() -> dict[str, Any]:
                 await exchange.load_markets()
                 for _sym in list(settings.trading_assets):
                     try:
-                        ccxt_sym = to_ccxt(_sym, exchange_id)  # type: ignore[arg-type]
+                        # P0-3 fix: passar market_type para Binance COIN-M
+                        _mt = (
+                            getattr(settings, "binance_market_type", "linear")
+                            if exchange_id == "binance" else "linear"
+                        )
+                        ccxt_sym = to_ccxt(_sym, exchange_id, market_type=_mt)  # type: ignore[arg-type]
                         part = await asyncio.wait_for(
                             exchange.fetch_open_orders(ccxt_sym), timeout=8.0)
                         raw.extend(part or [])
@@ -724,12 +745,19 @@ async def fetch_positions(
             size = _to_float(p.size)
             # Live mark: prefer the streaming price feed, then the venue mark
             # from the snapshot, then entry (so PnL reads 0 rather than crash).
+            # M8 (2026-06-01 audit): só confiar no preço STREAMING se ele for
+            # recente. Um feed WS caído deixava um preço velho sobrepondo o mark
+            # fresco da venue (snapshot) → PnL/painel enganoso.
             snap_mark = _to_float(getattr(p, "mark_price", None))
-            mark = (
-                _to_float(prices.get(sym) or prices.get(sym.upper()))
-                or snap_mark
-                or entry
-            )
+            ws_mark = _to_float(prices.get(sym) or prices.get(sym.upper()))
+            if ws_mark > 0:
+                try:
+                    from src.services.price_feed import mark_is_fresh  # noqa: WPS433
+                    if not mark_is_fresh(sym, ttl_seconds=15.0):
+                        ws_mark = 0.0  # stale → cai para o mark da venue
+                except Exception:  # noqa: BLE001
+                    pass
+            mark = ws_mark or snap_mark or entry
 
             # Prefer a live-recomputed PnL from the streaming mark so the panel
             # updates in real time. Fall back to the snapshot's uPnL when we

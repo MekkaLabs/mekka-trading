@@ -384,11 +384,16 @@ class TestCheckRiskLimits:
     """[036] check_risk_limits warns on looser-than-recommended mainnet values."""
 
     def _mock_conservative(self):
+        # M5 (2026-06-01 audit): thresholds da 1ª semana alinhados ao
+        # MAINNET-AUTHORIZATION (size ≤ 0.1%, lev ≤ 2x, ≤ 3 trades/dia).
         m = MagicMock()
-        m.max_position_size_pct = 0.005
+        m.max_position_size_pct = 0.001
         m.max_leverage = 2
-        m.max_trades_per_day = 5
+        m.max_trades_per_day = 3
         m.max_open_positions = 2
+        m.paper_trading = True
+        m.active_exchange = "binance"
+        m.exchange_is_testnet = lambda _ex=None: True
         return m
 
     def test_conservative_limits_pass(self):

@@ -27,6 +27,17 @@ export const AGENTS = [
   { id: 'forge', name: 'Forge', layer: 'L4', role: 'Ops Scanner', color: '#fb923c', outfit: 'red_tech' },
   { id: 'ice_man', name: 'Ice Man', layer: 'L4', role: 'External Research', color: '#7dd3fc', outfit: 'ice_blue' },
   { id: 'sage', name: 'Sage', layer: 'L4', role: 'Measurement / KPI', color: '#06b6d4', outfit: 'data_shades' },
+  // Continuous-Improvement / vault curation crew.
+  { id: 'jean_grey', name: 'Jean Grey', layer: 'L4', role: 'Vault Curator', color: '#f43f5e', outfit: 'red_telepath' },
+  { id: 'mentor', name: 'Mentor', layer: 'L4', role: 'Self-Improvement Loop', color: '#a3a3a3', outfit: 'silver_robe' },
+  // Strategy-tier auxiliaries.
+  { id: 'vision_critic', name: 'Vision Critic', layer: 'L2', role: 'Second-Look Reviewer', color: '#fcd34d', outfit: 'green_gold_visor' },
+  { id: 'vision_moa', name: 'Vision MoA', layer: 'L2', role: 'Mixture of Agents', color: '#fde68a', outfit: 'green_gold_trio' },
+  // Operator-facing concierge + cosmic risk archetype.
+  { id: 'mekka', name: 'Mekka', layer: 'L4', role: 'Operator Concierge', color: '#facc15', outfit: 'crown_gold' },
+  { id: 'galactus', name: 'Galactus', layer: 'L4', role: 'Premortem Devourer', color: '#7c3aed', outfit: 'purple_cosmic' },
+  // Prometheus — observer/learning agent (read-only, NOT a trader).
+  { id: 'prometheus', name: 'Prometheus', layer: 'Dev/QA', role: 'Prompt Auditor & Observer', color: '#f97316', outfit: 'orange_flame' },
 ];
 
 export const STATIONS = [
@@ -54,6 +65,14 @@ export const STATIONS = [
   { id: 'forge', x: 230, y: 445 },
   { id: 'ice_man', x: 320, y: 445 },
   { id: 'sage', x: 410, y: 445 },
+  { id: 'jean_grey', x: 500, y: 445 },
+  // Row 6 — Strategy auxiliaries + curation + Prometheus.
+  { id: 'vision_critic', x: 50, y: 535 },
+  { id: 'vision_moa', x: 140, y: 535 },
+  { id: 'mentor', x: 230, y: 535 },
+  { id: 'mekka', x: 320, y: 535 },
+  { id: 'galactus', x: 410, y: 535 },
+  { id: 'prometheus', x: 500, y: 535 },
 ];
 
 export const AGENT_ID_MAP = {
@@ -94,6 +113,16 @@ export const AGENT_ID_MAP = {
   ice_man: 'ice_man',
   externalresearcher: 'ice_man',
   sage: 'sage',
+  jean_grey: 'jean_grey',
+  jeangrey: 'jean_grey',
+  mentor: 'mentor',
+  mekka: 'mekka',
+  galactus: 'galactus',
+  vision_critic: 'vision_critic',
+  visioncritic: 'vision_critic',
+  vision_moa: 'vision_moa',
+  visionmoa: 'vision_moa',
+  prometheus: 'prometheus',
 };
 
 export function normalizeAgentId(raw) {

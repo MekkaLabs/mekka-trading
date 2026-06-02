@@ -184,6 +184,26 @@ class Mentor(BaseAgent[MentorReport]):
         except Exception as exc:  # noqa: BLE001
             self._log.debug(f"[Mentor] audit skipped: {exc}")
 
+        # Diário de aprendizado (2026-06-02): registra cada insight distilado
+        # como uma lição do Mentor — append-only, não esquece. SÓ CONSULTIVO:
+        # o auto-ajuste de parâmetros continua pelo caminho do mentor_applier
+        # (tighten-only). Aqui é só memória legível/recuperável.
+        try:
+            for s in report.suggestions:
+                lesson = (
+                    f"{s.reason} → sugere {s.direction} {s.parameter_name} "
+                    f"de {s.current_value} para {s.suggested_value}"
+                )
+                await self.learn(
+                    lesson,
+                    category="calibração",
+                    evidence=", ".join(f"{k}={v}" for k, v in (s.evidence or {}).items()),
+                    confidence=float(s.confidence),
+                    tags=["mentor", s.parameter_name, s.direction],
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[Mentor] learning journal skipped: {exc}")
+
         return report
 
     # ── Evidence collectors ───────────────────────────────────────────
@@ -370,9 +390,31 @@ class Mentor(BaseAgent[MentorReport]):
     # ── Audit ─────────────────────────────────────────────────────────
 
     async def _audit_suggestions(self, report: MentorReport) -> None:
-        if report.is_empty:
-            return
+        # INV-11 (2026-05-29): emite SEMPRE um evento ao rodar — antes só
+        # logávamos quando havia sugestão, então auditoria via audit_log
+        # mostrava 0 eventos em 7 dias mesmo com Mentor rodando. Agora:
+        #   - MENTOR_SUGGESTED (INFO) → quando há sugestões
+        #   - MENTOR_RAN (DEBUG)       → quando rodou e não tinha o que sugerir
+        # Ambos carregam o observation_summary pro dashboard refletir saúde.
         from src.persistence.repository import MekkaRepository  # noqa: WPS433
+
+        if report.is_empty:
+            try:
+                await MekkaRepository.log_event(
+                    agent="Mentor",
+                    event="MENTOR_RAN",
+                    severity="DEBUG",
+                    message=(
+                        f"Mentor rodou sem sugestões (obs: {report.observation_summary})"
+                    ),
+                    payload={
+                        "observation": report.observation_summary,
+                        "n_suggestions": 0,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._log.debug(f"[Mentor] MENTOR_RAN emit skipped: {exc}")
+            return
 
         await MekkaRepository.log_event(
             agent="Mentor",
@@ -387,3 +429,117 @@ class Mentor(BaseAgent[MentorReport]):
                 "observation": report.observation_summary,
             },
         )
+
+        # P1.8 (2026-05-27) — Mentor → IMP automático.
+        # Suggestions com can_auto_apply=True E confidence>=0.7 viram entry
+        # no inbox.json (visível no próximo Mekka._run como proposal).
+        # Fechamos o gap: ParameterSuggestion deixa de ser uma ilha
+        # (Telegram only) e entra no governance via Mekka council.
+        # Fail-silent — nunca afeta o ciclo do Mentor.
+        try:
+            high_conf_auto = [
+                s for s in report.suggestions
+                if s.can_auto_apply and s.confidence >= 0.7
+            ]
+            if high_conf_auto:
+                self._enqueue_in_inbox(high_conf_auto)
+                # Write-back loop: registra cada sugestão high-conf no vault.
+                # Opt-in via MENTOR_VAULT_WRITER_ENABLED. Fail-silent.
+                try:
+                    from src.services import trading_vault_writer as _tvw
+                    for s in high_conf_auto:
+                        _tvw.record_mentor_suggestion({
+                            "target": s.parameter_name,
+                            "current_value": s.current_value,
+                            "suggested_value": s.suggested_value,
+                            "confidence": s.confidence,
+                            # Review-fix (2026-06-01): atributos certos (evidence
+                            # é dict; reason, não rationale) — antes lançava
+                            # AttributeError engolido → vault writer nunca rodava.
+                            "n_samples": (s.evidence or {}).get("n"),
+                            "reason": s.reason,
+                            "metric": getattr(s, "metric", "win_rate"),
+                            "scope": getattr(s, "scope", "global"),
+                            "can_auto_apply": s.can_auto_apply,
+                        })
+                except Exception as exc_vault:  # noqa: BLE001
+                    import logging
+                    logging.getLogger("mekka.mentor").debug(
+                        f"[Mentor] vault writer no-op: {exc_vault}"
+                    )
+        except Exception as exc:  # noqa: BLE001
+            import logging
+            logging.getLogger("mekka.mentor").debug(
+                f"[Mentor] inbox enqueue no-op: {exc}"
+            )
+
+    @staticmethod
+    def _enqueue_in_inbox(suggestions: list) -> int:
+        """Adiciona suggestions ao data/improvement_inbox.json.
+        Cada uma vira uma proposal-shaped dict pro Mekka council.
+        Idempotente: dedup por parameter_name (mantém o mais recente)."""
+        import json
+        from pathlib import Path
+        from datetime import datetime, timezone
+
+        inbox = Path(__file__).resolve().parents[2] / "data" / "improvement_inbox.json"
+        try:
+            inbox.parent.mkdir(parents=True, exist_ok=True)
+            current = []
+            if inbox.exists():
+                try:
+                    current = json.loads(inbox.read_text(encoding="utf-8")) or []
+                except Exception:  # noqa: BLE001
+                    current = []
+            # Dedup por parameter_name
+            existing_params = {
+                e.get("parameter_name") for e in current
+                if e.get("source") == "mentor"
+            }
+            added = 0
+            for s in suggestions:
+                if s.parameter_name in existing_params:
+                    continue
+                # Review-fix (2026-06-01): ANTES este dict usava s.rationale /
+                # s.evidence_n / s.evidence_period (atributos INEXISTENTES em
+                # ParameterSuggestion → AttributeError engolido pelo except externo
+                # → o inbox NUNCA era populado, o loop de aprendizado morria
+                # silenciosamente). E omitia direction/confidence/suggested_value/
+                # can_auto_apply, que o mentor_applier exige. Corrigido: nomes
+                # certos (reason/evidence dict) + os 4 campos do contrato do applier.
+                _ev = s.evidence or {}
+                current.append({
+                    "title": (
+                        f"Mentor: {s.parameter_name} "
+                        f"{s.current_value} → {s.suggested_value}"
+                    ),
+                    "description": s.reason,
+                    "impact": "MEDIUM" if s.confidence >= 0.8 else "LOW",
+                    "area": "calibration",
+                    "evidence": (
+                        f"n={_ev.get('n')}, period={_ev.get('period')}, "
+                        f"mentor_conf={s.confidence:.2f}"
+                    ),
+                    "source": "mentor",
+                    "suggested_story": f"Aplicar {s.parameter_name}={s.suggested_value}",
+                    "parameter_name": s.parameter_name,
+                    # Contrato exigido pelo mentor_applier.apply_inbox:
+                    "suggested_value": s.suggested_value,
+                    "confidence": float(s.confidence),
+                    "can_auto_apply": bool(s.can_auto_apply),
+                    "direction": s.direction,
+                    "env_line": s.to_env_line(),
+                    "_mentor_ts": datetime.now(timezone.utc).isoformat(),
+                })
+                added += 1
+            if added > 0:
+                # Review-fix: escrita atômica (era write_text direto, não-atômico,
+                # com race entre auto-learning loop e o Mekka council).
+                try:
+                    from src.services.atomic_json import atomic_write_json  # noqa: WPS433
+                    atomic_write_json(inbox, current)
+                except Exception:  # noqa: BLE001
+                    inbox.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
+            return added
+        except OSError:
+            return 0

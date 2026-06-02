@@ -262,15 +262,36 @@ class Wolverine(BaseAgent[RecoveryPlan]):
         total_upnl = sum(u.unrealized_pnl_usd for u in updates)
         intraday_dd = max(-total_upnl / equity, 0.0)
 
+        # Review-fix (2026-06-01): trigger POR-POSIÇÃO. O drawdown agregado mascara
+        # uma posição sangrando (A +$500 / B −$600 → net pequeno). Se UMA posição
+        # perde mais que wolverine_position_emergency_pct do equity, isso é
+        # emergência mesmo com agregado calmo. Default 5%.
+        _pos_emerg_pct = float(getattr(settings, "wolverine_position_emergency_pct", 0.05) or 0.05)
+        _worst_loss_pct = 0.0
+        if equity > 0:
+            for u in updates:
+                _loss_pct = max(-float(u.unrealized_pnl_usd) / equity, 0.0)
+                if _loss_pct > _worst_loss_pct:
+                    _worst_loss_pct = _loss_pct
+        _position_emergency = _worst_loss_pct >= _pos_emerg_pct
+
         # Backstop kill switch — fires when intraday drawdown breaches
-        # the daily limit between Daily PnL writes. Defensive only.
+        # the daily limit between Daily PnL writes, OR when a single position
+        # bleeds past the per-position emergency threshold. Defensive only.
         kill_engaged = False
         notes = "monitor cycle ok"
-        if intraday_dd >= settings.max_daily_drawdown_pct:
-            reason = (
-                f"[Wolverine] Intraday drawdown {intraday_dd:.2%} ≥ "
-                f"limit {settings.max_daily_drawdown_pct:.2%} — kill switch engaged"
-            )
+        if intraday_dd >= settings.max_daily_drawdown_pct or _position_emergency:
+            if _position_emergency and intraday_dd < settings.max_daily_drawdown_pct:
+                reason = (
+                    f"[Wolverine] Posição única sangrando {_worst_loss_pct:.2%} ≥ "
+                    f"emergência {_pos_emerg_pct:.2%} (agregado {intraday_dd:.2%} calmo) "
+                    "— kill switch engaged"
+                )
+            else:
+                reason = (
+                    f"[Wolverine] Intraday drawdown {intraday_dd:.2%} ≥ "
+                    f"limit {settings.max_daily_drawdown_pct:.2%} — kill switch engaged"
+                )
             try:
                 engage_kill_switch(reason)
                 kill_engaged = True

@@ -1,0 +1,126 @@
+name: Prometheus Prompt Audit
+
+on:
+  pull_request:
+    paths:
+      - 'src/agents/**.py'
+      - 'src/prompt_engineering/**'
+      - 'scripts/prometheus_cli.py'
+      - '.github/workflows/prometheus-audit.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/agents/**.py'
+  workflow_dispatch: {}
+
+jobs:
+  audit-prompts:
+    name: Audit prompts in src/agents/
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install minimal deps for Prometheus
+        # Prometheus exige só pydantic + loguru. Mantemos minimal para o CI
+        # não puxar todo o stack do trading.
+        run: |
+          python -m pip install --upgrade pip
+          pip install pydantic>=2.0 loguru
+
+      - name: Scan all prompts in src/agents/
+        id: scan
+        run: |
+          mkdir -p /tmp/prometheus
+          python scripts/prometheus_cli.py scan-agents --json > /tmp/prometheus/scan.json
+          echo "scan_count=$(python -c 'import json;print(len(json.load(open(\"/tmp/prometheus/scan.json\"))))')" >> $GITHUB_OUTPUT
+
+      - name: Audit each prompt file
+        id: audit
+        run: |
+          python <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          scan = json.loads(Path("/tmp/prometheus/scan.json").read_text())
+          files = sorted({p["source_file"] for p in scan})
+          results = []
+          for f in files:
+              proc = subprocess.run(
+                  ["python", "scripts/prometheus_cli.py", "audit", f, "--json"],
+                  capture_output=True, text=True, check=False,
+              )
+              if proc.returncode != 0:
+                  continue
+              for chunk in proc.stdout.strip().split("\n}\n{"):
+                  # robusto se vierem múltiplos JSONs concatenados
+                  try:
+                      doc = json.loads(chunk if chunk.startswith("{") else "{" + chunk)
+                      results.append({
+                          "file": f,
+                          "prompt": doc["prompt"]["variable_name"],
+                          "score": doc["scorecard"]["score_total"],
+                          "health": doc["scorecard"]["score_total"],
+                      })
+                  except Exception:
+                      pass
+          Path("/tmp/prometheus/audit.json").write_text(json.dumps(results, indent=2))
+          print(f"Audited {len(results)} prompts")
+          PY
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prometheus-audit-${{ github.run_id }}
+          path: /tmp/prometheus/
+          retention-days: 30
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let results = [];
+            try {
+              results = JSON.parse(fs.readFileSync('/tmp/prometheus/audit.json', 'utf8'));
+            } catch (e) { results = []; }
+            const fmt = (s) => {
+              if (s >= 32) return `${s}/40 ✅ EXCELLENT`;
+              if (s >= 24) return `${s}/40 🟢 GOOD`;
+              if (s >= 16) return `${s}/40 🟡 NEEDS_WORK`;
+              return `${s}/40 🔴 CRITICAL`;
+            };
+            const rows = results.map(r =>
+              `| \`${r.prompt}\` | ${r.file} | ${fmt(r.score)} |`
+            ).join('\n');
+            const body = [
+              `## 🔥 Prometheus — Prompt Audit`,
+              ``,
+              `Auditoria automática de prompts em \`src/agents/\` segundo framework P.R.O.M.P.T.`,
+              ``,
+              `| Prompt | File | Score |`,
+              `|---|---|---|`,
+              rows || '_nenhum prompt detectado_',
+              ``,
+              `Artefato completo: **prometheus-audit-${{ github.run_id }}**`,
+              ``,
+              `_Auditoria informativa — não bloqueia merge._`,
+            ].join('\n');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });

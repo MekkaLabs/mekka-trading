@@ -218,19 +218,70 @@ class Vision(BaseAgent[TradingSignal]):
         except Exception as _mem_exc:  # noqa: BLE001
             self._log.debug(f"[Vision] Episodic memory fetch skipped: {_mem_exc}")
 
+        # Loop aprendizado→decisão (2026-06-02, opt-in via vision_consume_learnings):
+        # injeta as lições mais reforçadas do diário (Vision + outcomes do Cyclops
+        # para este símbolo) para calibrar a decisão. Default OFF — muda decisão,
+        # validar em paper/testnet primeiro. Fail-silent.
+        try:
+            if getattr(settings, "vision_consume_learnings", False):
+                import asyncio as _aio  # noqa: WPS433
+                from src.services.agent_learning_journal import (  # noqa: WPS433
+                    build_context_snippet, recall, top_reinforced,
+                )
+                _vis = await _aio.to_thread(recall, "Vision", 5)
+                _cyc = await _aio.to_thread(top_reinforced, 2, 4, "outcome-loss")
+                _lessons = (_vis or []) + [
+                    l for l in (_cyc or []) if analysis.symbol in str(l.get("lesson", ""))
+                ]
+                _snippet = build_context_snippet("Vision", _lessons)
+                if _snippet:
+                    try:
+                        from src.services.bounded_output import BoundedOutput as _BO3  # noqa: WPS433
+                        _snippet = _BO3.bound_prompt_section(
+                            "Lições do Diário", _snippet, max_chars=2_000
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    prompt = prompt + "\n\n" + _snippet
+        except Exception as _lrn_exc:  # noqa: BLE001
+            self._log.debug(f"[Vision] learning journal fetch skipped: {_lrn_exc}")
+
         # Story #72 — Vault enrichment (Second-brain / Neural-graph).
         # Read-only: appends curated notes from the Obsidian vault when the
         # operator enabled VAULT_ENRICHMENT_ENABLED. Fail-silent + bounded
         # latency (1.5s) + cached. Never changes Vision's decision path —
         # worst case the prompt stays unchanged.
+        #
+        # INV-13 (2026-05-29) — duas consultas paralelas:
+        #   1. trend-specific (BULLISH / BEARISH / etc) → snippets de
+        #      decisões anteriores e dailies relevantes ao trend atual.
+        #   2. regime-playbook ("regime playbook") → puxa playbooks
+        #      canônicos que o operador curou em
+        #      20 - Areas/Trading/Estratégias/. Antes Vision só via
+        #      trend snippets — perdia playbook estratégico.
+        # Ambas fail-silent e cacheadas via vault_context CACHE.
         try:
             from src.services.vault_context import vault_context_for  # noqa: WPS433
-            vault_block = await vault_context_for(
+            import asyncio as _asyncio  # noqa: WPS433
+            trend_topic = (analysis.chart.trend.value if analysis.chart else None)
+            vault_trend_task = vault_context_for(
                 symbol=analysis.symbol,
-                topic=(analysis.chart.trend.value if analysis.chart else None),
+                topic=trend_topic,
             )
-            if vault_block:
-                prompt = prompt + "\n\n" + vault_block
+            vault_playbook_task = vault_context_for(
+                symbol=analysis.symbol,
+                topic="regime playbook",
+                limit=2,  # mais focado — só playbook, não daily
+            )
+            vault_trend, vault_playbook = await _asyncio.gather(
+                vault_trend_task, vault_playbook_task,
+                return_exceptions=True,
+            )
+            for vblock in (vault_trend, vault_playbook):
+                if isinstance(vblock, Exception):
+                    continue
+                if vblock:
+                    prompt = prompt + "\n\n" + vblock
         except Exception as _vault_exc:  # noqa: BLE001
             self._log.debug(f"[Vision] Vault enrichment skipped: {_vault_exc}")
 
@@ -560,6 +611,8 @@ class Vision(BaseAgent[TradingSignal]):
                 payload250 = _structured250.model_dump()
                 signal = self._build_signal(payload250, symbol=symbol, fallback_price=price)
                 signal = self._apply_degraded_quality_clamp(signal, analysis)
+                # SCALP-1 (2026-05-29): hard-block por Flash disagreement em modo scalp
+                signal = self._apply_flash_scalp_hard_block(signal, analysis, price)
                 self._log.info(f"[Vision:250] structured ✓ {signal.summary()}")
                 return signal
             except Exception as _b250_exc:  # noqa: BLE001
@@ -606,8 +659,107 @@ class Vision(BaseAgent[TradingSignal]):
             )
 
         signal = self._apply_degraded_quality_clamp(signal, analysis)
+        # SCALP-1 (2026-05-29): hard-block por Flash disagreement em modo scalp
+        signal = self._apply_flash_scalp_hard_block(signal, analysis, price)
         self._log.info(f"[Vision] {signal.summary()}")
+
+        # Write-back loop: registra decisões de alta convicção no vault.
+        # Opt-in via VISION_VAULT_WRITER_ENABLED. Fail-silent + throttled.
+        try:
+            from src.services import trading_vault_writer as _tvw
+            _tvw.record_vision_decision({
+                "symbol": symbol,
+                "action": getattr(signal, "action", ""),
+                "confidence": float(getattr(signal, "confidence", 0.0)),
+                "price": price,
+                "size_pct": getattr(signal, "size_pct", None),
+                "cycle_id": getattr(analysis, "cycle_id", None),
+                "rationale": getattr(signal, "rationale", ""),
+            })
+        except Exception as exc_vault:  # noqa: BLE001
+            self._log.debug(f"[Vision] vault writer no-op: {exc_vault}")
+
         return signal
+
+    def _apply_flash_scalp_hard_block(
+        self,
+        signal: TradingSignal,
+        analysis: MarketAnalysis,
+        price: float,
+    ) -> TradingSignal:
+        """
+        SCALP-1 (2026-05-29) — hard-block trade quando Flash discorda em scalp.
+
+        ANTES: o prompt instruía o LLM a "reduzir size_pct em 20%" quando Flash
+        discordava (Story 244 lines 78-82). Isso permitia múltiplos trades
+        reduzidos seguidos quando Flash dizia o oposto — Gate 3s só conta o
+        número de trades, não a magnitude. Resultado: capital sangrava em
+        contra-tendência intra-candle.
+
+        DEPOIS: em modo scalp E severity=HIGH, força HOLD com rationale
+        claro. Trades swing continuam intactos (severity check só roda no
+        ramo scalp do bridge).
+
+        Idempotente / fail-silent / read-only no analysis.
+        """
+        try:
+            # HOLD não precisa de check
+            action = getattr(signal, "action", None)
+            if action is None or str(action) in ("TradeAction.HOLD", "HOLD"):
+                return signal
+
+            momentum = getattr(analysis, "momentum", None)
+            if momentum is None:
+                return signal
+
+            from src.services.flash_proposer_bridge import (  # noqa: WPS433
+                should_block_for_disagreement,
+                DisagreementSeverity,
+            )
+
+            should_block, reason = should_block_for_disagreement(
+                momentum, action,
+                severity_to_block=DisagreementSeverity.HIGH,
+            )
+            if not should_block:
+                return signal
+
+            # Bloqueia: força HOLD + audit event
+            self._log.warning(
+                f"[Vision:SCALP-1] {analysis.symbol} HARD-BLOCK por Flash "
+                f"disagreement HIGH em scalp: {reason}"
+            )
+            try:
+                import asyncio as _asyncio  # noqa: WPS433
+                from src.persistence.repository import MekkaRepository  # noqa: WPS433
+                loop = _asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(MekkaRepository.log_event(
+                        agent="Vision",
+                        event="FLASH_SCALP_HARD_BLOCK",
+                        severity="WARNING",
+                        symbol=analysis.symbol,
+                        message=reason,
+                        payload={
+                            "original_action": str(action),
+                            "original_confidence": float(
+                                getattr(signal, "confidence", 0.0) or 0.0,
+                            ),
+                            "reason": reason,
+                        },
+                    ))
+            except Exception:  # noqa: BLE001
+                pass
+
+            return self._fallback_hold(
+                symbol=analysis.symbol,
+                price=price,
+                reason=f"SCALP Flash hard-block: {reason}",
+                category="safety_skip",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[Vision:SCALP-1] hard-block check skipped: {exc}")
+            return signal
 
     def _apply_degraded_quality_clamp(
         self,

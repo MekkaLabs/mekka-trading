@@ -22,6 +22,13 @@ class ExecutionStatus(str, Enum):
     PAPER = "PAPER"  # paper-trade simulation
     ERROR = "ERROR"
     SKIPPED = "SKIPPED"
+    # H6 outbox (2026-06-01 audit): linha gravada ANTES da ordem ir à corretora.
+    # Se o processo cair entre a ordem e a finalização, a linha PENDING sobrevive
+    # e o reaper a detecta (posição possivelmente aberta sem registro completo).
+    PENDING = "PENDING"
+    # Reaper marcou um PENDING órfão (finalização nunca ocorreu) — requer
+    # reconciliação manual / verificação na corretora.
+    ORPHAN = "ORPHAN"
 
 
 class ExecutionResult(BaseModel):
@@ -61,6 +68,15 @@ class ExecutionResult(BaseModel):
     tp_order_id: Optional[str] = None
     error: Optional[str] = None
     metadata: Optional[dict] = None
+    # P2 (2026-05-28 audit) — dual currency support pra COIN-M Futures.
+    # Em linear (USDT-M): quote_currency='USDT', pnl_quote == pnl_usd.
+    # Em inverse (COIN-M): quote_currency='BTC'/'ETH', pnl_quote em coin,
+    # pnl_usd convertido via pnl_quote_to_usd(). save_trade() em repository
+    # auto-detecta se ExecutionResult não traz quote_currency explícito.
+    quote_currency: Optional[str] = Field(
+        default=None,
+        description="Settlement currency (USDT, USDC, BTC, ETH). None = legacy.",
+    )
 
     def summary(self) -> str:
         tag = "PAPER" if self.is_paper else "LIVE"

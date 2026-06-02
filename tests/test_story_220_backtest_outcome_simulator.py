@@ -95,3 +95,33 @@ class TestStory220BacktestOutcomeSimulator:
         # Baixa conf + baixo R:R → p_win ≥ 0.10
         p_low = sim._compute_p_win(_trade(conf=0.0, rr=0.5))
         assert p_low >= 0.10
+
+    # --- Regressão (2026-06-01): geometria de risco inválida não vira wipeout ---
+
+    def test_invalid_stop_loss_not_simulated(self):
+        """sl<=0 não pode virar perda de -100% da alocação (bug -$200 fantasma).
+
+        Antes do guard, sl=0 fazia dist = |entry - 0| = entry → move_pct = 1.0
+        → perda de toda a alocação. Agora vira UNKNOWN (não conta no PnL).
+        """
+        from src.services.backtest_outcome_simulator import BacktestOutcomeSimulator
+        sim = BacktestOutcomeSimulator(seed=42)
+        t = _trade("LONG").model_copy(update={"stop_loss": 0.0})
+        result = sim.simulate([t])[0]
+        assert result.outcome == BacktestOutcome.UNKNOWN
+        assert result.pnl_usd == 0.0
+
+    def test_invalid_take_profit_not_simulated(self):
+        from src.services.backtest_outcome_simulator import BacktestOutcomeSimulator
+        sim = BacktestOutcomeSimulator(seed=42)
+        t = _trade("LONG").model_copy(update={"take_profit": 0.0})
+        result = sim.simulate([t])[0]
+        assert result.outcome == BacktestOutcome.UNKNOWN
+        assert result.pnl_usd == 0.0
+
+    def test_valid_geometry_still_simulated(self):
+        """Geometria válida (sl/tp > 0) continua sendo simulada normalmente."""
+        from src.services.backtest_outcome_simulator import BacktestOutcomeSimulator
+        sim = BacktestOutcomeSimulator(seed=42)
+        result = sim.simulate([_trade("LONG")])[0]
+        assert result.outcome in (BacktestOutcome.WIN, BacktestOutcome.LOSS)

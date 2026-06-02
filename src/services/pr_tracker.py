@@ -213,6 +213,38 @@ def mark_merged(rec_id: str) -> dict:
         update_brief_status(rec_id, "merged")
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"[pr_tracker] brief sync skipped for {rec_id}: {exc}")
+
+    # REV-1 (2026-05-29) — fecha bridge before/after loop.
+    # Auditoria mostrou 24 IMPs com "before" capturado mas 0 com "after".
+    # on_improvement_pr_merged tira snapshot Sage AFTER + cria review note
+    # no vault. Antes ninguém chamava esta função → loop aberto.
+    # Fire-and-forget em thread (não bloqueia pr_tracker, fail-silent).
+    try:
+        import asyncio
+        import threading
+        from src.services.improvement_memory_bridge import on_improvement_pr_merged
+        pr_num = entry.get("pr_number")
+        commit_sha = entry.get("commit_sha")
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(on_improvement_pr_merged(
+                rec_id, pr_number=pr_num, commit_sha=commit_sha,
+            ))
+        except RuntimeError:
+            # Sem event-loop ativo (ex: CLI). Thread isolada.
+            def _run_bridge() -> None:
+                try:
+                    asyncio.run(on_improvement_pr_merged(
+                        rec_id, pr_number=pr_num, commit_sha=commit_sha,
+                    ))
+                except Exception as inner:  # noqa: BLE001
+                    logger.warning(f"[pr_tracker] bridge after-snapshot thread fail: {inner}")
+            threading.Thread(
+                target=_run_bridge, name=f"bridge-merged-{rec_id[:8]}", daemon=True,
+            ).start()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[pr_tracker] bridge after-snapshot no-op: {exc}")
+
     return {"ok": bool(ok)}
 
 

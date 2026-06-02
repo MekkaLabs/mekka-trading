@@ -504,17 +504,26 @@ class Batman(BaseAgent[RiskApproval]):
         0.0 (default) disables the gate. Fails open on errors.
         Emits GATE_REJECTED audit (Story 112).
         """
-        if settings.min_atr_pct > 0.0:
+        # P3 fix (2026-06-01 review): aplicar o override do preset
+        # `min_atr_pct_for_entry` (None em swing → cai p/ settings; 0.15% em
+        # scalp). Antes a chave do preset era órfã (nunca lida) e o filtro
+        # "evita range morto" do scalp não era aplicado pelo modo.
+        try:
+            from src.config.runtime_mode import get_params as _gp3q  # noqa: WPS433
+            _min_atr_3q = _gp3q().get("min_atr_pct_for_entry") or settings.min_atr_pct
+        except Exception:  # noqa: BLE001
+            _min_atr_3q = settings.min_atr_pct
+        if _min_atr_3q > 0.0:
             try:
                 from src.analytics.atr import compute_atr_pct as _atr3q  # noqa: WPS433
                 _current_atr_3q = await _atr3q(
                     symbol=symbol,
                     lookback=settings.atr_lookback_candles,
                 )
-                if _current_atr_3q is not None and _current_atr_3q < settings.min_atr_pct:
+                if _current_atr_3q is not None and _current_atr_3q < _min_atr_3q:
                     reasons.append(
                         f"[3q] Min ATR: ATR% {_current_atr_3q:.4f} < mínimo "
-                        f"{settings.min_atr_pct:.4f} — mercado parado."
+                        f"{_min_atr_3q:.4f} — mercado parado."
                     )
                     breached.append("min_atr_pct")
                     # Story 112 — audit gate rejection
@@ -1300,6 +1309,85 @@ class Batman(BaseAgent[RiskApproval]):
             )
 
         # ---------------------------------------------------------------
+        # 0.4 Flash proposer bridge — quando modo ativo tem flash_is_proposer
+        # (default só scalp), bloqueia trade se Flash discorda fortemente da
+        # direção do signal. Sem isso, preset declara "Flash é proposer" mas
+        # nada usa. P0-2 fix da auditoria 2026-05-28.
+        # ---------------------------------------------------------------
+        try:
+            from src.services.flash_proposer_bridge import (
+                should_block_for_disagreement,
+            )
+            momentum_signal = None
+            if analysis is not None:
+                momentum_signal = getattr(analysis, "momentum", None)
+            should_block, block_reason = should_block_for_disagreement(
+                momentum=momentum_signal,
+                signal_action=signal.action,
+            )
+            if should_block:
+                reasons.append(f"flash_proposer.disagreement: {block_reason}")
+                breached.append("flash.disagreement")
+                return RiskApproval(
+                    symbol=symbol,
+                    verdict=RiskVerdict.REJECTED,
+                    reasons=reasons,
+                    adjusted_size_pct=0.0,
+                    adjusted_leverage=1,
+                    breached_limits=breached,
+                )
+        except Exception as _flash_exc:  # noqa: BLE001
+            self._log.warning(f"[Batman] flash proposer bridge no-op: {_flash_exc}")
+
+        # ---------------------------------------------------------------
+        # 0.5 Scalp gates — only active when current trading_mode is 'scalp'.
+        # Reads runtime_mode.get_params() and runs batman_scalp_gates module.
+        # Fail-silent: any exception keeps Batman flow intact (defensive
+        # against import errors during dev).
+        # F7b (2026-05-28): hook minimalista (módulo já validado por testes).
+        # ---------------------------------------------------------------
+        try:
+            # P0 fix (2026-06-01 review): a função era `get_active_mode`, que NÃO
+            # existe em runtime_mode (só `get_mode`). O ImportError era engolido
+            # pelo except genérico abaixo → os gates EXCLUSIVOS de scalp (cap
+            # horário 3s + hard-cap de idade 3t) NUNCA rodavam. Reativado.
+            from src.config.runtime_mode import get_mode, get_params
+            from src.agents.batman_scalp_gates import evaluate_all_scalp_gates
+            if get_mode() == "scalp":
+                mode_params = get_params()
+                # Lazy conversion: current_positions é list[PositionSummary]
+                pos_dicts = [
+                    p.model_dump() if hasattr(p, "model_dump") else dict(p)
+                    for p in (current_positions or [])
+                ]
+                gate_results = evaluate_all_scalp_gates(
+                    mode_params=mode_params,
+                    open_positions=pos_dicts,
+                )
+                # P0-1 fix (2026-05-28 audit): GateResult tem `allowed` (bool)
+                # e `gate_id` (str), NÃO `passed`/`gate_name`. Hook anterior
+                # estourava AttributeError silenciado pelo except → scalp gates
+                # jamais bloquearam nada.
+                failed = [g for g in gate_results if not g.allowed]
+                if failed:
+                    gate_reasons = [
+                        f"scalp_gate.{g.gate_id}: {g.reason}" for g in failed
+                    ]
+                    reasons.extend(gate_reasons)
+                    breached.extend([f"scalp.{g.gate_id}" for g in failed])
+                    return RiskApproval(
+                        symbol=symbol,
+                        verdict=RiskVerdict.REJECTED,
+                        reasons=reasons,
+                        adjusted_size_pct=0.0,
+                        adjusted_leverage=1,
+                        breached_limits=breached,
+                    )
+        except Exception as _scalp_exc:  # noqa: BLE001
+            # Fail-silent: hook nunca quebra Batman; só log + segue
+            self._log.warning(f"[Batman] scalp gates hook no-op: {_scalp_exc}")
+
+        # ---------------------------------------------------------------
         # 1. HOLD — nothing to execute, mark REJECTED for clarity
         # ---------------------------------------------------------------
         if signal.action == TradeAction.HOLD:
@@ -1312,13 +1400,23 @@ class Batman(BaseAgent[RiskApproval]):
                 breached_limits=[],
             )
 
+        # P1/P2 fix (2026-06-01 review): drawdown diário, trades/dia e R:R mínimo
+        # liam de `settings`, IGNORANDO o preset do modo ativo → trocar de modo
+        # NÃO ajustava esses gates de risco (falsa sensação de controle). Carrega
+        # o preset uma vez e aplica nos 3 gates (com fallback p/ settings).
+        from src.config.runtime_mode import get_params as _gp_risk
+        _mp_risk = _gp_risk()
+        _mode_max_dd = _mp_risk.get("max_daily_drawdown_pct", settings.max_daily_drawdown_pct)
+        _mode_max_trades = _mp_risk.get("max_trades_per_day", settings.max_trades_per_day)
+        _mode_min_rr = _mp_risk.get("min_risk_reward_ratio", settings.min_risk_reward_ratio)
+
         # ---------------------------------------------------------------
         # 2. Daily drawdown breaker
         # ---------------------------------------------------------------
-        if current_drawdown_pct >= settings.max_daily_drawdown_pct:
+        if current_drawdown_pct >= _mode_max_dd:
             reasons.append(
                 f"Daily drawdown {current_drawdown_pct:.2%} ≥ "
-                f"limit {settings.max_daily_drawdown_pct:.2%}"
+                f"limit {_mode_max_dd:.2%}"
             )
             breached.append("max_daily_drawdown_pct")
             return RiskApproval(
@@ -1351,10 +1449,10 @@ class Batman(BaseAgent[RiskApproval]):
                 breached_limits=breached,
             )
 
-        if trades_today >= settings.max_trades_per_day:
+        if trades_today >= _mode_max_trades:
             reasons.append(
                 f"Trades today {trades_today} ≥ "
-                f"daily cap {settings.max_trades_per_day}"
+                f"daily cap {_mode_max_trades}"
             )
             breached.append("max_trades_per_day")
             return RiskApproval(
@@ -1517,10 +1615,22 @@ class Batman(BaseAgent[RiskApproval]):
         # ---------------------------------------------------------------
         # 4. Confidence and R:R quality gates
         # ---------------------------------------------------------------
-        if signal.confidence < settings.min_confidence_threshold:
+        # Review-fix (2026-06-01): consome o override de calibração do Mentor
+        # (mentor_overrides.json) COM CLAMP TIGHTEN-ONLY. Para confidence, maior =
+        # mais conservador → usamos max(override, default): nunca abaixo do default,
+        # mesmo que o arquivo (editável à mão, não-PROTECTED) tenha um valor menor.
+        # Isto religa o loop de aprendizado no runtime de trade SEM poder afrouxar.
+        _min_conf = float(settings.min_confidence_threshold)
+        try:
+            from src.services.mentor_applier import get_override as _get_ovr  # noqa: WPS433
+            _ovr = _get_ovr("min_confidence_threshold", _min_conf)
+            if _ovr is not None:
+                _min_conf = max(float(_ovr), _min_conf)  # tighten-only
+        except Exception:  # noqa: BLE001
+            pass
+        if signal.confidence < _min_conf:
             reasons.append(
-                f"Confidence {signal.confidence:.2f} < threshold "
-                f"{settings.min_confidence_threshold:.2f}"
+                f"Confidence {signal.confidence:.2f} < threshold {_min_conf:.2f}"
             )
             breached.append("min_confidence_threshold")
             return RiskApproval(
@@ -1531,9 +1641,9 @@ class Batman(BaseAgent[RiskApproval]):
             )
 
         rr = signal.risk_reward_ratio
-        if rr < settings.min_risk_reward_ratio:
+        if rr < _mode_min_rr:
             reasons.append(
-                f"R:R {rr:.2f} < required {settings.min_risk_reward_ratio:.2f}"
+                f"R:R {rr:.2f} < required {_mode_min_rr:.2f}"
             )
             breached.append("min_risk_reward_ratio")
             return RiskApproval(
@@ -1542,6 +1652,61 @@ class Batman(BaseAgent[RiskApproval]):
                 reasons=reasons,
                 breached_limits=breached,
             )
+
+        # ---------------------------------------------------------------
+        # 4d. Stop-loss distance floor/ceiling (review-fix 2026-06-01)
+        # O LLM podia emitir SL a 0.01% do entry (R:R inflado tipo 3000 que passa
+        # no gate de R:R, mas estopa no 1º tick de ruído/spread) ou SL a 40% (perda
+        # real >> size sugerido, pois o size NÃO depende da distância do stop).
+        # Sem floor/teto, o R:R era gamificável. Rejeita geometria patológica.
+        # ---------------------------------------------------------------
+        _entry_px = float(getattr(signal, "entry_price", 0) or 0)
+        _sl_px = float(getattr(signal, "stop_loss", 0) or 0)
+        if _entry_px > 0 and _sl_px > 0:
+            _sl_dist = abs(_entry_px - _sl_px) / _entry_px
+            _min_sl = float(getattr(settings, "min_stop_distance_pct", 0.001))  # 0.1%
+            _max_sl = float(getattr(settings, "max_stop_distance_pct", 0.20))   # 20%
+            if _sl_dist < _min_sl:
+                reasons.append(
+                    f"Stop muito apertado: distância {_sl_dist:.3%} < mín {_min_sl:.3%} "
+                    "(seria estopado por ruído/spread)"
+                )
+                breached.append("min_stop_distance_pct")
+                return RiskApproval(
+                    symbol=symbol, verdict=RiskVerdict.REJECTED,
+                    reasons=reasons, breached_limits=breached,
+                )
+            if _sl_dist > _max_sl:
+                reasons.append(
+                    f"Stop muito largo: distância {_sl_dist:.3%} > máx {_max_sl:.3%} "
+                    "(perda real descasada do size)"
+                )
+                breached.append("max_stop_distance_pct")
+                return RiskApproval(
+                    symbol=symbol, verdict=RiskVerdict.REJECTED,
+                    reasons=reasons, breached_limits=breached,
+                )
+
+        # ---------------------------------------------------------------
+        # 4e. Liquidity gate (2026-06-02) — bloqueia a entrada quando o slippage
+        # estimado da ordem é alto demais (book fino destrói o R:R). Complementa
+        # a penalidade de size (seção 5). Só bloqueia com data_available=True
+        # (medição real); em degradado, a penalidade de liquidity_score cuida —
+        # não derrubamos o sistema por book transitoriamente indisponível.
+        # ---------------------------------------------------------------
+        if liquidity is not None and getattr(liquidity, "data_available", True):
+            _est_slip = float(getattr(liquidity, "estimated_slippage_pct", 0.0) or 0.0)
+            _max_est = float(getattr(settings, "max_entry_slippage_estimate_pct", 0.02) or 0.0)
+            if _max_est > 0 and _est_slip > _max_est:
+                reasons.append(
+                    f"Liquidez insuficiente: slippage estimado {_est_slip:.2%} > "
+                    f"limite {_max_est:.2%} (book fino — entrada destruiria o R:R)"
+                )
+                breached.append("max_entry_slippage_estimate_pct")
+                return RiskApproval(
+                    symbol=symbol, verdict=RiskVerdict.REJECTED,
+                    reasons=reasons, breached_limits=breached,
+                )
 
         # ---------------------------------------------------------------
         # 5. Size + leverage adjustment (REDUCED if any cap hit)
@@ -1704,6 +1869,27 @@ class Batman(BaseAgent[RiskApproval]):
             adjusted_leverage=adjusted_leverage, max_lev=_max_lev,
             reasons=reasons, breached=breached,
         )
+
+        # ---------------------------------------------------------------
+        # 5d. COIN-M per-symbol leverage cap (M9, 2026-06-01 audit)
+        # ANTES, clamp_leverage só rodava no dashboard (Trade Now manual). No loop
+        # automático, um leverage acima do cap COIN-M do Binance (ex.: altcoin 25x)
+        # passava direto e a corretora rejeitava a ordem. Aplicar aqui também.
+        # No-op em USDT-M (linear): clamp_leverage devolve o valor inalterado.
+        # ---------------------------------------------------------------
+        try:
+            _mt = getattr(settings, "binance_market_type", "linear")
+            if _mt == "inverse":
+                from src.services.coin_m_leverage_caps import clamp_leverage  # noqa: WPS433
+                _eff_lev, _coinm_warn = clamp_leverage(
+                    adjusted_leverage, symbol, market_type=_mt
+                )
+                if _coinm_warn and _eff_lev < adjusted_leverage:
+                    reasons.append(f"[5d] COIN-M: {_coinm_warn}")
+                    breached.append("coin_m_leverage_cap")
+                    adjusted_leverage = _eff_lev
+        except Exception as _coinm_exc:  # noqa: BLE001
+            self._log.debug("[Batman] COIN-M leverage clamp skipped: %s", _coinm_exc)
 
         # ---------------------------------------------------------------
         # 5b. Mainnet first-week HARD CLAMP (real-money safety)

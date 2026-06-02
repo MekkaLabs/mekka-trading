@@ -73,11 +73,17 @@ async def handle_decision(server, request: web.Request) -> web.Response:
     try:
         from src.agents.mekka import Mekka
         queued_path: str | None = None
-        ok = Mekka().record_decision(rec_id, status)
+        # Passa `rec` para record_decision ativar o bridge hook
+        # (snapshot Sage ANTES + write-back no vault). Pre-2026-05-27 esta
+        # chamada era sem `rec=`, o que silenciosamente desativava o bridge
+        # — bridge.json nunca era criado em 54 IMPs aceitas.
         if status == "accepted" and rec_payload is not None:
-            from src.services import improvement_queue
             rec_payload.setdefault("id", rec_id)
+            ok = Mekka().record_decision(rec_id, status, rec=rec_payload)
+            from src.services import improvement_queue
             queued_path = improvement_queue.enqueue_brief(rec_payload) or None
+        else:
+            ok = Mekka().record_decision(rec_id, status)
         await MekkaRepository.log_event(
             agent="Dashboard",
             event="IMPROVEMENT_DECISION",

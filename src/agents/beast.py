@@ -101,7 +101,20 @@ class Beast(BaseAgent[BeastReport]):
 
     The report contains prioritized ImprovementProposals. Beast also
     sends the report to Telegram automatically if telegram_enabled=True.
+
+    MEM-FIX-5 (2026-05-30): throttle interno classe-level. Diagnóstico
+    ao vivo mostrou 60 BEAST_PROPOSAL/hora exatos (chamado 1×/min pelo
+    Mekka cycle). Ruído alto + custo de I/O desnecessário. Cap default
+    de 15 min entre runs reais — repeated calls dentro desse janela
+    retornam o último report em cache.
+
+    Override via env BEAST_THROTTLE_MIN (default 15). Set 0 para
+    desabilitar throttle (modo legacy).
     """
+
+    # Cache classe-level (singleton-like)
+    _last_run_ts: float = 0.0
+    _last_report: "Optional[BeastReport]" = None
 
     def __init__(self) -> None:
         super().__init__(
@@ -109,11 +122,47 @@ class Beast(BaseAgent[BeastReport]):
             role="Continuous System Improvement Analyst — read-only auditor",
         )
 
+    @staticmethod
+    def _throttle_seconds() -> float:
+        import os as _os
+        try:
+            m = float(_os.environ.get("BEAST_THROTTLE_MIN", "15"))
+        except (TypeError, ValueError):
+            m = 15.0
+        return max(0.0, m * 60.0)
+
+    @classmethod
+    def reset_cache(cls) -> None:
+        """Limpa o cache de throttle. Útil em tests + manual via API.
+
+        Tests devem chamar este método no setUp pra evitar que o cached
+        report de um teste anterior vaze pro próximo.
+        """
+        cls._last_run_ts = 0.0
+        cls._last_report = None
+
     async def _run(self, period_days: int = 7) -> BeastReport:  # type: ignore[override]
         """
         Analyze the system over the last `period_days` days and return a BeastReport.
         All analysis is read-only. Fails gracefully — returns empty report on error.
+
+        MEM-FIX-5: usa cache classe-level pra throttle de re-runs.
         """
+        import time as _time
+        throttle_s = self._throttle_seconds()
+        now_s = _time.monotonic()
+        if (
+            throttle_s > 0
+            and Beast._last_report is not None
+            and (now_s - Beast._last_run_ts) < throttle_s
+        ):
+            cached_age_s = now_s - Beast._last_run_ts
+            self._log.debug(
+                f"[Beast] returning cached report "
+                f"(age={cached_age_s:.0f}s, throttle={throttle_s:.0f}s)"
+            )
+            return Beast._last_report
+
         since = datetime.now(timezone.utc) - timedelta(days=period_days)
         proposals: list[ImprovementProposal] = []
         stats: dict[str, Any] = {}
@@ -152,6 +201,28 @@ class Beast(BaseAgent[BeastReport]):
         except Exception as exc:  # noqa: BLE001
             self._log.warning(f"[Beast] Signal quality audit skipped: {exc}")
 
+        # ── 5. PROM-E (2026-05-29): Audit Prometheus learnings ────────────
+        # Antes: Beast olhava só trades / gates / latency / signal_quality.
+        # Não cruzava com agent.error patterns que o Prometheus já agrega.
+        # Agora: lê PROMETHEUS_LEARNING events e detecta agentes com erro
+        # crônico (>3 falhas em 24h) → propõe story de investigação.
+        try:
+            prom_stats = await self._analyze_prometheus_learnings(since)
+            stats["prometheus"] = prom_stats
+            proposals.extend(await self._propose_from_prometheus(prom_stats))
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"[Beast] Prometheus audit skipped: {exc}")
+
+        # ── 6. (2026-06-02): consome o diário de aprendizado dos agentes ──
+        # Lições de PREJUÍZO recorrente (outcome-loss muito reforçadas) viram
+        # propostas de investigação — fecha o loop outcome→aprendizado→ação.
+        try:
+            learn_proposals = await self._analyze_agent_learnings()
+            stats["agent_learnings"] = {"proposals": len(learn_proposals)}
+            proposals.extend(learn_proposals)
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(f"[Beast] agent-learning audit skipped: {exc}")
+
         # ── Sort by priority ──────────────────────────────────────────────
         priority_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
         proposals.sort(key=lambda p: priority_order.get(p.impact, 3))
@@ -174,8 +245,33 @@ class Beast(BaseAgent[BeastReport]):
             f"trades_analyzed={total_trades}"
         )
 
+        # INV-2 (2026-05-29) — emite audit event pra rastrear aprendizado.
+        # Antes: 0 BEAST_PROPOSAL em 7 dias, mesmo com Beast rodando.
+        try:
+            from src.persistence.repository import MekkaRepository  # noqa: WPS433
+            await MekkaRepository.log_event(
+                agent="Beast",
+                event="BEAST_PROPOSAL",
+                severity="INFO",
+                message=f"{len(proposals)} proposals ({len(report.high_priority)} HIGH)",
+                payload={
+                    "n_proposals": len(proposals),
+                    "n_high": len(report.high_priority),
+                    "health_score": float(health_score),
+                    "trades_analyzed": int(total_trades),
+                    "areas": list({p.area for p in proposals})[:10],
+                },
+            )
+        except Exception as _audit_exc:  # noqa: BLE001
+            self._log.debug(f"[Beast] audit emit no-op: {_audit_exc}")
+
         # ── Send to Telegram ──────────────────────────────────────────────
         await self._send_report(report)
+
+        # MEM-FIX-5: salva no cache classe-level pra throttle
+        import time as _time
+        Beast._last_report = report
+        Beast._last_run_ts = _time.monotonic()
 
         return report
 
@@ -460,6 +556,205 @@ class Beast(BaseAgent[BeastReport]):
                          f"high-conf win rate={hc_wr:.0%} ({hc_count} trades)",
             ))
 
+        return proposals
+
+    # -----------------------------------------------------------------------
+    # PROM-E: Prometheus learnings audit
+    # -----------------------------------------------------------------------
+
+    async def _analyze_prometheus_learnings(self, since: datetime) -> dict[str, Any]:
+        """Lê PROMETHEUS_LEARNING events do audit_log e agrega.
+
+        Retorna {n_learnings, total_errors, agent_error_counts,
+        avg_error_rate, total_cycles, executions}.
+        """
+        out: dict[str, Any] = {
+            "n_learnings": 0,
+            "total_errors": 0,
+            "total_cycles": 0,
+            "executions": 0,
+            "agent_error_counts": {},
+            "avg_error_rate": None,
+        }
+        try:
+            from src.persistence.repository import MekkaRepository  # noqa: WPS433
+            events = await MekkaRepository.list_audit_events(
+                agent="Prometheus",
+                event="PROMETHEUS_LEARNING",
+                limit=100,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[Beast] prometheus learnings query failed: {exc}")
+            return out
+
+        if not events:
+            return out
+
+        # Filtra por janela `since`
+        recent = []
+        for e in events:
+            ts = e.get("timestamp")
+            if ts is None:
+                continue
+            try:
+                if isinstance(ts, str):
+                    from datetime import datetime as _dt  # noqa: WPS433
+                    ts_dt = _dt.fromisoformat(ts.replace("Z", "+00:00"))
+                else:
+                    ts_dt = ts
+                if ts_dt.tzinfo is None:
+                    ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+                if ts_dt >= since:
+                    recent.append(e)
+            except Exception:  # noqa: BLE001
+                continue
+
+        out["n_learnings"] = len(recent)
+        rate_samples: list[float] = []
+        for e in recent:
+            payload = e.get("payload") or {}
+            if isinstance(payload, str):
+                import json as _json  # noqa: WPS433
+                try:
+                    payload = _json.loads(payload)
+                except Exception:  # noqa: BLE001
+                    payload = {}
+            kpis = payload.get("kpis") or {}
+            out["total_errors"] += int(kpis.get("errors_observed", 0) or 0)
+            out["total_cycles"] += int(kpis.get("cycles_observed", 0) or 0)
+            out["executions"] += int(kpis.get("executions_observed", 0) or 0)
+            for ea in kpis.get("top_error_agents", []) or []:
+                name = ea.get("agent")
+                n = int(ea.get("n", 0) or 0)
+                if name:
+                    out["agent_error_counts"][name] = (
+                        out["agent_error_counts"].get(name, 0) + n
+                    )
+            rate = kpis.get("error_rate")
+            if rate is not None:
+                rate_samples.append(float(rate))
+
+        if rate_samples:
+            out["avg_error_rate"] = round(
+                sum(rate_samples) / len(rate_samples), 3
+            )
+        return out
+
+    async def _propose_from_prometheus(self, stats: dict) -> list[ImprovementProposal]:
+        """Threshold heuristics — only propose when signal is clearly above noise."""
+        proposals: list[ImprovementProposal] = []
+        if stats.get("n_learnings", 0) < 3:
+            # Não temos amostragem suficiente pra propor nada com confiança
+            return proposals
+
+        # Detectar agente "doente" — top error agent com >3 falhas
+        error_counts = stats.get("agent_error_counts", {}) or {}
+        for agent_name, n_errors in error_counts.items():
+            if n_errors >= 3:
+                proposals.append(ImprovementProposal(
+                    title=f"Agente {agent_name} com erros recorrentes — investigar root cause",
+                    description=(
+                        f"Prometheus observou {n_errors} falhas/timeouts do "
+                        f"agente {agent_name} no período. "
+                        "Pode ser dependência externa quebrada (API), bug local, "
+                        "ou input inválido recorrente."
+                    ),
+                    impact="HIGH" if n_errors >= 6 else "MEDIUM",
+                    area="reliability",
+                    evidence=(
+                        f"{n_errors} eventos agent.error/agent.timeout em "
+                        f"{stats.get('n_learnings', 0)} learnings"
+                    ),
+                    suggested_story=(
+                        f"Story — Diagnosticar {agent_name} (ver logs + "
+                        f"agent_degradation_detector)"
+                    ),
+                ))
+
+        # Detectar error rate global alto
+        avg_rate = stats.get("avg_error_rate")
+        if avg_rate is not None and avg_rate >= 0.5 and stats.get("total_cycles", 0) >= 5:
+            proposals.append(ImprovementProposal(
+                title=(
+                    f"Error rate sistêmico {avg_rate:.0%} — "
+                    "pipeline está fragilizado"
+                ),
+                description=(
+                    f"Prometheus mediu media de {avg_rate:.0%} de erros por ciclo. "
+                    "Acima de 50% significa que metade dos ciclos tem algum agente "
+                    "falhando. Cabe rodar agent_degradation_detector + ver gate breakers."
+                ),
+                impact="HIGH",
+                area="reliability",
+                evidence=(
+                    f"avg_error_rate={avg_rate:.2f} em "
+                    f"{stats.get('n_learnings', 0)} learnings"
+                ),
+            ))
+
+        # Detectar pipeline sem execuções (todo signal vira HOLD/skip)
+        cycles = stats.get("total_cycles", 0)
+        executions = stats.get("executions", 0)
+        if cycles >= 10 and executions == 0:
+            proposals.append(ImprovementProposal(
+                title=f"{cycles} ciclos sem nenhuma execução — gates muito apertados?",
+                description=(
+                    "Prometheus observou ciclos completos sem ironman.exec. "
+                    "Pode ser Batman rejeitando tudo (gates apertados) ou Vision "
+                    "sempre devolvendo HOLD."
+                ),
+                impact="MEDIUM",
+                area="opportunity",
+                evidence=f"cycles={cycles}, executions=0",
+            ))
+
+        return proposals
+
+    # -----------------------------------------------------------------------
+    # Agent-learning journal consumer (2026-06-02)
+    # -----------------------------------------------------------------------
+
+    async def _analyze_agent_learnings(self) -> list["ImprovementProposal"]:
+        """Lê o diário de aprendizado e converte padrões de PREJUÍZO recorrente
+        (outcome-loss muito reforçadas) em propostas de investigação. Fecha o
+        loop: Cyclops registra outcome → Beast propõe ação. Read-only, fail-safe.
+        """
+        proposals: list[ImprovementProposal] = []
+        try:
+            import asyncio as _aio
+            from src.config.settings import settings as _s
+            from src.services.agent_learning_journal import prune_stale, top_reinforced
+            # Higiene: poda lições obsoletas (velhas + nunca reforçadas + baixa
+            # confiança) para a memória não inflar. Preserva o que tem sinal.
+            try:
+                _pruned = await _aio.to_thread(
+                    prune_stale, int(getattr(_s, "learning_prune_stale_days", 30)), 0.6,
+                )
+                if _pruned:
+                    self._log.info(f"[Beast] podou {_pruned} lição(ões) obsoleta(s) do diário")
+            except Exception:  # noqa: BLE001
+                pass
+            # padrões de perda reforçados >=3× são candidatos a investigação
+            losses = await _aio.to_thread(
+                top_reinforced, 3, 5, "outcome-loss",
+            )
+            for lz in losses:
+                count = int(lz.get("reinforced_count", 0))
+                impact = "HIGH" if count >= 5 else "MEDIUM"
+                lesson = str(lz.get("lesson", ""))[:160]
+                proposals.append(ImprovementProposal(
+                    title="Padrão de prejuízo recorrente detectado",
+                    description=(
+                        f"O diário ({lz.get('agent', '?')}) acumulou {count} reforços "
+                        f"de uma lição de perda: \"{lesson}\". Investigar o setup "
+                        f"desse ativo/lado — ajustar gates, pausar, ou revisar a tese."
+                    ),
+                    impact=impact,
+                    area="risk_gates",
+                    evidence=f"reinforced_count={count}, category=outcome-loss",
+                ))
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[Beast] _analyze_agent_learnings error: {exc}")
         return proposals
 
     # -----------------------------------------------------------------------
