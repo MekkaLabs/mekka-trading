@@ -71,7 +71,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "max_position_age_minutes": None,
         "scalp_primary_timeframe": None,
         "scalp_confirmation_timeframe": None,
-        "main_loop_interval_seconds": None,
+        "main_loop_interval_seconds": 7200,   # 2h (conservador — ritmo lento)
         "flash_is_proposer": False,
         "min_atr_pct_for_entry": None,
     },
@@ -96,7 +96,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "max_position_age_minutes": None,
         "scalp_primary_timeframe": None,
         "scalp_confirmation_timeframe": None,
-        "main_loop_interval_seconds": None,
+        "main_loop_interval_seconds": 3600,   # 1h (balanceado)
         "flash_is_proposer": False,
         "min_atr_pct_for_entry": None,
     },
@@ -121,7 +121,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "max_position_age_minutes": None,
         "scalp_primary_timeframe": None,
         "scalp_confirmation_timeframe": None,
-        "main_loop_interval_seconds": None,
+        "main_loop_interval_seconds": 1800,   # 30min (agressivo — ritmo rápido)
         "flash_is_proposer": False,
         "min_atr_pct_for_entry": None,
     },
