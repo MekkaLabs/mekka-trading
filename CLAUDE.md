@@ -58,7 +58,7 @@ Controlado por `DEBATE_MODE_ENABLED` nas settings.
 
 | Agente | Arquivo | Responsabilidade | Modelo |
 |--------|---------|-----------------|--------|
-| **Vision** | `vision.py` | Decisão principal de trading (BUY/SELL/HOLD + size) | GPT-4o (fallback: Claude Sonnet-4-6) |
+| **Vision** | `vision.py` | Decisão principal de trading (BUY/SELL/HOLD + size) | Claude Sonnet-4-6 (fallback: GPT-4o) |
 | **VisionCritic** | `vision_critic.py` | Revisão crítica da decisão do Vision | GPT-4o |
 
 Vision recebe `MarketAnalysis` consolidado com todos os dados de Layer 1.
@@ -102,8 +102,9 @@ Fluxo obrigatório: `Batman.approve()` → (Telegram approval se `OPERATION_MODE
 - **SQLite** em `data/mekka_trading.db` — histórico de trades, performance, logs
 
 ### LLMs
-- **OpenAI GPT-4o** — modelo principal para Vision
-- **Anthropic Claude Sonnet-4-6** — fallback para Vision
+- **Anthropic Claude Sonnet-4-6** — modelo principal para Vision (preferencial)
+- **OpenAI GPT-4o** — fallback quando Claude falha/ausente
+- Ordem configurável via `LLM_PREFER_ANTHROPIC` (default `true`)
 
 ---
 

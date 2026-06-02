@@ -69,6 +69,15 @@ class Settings(BaseSettings):
         default="",
         description="Anthropic API key (sk-ant-...). Used as fallback when OpenAI fails or is not set.",
     )
+    llm_prefer_anthropic: bool = Field(
+        default=True,
+        description=(
+            "Quando True (default 2026-06-02), o LLM tenta Anthropic Claude PRIMEIRO "
+            "e cai para OpenAI se Claude falhar/estiver ausente. False inverte "
+            "(OpenAI primeiro, Claude fallback). A ordem efetiva sempre pula "
+            "providers não configurados."
+        ),
+    )
     anthropic_model: str = Field(
         default="claude-sonnet-4-6",
         description="Claude model for Vision fallback (e.g. claude-sonnet-4-6, claude-opus-4-6)",
@@ -1398,6 +1407,34 @@ class Settings(BaseSettings):
         if v == "sk-your-openai-api-key-here":
             return ""  # Treat the example placeholder as "not set"
         return v
+
+    @model_validator(mode="after")
+    def _llm_keys_fallback_to_dotenv(self) -> "Settings":
+        """Robustez (2026-06-02): uma variável de ambiente VAZIA (ex.:
+        ``ANTHROPIC_API_KEY=""`` injetada por outro processo/shell) tem
+        precedência sobre o ``.env`` no pydantic e MASCARA a key real
+        configurada no arquivo. Aqui, se a key resolvida estiver vazia mas o
+        ``.env`` tiver valor não-vazio, usamos o do ``.env``. Fail-silent."""
+        try:
+            from pathlib import Path as _P  # noqa: WPS433
+
+            from dotenv import dotenv_values  # noqa: WPS433
+
+            env_path = _P(__file__).resolve().parents[2] / ".env"
+            if not env_path.exists():
+                return self
+            vals = dotenv_values(str(env_path))
+            for field_name, env_name in (
+                ("anthropic_api_key", "ANTHROPIC_API_KEY"),
+                ("openai_api_key", "OPENAI_API_KEY"),
+            ):
+                cur = (getattr(self, field_name, "") or "").strip()
+                file_val = (vals.get(env_name) or "").strip()
+                if not cur and file_val:
+                    object.__setattr__(self, field_name, file_val)
+        except Exception:  # noqa: BLE001
+            pass  # nunca quebra a inicialização por causa disso
+        return self
 
     @model_validator(mode="after")
     def warn_paper_trading(self) -> "Settings":
