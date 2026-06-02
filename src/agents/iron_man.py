@@ -213,6 +213,61 @@ class IronMan(BaseAgent[ExecutionResult]):
     # Core logic
     # ------------------------------------------------------------------
 
+    async def _annotate_execution_quality(
+        self, result: "ExecutionResult", signal: TradingSignal,
+    ) -> "ExecutionResult":
+        """Mede a qualidade da execução (slippage realizado vs entry planejado +
+        fill ratio) e anota em result.metadata. Em fill LIVE com slippage acima
+        de execution_slippage_alert_bps: WARNING + alerta + lição no diário.
+
+        Fecha o loop execução→aprendizado. Nunca levanta (best-effort)."""
+        try:
+            from src.models.execution import ExecutionStatus  # noqa: WPS433
+            if result.status not in (ExecutionStatus.FILLED, ExecutionStatus.PARTIAL,
+                                     ExecutionStatus.PAPER):
+                return result
+            entry = float(getattr(signal, "entry_price", 0) or 0)
+            avg = float(getattr(result, "avg_price", 0) or 0)
+            if entry <= 0 or avg <= 0:
+                return result
+
+            side = (result.side or "").lower()
+            # Slippage assinado: positivo = pior para nós (comprou mais caro /
+            # vendeu mais barato que o planejado).
+            raw = (avg - entry) / entry
+            signed = raw if side in ("long", "buy") else -raw
+            slippage_bps = round(signed * 10_000, 2)
+
+            meta = dict(result.metadata or {})
+            meta["entry_slippage_bps"] = slippage_bps
+            meta["planned_entry"] = entry
+            result.metadata = meta
+
+            threshold = float(getattr(settings, "execution_slippage_alert_bps", 30.0) or 0.0)
+            if (not result.is_paper) and threshold > 0 and slippage_bps > threshold:
+                self._log.warning(
+                    f"[IronMan] Slippage de entrada ALTO em {result.symbol}: "
+                    f"{slippage_bps:.1f}bps (limite {threshold:.0f}) — "
+                    f"planejado ${entry:.4f} → fill ${avg:.4f}"
+                )
+                self._emit_event("execution.slippage_high", {
+                    "symbol": result.symbol, "slippage_bps": slippage_bps,
+                    "threshold_bps": threshold,
+                })
+                # Lição estável (dedup/reforça em recorrência) — só consultiva.
+                await self.learn(
+                    f"Entradas {side} em {result.symbol} têm slippado acima do "
+                    f"limite ({threshold:.0f}bps) — considerar entry mais conservador, "
+                    f"checar liquidez (Aquaman) ou evitar o horário.",
+                    category="execução",
+                    evidence=f"slippage_bps={slippage_bps}, planned={entry}, fill={avg}",
+                    confidence=0.6,
+                    tags=["slippage", result.symbol, side],
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._log.debug(f"[IronMan] annotate_execution_quality skipped: {exc}")
+        return result
+
     async def _run(  # type: ignore[override]
         self,
         signal: TradingSignal,
@@ -347,6 +402,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                     **_realism_meta,
                 },
             )
+            result = await self._annotate_execution_quality(result, signal)
             self._log.info(result.summary())
             return result
 
@@ -384,6 +440,7 @@ class IronMan(BaseAgent[ExecutionResult]):
                     force_market_in_testnet=_force_execute,
                     cycle_id=_cycle_id,
                 )
+            result = await self._annotate_execution_quality(result, signal)
             self._log.info(result.summary())
             return result
         except RetryError as exc:

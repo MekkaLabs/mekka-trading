@@ -221,6 +221,17 @@ class Settings(BaseSettings):
             "sell=bid*(1-bps)) so it fills reliably while capping slippage. 20 = 0.20%."
         ),
     )
+    execution_slippage_alert_bps: float = Field(
+        default=30.0,
+        ge=0.0,
+        description=(
+            "Realized entry-slippage threshold (bps) for execution-quality "
+            "alerting/learning. After a LIVE fill, IronMan compares the avg fill "
+            "price vs the planned entry; if the realized slippage exceeds this, it "
+            "logs a WARNING, emits an alert and records a lesson in its journal. "
+            "Measurement-only (does not block — the IOC limit already caps placement)."
+        ),
+    )
     mainnet_dry_run: bool = Field(
         default=False,
         description=(
