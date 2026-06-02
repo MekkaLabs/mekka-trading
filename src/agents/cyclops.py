@@ -802,11 +802,30 @@ class Cyclops:
                         _cat = "outcome-loss"
                     from src.services.agent_learning_journal import record as _rec  # noqa: WPS433
                     import asyncio as _aio  # noqa: WPS433
-                    await _aio.to_thread(
+                    _lr = await _aio.to_thread(
                         _rec, "Cyclops", _lesson,
                         category=_cat, evidence=f"último pnl={pnl_usd:+.2f} ({trigger_reason})",
                         confidence=0.5, tags=["outcome", symbol, side],
                     )
+                    # Escalonamento por reforço: prejuízo recorrente vira alerta.
+                    _rc = int((_lr or {}).get("reinforced_count", 1))
+                    _thr = int(getattr(settings, "learning_loss_escalation_count", 5))
+                    if _cat == "outcome-loss" and _rc >= _thr:
+                        try:
+                            from src.services.telegram_alerter import TelegramAlerter
+                            await TelegramAlerter().alert(
+                                event="LEARNING_LOSS_PATTERN",
+                                severity="WARNING",
+                                agent="Cyclops",
+                                symbol=symbol,
+                                message=(
+                                    f"{symbol} {side} fechou no stop {_rc}× — "
+                                    f"padrão recorrente. Considere revisar o setup "
+                                    f"ou pausar o ativo (/unblacklist para reverter)."
+                                ),
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                 except Exception as exc_learn:  # noqa: BLE001
                     logger.debug(f"[Cyclops] outcome learning no-op: {exc_learn}")
                 # Stories 063/183/186 — resolve all memory stores via central helper.

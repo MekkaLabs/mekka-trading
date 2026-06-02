@@ -181,6 +181,7 @@ def record(
         return {"status": "error", "reason": "no db"}
 
     status = "error"
+    reinforced_count = 1
     try:
         with conn:
             _ensure_schema(conn)
@@ -198,6 +199,7 @@ def record(
                     (confidence, now, row["id"]),
                 )
                 status = "reinforced"
+                reinforced_count = int(row["reinforced_count"]) + 1
             else:
                 conn.execute(
                     "INSERT INTO agent_learnings "
@@ -228,7 +230,10 @@ def record(
         except Exception as exc:  # noqa: BLE001
             logger.debug("[agent_learning] vault mirror failed: %s", exc)
 
-    return {"status": status, "agent": agent, "hash": chash}
+    return {
+        "status": status, "agent": agent, "hash": chash,
+        "reinforced_count": reinforced_count,
+    }
 
 
 def _append_to_vault(

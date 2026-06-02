@@ -232,6 +232,16 @@ class Settings(BaseSettings):
             "Measurement-only (does not block — the IOC limit already caps placement)."
         ),
     )
+    learning_loss_escalation_count: int = Field(
+        default=5,
+        ge=2,
+        description=(
+            "Quando uma lição de PREJUÍZO recorrente (Cyclops outcome-loss: mesmo "
+            "símbolo/lado fechando no stop) atinge este número de reforços, o "
+            "operador recebe um alerta Telegram para revisar/pausar o ativo. "
+            "Transforma a memória passiva em sinal proativo."
+        ),
+    )
     max_entry_slippage_estimate_pct: float = Field(
         default=0.02,
         ge=0.0,

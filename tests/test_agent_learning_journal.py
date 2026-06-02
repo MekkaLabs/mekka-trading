@@ -38,9 +38,11 @@ def test_record_new_lesson(journal):
 
 
 def test_dedup_reinforces_not_duplicates(journal):
-    journal.record("Batman", "exposição > 50% aumenta drawdown", confidence=0.6)
+    r1 = journal.record("Batman", "exposição > 50% aumenta drawdown", confidence=0.6)
+    assert r1["reinforced_count"] == 1
     r2 = journal.record("Batman", "Exposição > 50%   aumenta  drawdown", confidence=0.9)  # mesma lição (norm)
     assert r2["status"] == "reinforced"
+    assert r2["reinforced_count"] == 2         # record() retorna a contagem
     out = journal.recall("Batman")
     assert len(out) == 1                       # não duplicou
     assert out[0]["reinforced_count"] == 2     # reforçou
