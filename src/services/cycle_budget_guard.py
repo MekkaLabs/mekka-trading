@@ -173,6 +173,22 @@ class CycleBudgetGuard:
         )
         return session
 
+    def global_spent_usd(self) -> float:
+        """Gasto global REAL. Prefere o llm_cost_tracker (custo real por provider/
+        modelo) sobre a acumulação por estimativa do record_cost — esta usava
+        $0.002/call (GPT-4o-mini) e subestimava ~11x o custo do Claude Sonnet
+        (~$0.022/call), deixando o cap frouxo. Fail-safe → estimativa local."""
+        try:
+            from src.services.llm_cost_tracker import get_llm_cost_tracker  # noqa: WPS433
+            tr = get_llm_cost_tracker(auto_register=False)
+            if tr is not None:
+                real = tr.summary().get("session", {}).get("total_cost_usd")
+                if real is not None:
+                    return float(real)
+        except Exception:  # noqa: BLE001
+            pass
+        return self._global_session.total_cost_usd
+
     def should_skip_vision(self, symbol: str) -> Tuple[bool, str]:
         """
         Decide se Vision deve ser pulado por excesso de custo.
@@ -190,12 +206,13 @@ class CycleBudgetGuard:
         if self._global_session.age_hours >= self._auto_reset_hours:
             logger.debug("[CycleBudgetGuard] auto-reset GLOBAL session")
             self._global_session = BudgetSession(symbol="__global__")
+        _gspent = self.global_spent_usd()  # custo REAL (tracker), não estimativa
         if (self._max_cost_usd_global > 0
-                and self._global_session.total_cost_usd > self._max_cost_usd_global):
+                and _gspent > self._max_cost_usd_global):
             self._total_skipped += 1
             return True, (
                 f"global_budget_exceeded("
-                f"cost={self._global_session.total_cost_usd:.4f}>"
+                f"cost={_gspent:.4f}>"
                 f"{self._max_cost_usd_global})"
             )
 
@@ -228,7 +245,7 @@ class CycleBudgetGuard:
         return count
 
     def summary(self) -> dict:
-        _gspent = self._global_session.total_cost_usd
+        _gspent = self.global_spent_usd()  # custo REAL (tracker)
         _gcap = self._max_cost_usd_global
         return {
             "total_symbols": len(self._sessions),

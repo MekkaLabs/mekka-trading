@@ -32,3 +32,23 @@ def test_global_cap_disabled_when_zero():
     g.record_cost("BTC", 5.0)
     g.record_cost("ETH", 5.0)             # global = 10 mas cap global = 0 (off)
     assert g.should_skip_vision("SOL")[0] is False
+
+
+def test_global_uses_real_tracker_cost(monkeypatch):
+    """Bug fix (2026-06-02): o cap deve usar o custo REAL do llm_cost_tracker,
+    não a estimativa hardcoded de $0.002/call (subestimava ~11x o Claude)."""
+    import src.services.llm_cost_tracker as lct
+
+    class _FakeTracker:
+        def summary(self):
+            return {"session": {"total_cost_usd": 0.80}}
+
+    monkeypatch.setattr(lct, "get_llm_cost_tracker", lambda auto_register=False: _FakeTracker())
+
+    g = CycleBudgetGuard(max_cost_usd_per_session=99.0, max_cost_usd_global=0.5)
+    g.record_cost("BTC", 0.002)           # estimativa local minúscula
+    # custo REAL (0.80) > cap (0.5) → pausa, apesar da estimativa local ser 0.002
+    assert g.global_spent_usd() == 0.80
+    skip, reason = g.should_skip_vision("BTC")
+    assert skip is True
+    assert "global_budget_exceeded" in reason
