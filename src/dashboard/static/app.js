@@ -6081,6 +6081,98 @@ function _bootSystemPower() {
   _sysPowerTimer = _registerInterval(setInterval(_sysPowerFetchStatus, 5000));
 }
 
+// ── Modo de Operação (manual/automatic) — switch RAIZ de aprovação ──────────
+//   GET  /api/opmode -> {mode, requires_trade_approval, improvements_auto_apply}
+//   POST /api/opmode  {"mode": "manual"|"automatic"}
+// Troca instantânea; o próximo ciclo respeita. Botão no menu de cima.
+let _opModeTimer = null;
+let _opModeBusy = false;
+let _opModeState = 'unknown';
+
+function _opModeRender(snap) {
+  const pill = document.getElementById('opmode-pill');
+  const toggle = document.getElementById('opmode-toggle');
+  if (!pill || !toggle) return;
+
+  const mode = (snap && snap.mode) || 'unknown';
+  _opModeState = mode;
+
+  pill.classList.remove('opmode-manual', 'opmode-automatic', 'opmode-unknown');
+  if (mode === 'manual') {
+    pill.textContent = '🙋 MANUAL';
+    pill.classList.add('opmode-manual');
+    pill.title = 'Você aprova cada trade e cada melhoria via Telegram.';
+    toggle.textContent = '→ Automático';
+  } else if (mode === 'automatic') {
+    pill.textContent = '🤖 AUTOMÁTICO';
+    pill.classList.add('opmode-automatic');
+    pill.title = 'O sistema aprova trades e melhorias sozinho (gates de risco seguem ativos).';
+    toggle.textContent = '→ Manual';
+  } else {
+    pill.textContent = 'MODO ???';
+    pill.classList.add('opmode-unknown');
+    pill.title = 'Modo de operação indisponível.';
+    toggle.textContent = '—';
+  }
+  toggle.disabled = _opModeBusy || mode === 'unknown';
+}
+
+async function _opModeFetch() {
+  try {
+    const res = await fetch('/api/opmode', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    _opModeRender(await res.json());
+  } catch (_e) {
+    if (_opModeState === 'unknown') _opModeRender(null);
+  }
+}
+
+async function _opModeToggle() {
+  if (_opModeBusy || _opModeState === 'unknown') return;
+  const target = _opModeState === 'manual' ? 'automatic' : 'manual';
+  if (target === 'automatic') {
+    const ok = confirm(
+      '🤖 ATIVAR MODO AUTOMÁTICO?\n\n' +
+      'O sistema vai APROVAR e EXECUTAR trades sozinho, e aplicar melhorias ' +
+      'automaticamente — sem pedir sua confirmação.\n\n' +
+      'As travas de risco (Batman, kill-switch, limite de perda diária) ' +
+      'continuam ativas, e melhorias só APERTAM o risco (nunca afrouxam).\n\n' +
+      'Confirmar?'
+    );
+    if (!ok) return;
+  }
+  _opModeBusy = true;
+  const toggle = document.getElementById('opmode-toggle');
+  if (toggle) toggle.disabled = true;
+  try {
+    const res = await fetch('/api/opmode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: target }),
+    });
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.json()).error || ''; } catch (_) {}
+      throw new Error(detail || ('HTTP ' + res.status));
+    }
+    _opModeRender(await res.json());
+  } catch (e) {
+    alert('❌ Falha ao trocar o modo de operação: ' + e.message);
+  } finally {
+    _opModeBusy = false;
+    _opModeFetch();
+  }
+}
+
+function _bootOpMode() {
+  const toggle = document.getElementById('opmode-toggle');
+  if (!toggle) return;
+  toggle.addEventListener('click', _opModeToggle);
+  _opModeFetch();
+  if (_opModeTimer) clearInterval(_opModeTimer);
+  _opModeTimer = _registerInterval(setInterval(_opModeFetch, 10000));
+}
+
 // ── Boot all v2 features ─────────────────────────────────────
 function _mkBootDashboardV2() {
   // Sync prefs from server first (async, non-blocking — nav still works immediately)
@@ -6105,6 +6197,8 @@ function _mkBootDashboardV2() {
   try { _bootCommandCenter(); } catch (e) { console.error('[v2] _bootCommandCenter failed:', e); }
   // Feature C — top bar power control (system on/off/reboot)
   try { _bootSystemPower(); } catch (e) { console.error('[v2] _bootSystemPower failed:', e); }
+  // Modo de Operação (manual/automatic) — switch raiz no menu de cima
+  try { _bootOpMode(); } catch (e) { console.error('[v2] _bootOpMode failed:', e); }
   // Global WS — real-time topbar + positions across all pages
   try { _bootGlobalWs(); } catch (e) { console.error('[v2] _bootGlobalWs failed:', e); }
   // Office iframe auto-resize (no internal scrollbar)

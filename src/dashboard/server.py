@@ -532,6 +532,8 @@ class MekkaDashboardServer:
         r.add_post("/api/system/reboot", self._handle_system_reboot)
         r.add_get("/api/mode", self._handle_mode_get)
         r.add_post("/api/mode", self._handle_mode_set)
+        r.add_get("/api/opmode", self._handle_opmode_get)
+        r.add_post("/api/opmode", self._handle_opmode_set)
         r.add_get("/api/exchange", self._handle_exchange_get)
         r.add_post("/api/exchange", self._handle_exchange_set)
         r.add_get("/api/report/daily", self._handle_report_daily)
@@ -3751,6 +3753,57 @@ class MekkaDashboardServer:
 
         logger.info("Trading mode changed to '%s' via dashboard API", mode)
         return web.json_response({"mode": mode, "params": get_params()})
+
+    # ------------------------------------------------------------------
+    # Operation Mode — GET /api/opmode  POST /api/opmode
+    # Switch RAIZ manual/automatic (quem aprova trades E melhorias).
+    # ------------------------------------------------------------------
+
+    async def _handle_opmode_get(self, _: web.Request) -> web.Response:
+        """Estado atual do modo de operação + decisões derivadas."""
+        from src.config.operation_mode import snapshot
+        return web.json_response(snapshot())
+
+    async def _handle_opmode_set(self, request: web.Request) -> web.Response:
+        """
+        POST /api/opmode  body: {"mode": "manual" | "automatic"}
+
+        Troca o modo de operação imediatamente (próximo ciclo respeita).
+        'automatic' também aceita o alias 'auto'. Emite OPMODE_CHANGED no audit.
+        """
+        from src.config.operation_mode import (
+            VALID_OPERATION_MODES,
+            set_operation_mode,
+            snapshot,
+        )
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+
+        mode = str(body.get("mode", "")).lower()
+        if mode == "auto":
+            mode = "automatic"
+        if mode not in VALID_OPERATION_MODES:
+            return web.json_response(
+                {"error": f"unknown mode '{mode}'. Valid: {list(VALID_OPERATION_MODES)}"},
+                status=400,
+            )
+
+        set_operation_mode(mode)
+
+        try:
+            await MekkaRepository.log_event(
+                agent="Dashboard",
+                event="OPMODE_CHANGED",
+                payload={"mode": mode},
+                severity="INFO",
+            )
+        except Exception:
+            pass  # audit best-effort
+
+        logger.info("Operation mode changed to '%s' via dashboard API", mode)
+        return web.json_response(snapshot())
 
     # ------------------------------------------------------------------
     # Active Exchange — GET /api/exchange  POST /api/exchange

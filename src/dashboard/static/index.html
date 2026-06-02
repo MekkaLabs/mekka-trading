@@ -155,6 +155,14 @@
             <button id="sys-power-toggle" type="button" class="prefs-reset-btn sys-power-btn" disabled>—</button>
             <button id="sys-power-reboot" type="button" class="prefs-reset-btn sys-power-btn sys-power-reboot" disabled>⟳ Reboot</button>
           </div>
+          <!-- Modo de Operação (manual/automatic) — switch RAIZ de aprovação.
+               Estado de /api/opmode; troca via POST /api/opmode (próximo ciclo
+               respeita). manual = você aprova trades e melhorias; automatic =
+               o sistema aprova sozinho (gates de risco seguem ativos). -->
+          <div class="opmode-switch" id="opmode-switch" title="Modo de operação — quem aprova trades e melhorias">
+            <span id="opmode-pill" class="pill opmode-pill opmode-unknown">MODO ???</span>
+            <button id="opmode-toggle" type="button" class="prefs-reset-btn opmode-btn" disabled>—</button>
+          </div>
           <!-- Seletor de corretora ativa. Populado de /api/exchange; troca via
                POST /api/exchange (muta settings em runtime + persiste). -->
           <div class="exchange-switch" title="Corretora ativa — troca em runtime" style="display:inline-flex;align-items:center;gap:4px">

@@ -1532,6 +1532,23 @@ body.sidebar-collapsed {
 .sys-power-btn.sys-power-off {
   border-color: var(--bad-border); color: var(--bad);
 }
+
+/* Modo de Operação (manual/automatic) — switch raiz no topbar */
+.opmode-switch {
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.opmode-pill { gap: 6px; }
+.opmode-pill.opmode-manual {
+  background: rgba(56,139,253,0.15); color: #58a6ff; border-color: rgba(56,139,253,0.4);
+}
+.opmode-pill.opmode-automatic {
+  background: var(--warn-dim); color: var(--warn); border-color: var(--warn-border);
+}
+.opmode-pill.opmode-unknown {
+  background: rgba(74,85,104,0.15); color: var(--muted); border-color: var(--border-subtle);
+}
+.opmode-btn { white-space: nowrap; }
+.opmode-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .sys-power-reboot { color: var(--warn); }
 
 /* ============================================================
